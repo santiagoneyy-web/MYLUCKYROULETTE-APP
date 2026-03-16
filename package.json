@@ -4,7 +4,7 @@
   "main": "app.js",
   "scripts": {
     "start": "node start.js",
-    "build": "puppeteer browsers install chrome",
+    "build": "echo \"Browser installation handled by npm install\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "type": "commonjs",
