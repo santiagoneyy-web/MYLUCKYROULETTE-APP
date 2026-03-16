@@ -639,8 +639,8 @@ function renderTravelPanel(sig, currentSignals = null) {
 }
 
 // ── Main submit ───────────────────────────────────────────────
-async function submitNumber() {
-    const val = numInput.value.trim();
+async function submitNumber(nOverride = null, skipApi = false) {
+    const val = nOverride !== null ? String(nOverride) : numInput.value.trim();
     const n = parseInt(val, 10);
     
     if (isNaN(n) || n < 0 || n > 36) {
@@ -656,12 +656,14 @@ async function submitNumber() {
         return;
     }
 
-    try {
-        await apiPostSpin(currentTableId, n);
-    } catch(e) {
-        statusMsg.textContent = '⚠ Error al guardar en BD.';
-        statusMsg.className = 'status-msg status-error';
-        return;
+    if (!skipApi) {
+        try {
+            await apiPostSpin(currentTableId, n);
+        } catch(e) {
+            statusMsg.textContent = '⚠ Error al guardar en BD.';
+            statusMsg.className = 'status-msg status-error';
+            return;
+        }
     }
 
     numInput.value = '';
@@ -858,7 +860,7 @@ async function loadTableHistory(tableId) {
             statusMsg.className = 'status-msg status-info';
         }
         updateSpinCount();
-        startOcrPolling(tableId);
+        startAutoPolling(tableId);
     } catch(e) {}
 }
 
@@ -866,7 +868,7 @@ function updateSpinCount() {
     if (tableSelect.selectedOptions[0]) tableSpinCount.textContent = `(${history.length} registradas)`;
 }
 
-function startOcrPolling(tableId) {
+function startAutoPolling(tableId) {
     if (pollingTimer) clearInterval(pollingTimer);
     lastKnownSpinId = null;
     pollingTimer = setInterval(async () => {
@@ -878,12 +880,11 @@ function startOcrPolling(tableId) {
             if (latestId !== lastKnownSpinId) {
                 const newSpins = spins.filter(s => s.id > lastKnownSpinId);
                 lastKnownSpinId = latestId;
-                ocrBadge.style.display = 'inline-block';
+                const autoBadge = document.getElementById('ocr-badge'); // Reuse for now
+                if (autoBadge) autoBadge.style.display = 'inline-block';
                 for (const spin of newSpins) {
-                    if (spin.source !== 'manual') {
-                        numInput.value = spin.number; // trick it
-                        await submitNumber();         // simulate manual entry
-                    }
+                    // Critical: Just update UI, DON'T re-post to API
+                    await submitNumber(spin.number, true);
                 }
             }
         } catch {}
