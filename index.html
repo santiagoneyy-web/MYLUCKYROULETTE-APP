@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MYLUCKYROULETTE — Analizador de Estrategias</title>
+    <meta name="description" content="Analizador de estrategias para ruleta europea con Target Strategy, Dealer Signature y Travel Data." />
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="app-layout">
+
+    <!-- ══════════════ LEFT COLUMN ══════════════ -->
+    <aside class="left-col">
+
+        <!-- Wheel canvas -->
+        <div class="wheel-wrap">
+            <canvas id="wheel-canvas" width="220" height="220"></canvas>
+        </div>
+
+        <!-- History strip -->
+        <div id="history-strip" class="history-strip"></div>
+
+
+
+        <!-- Table Selector -->
+        <div class="glass" style="margin-bottom:12px; padding:10px 14px; border-radius:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+            <span style="color:var(--text-dim); font-size:0.72rem; letter-spacing:0.1em; text-transform:uppercase; font-family:var(--font-mono);">Mesa:</span>
+            <select id="table-select" style="background:rgba(255,255,255,0.05); border:1px solid var(--border-glow); border-radius:8px; color:#fff; font-family:var(--font-mono); font-size:0.82rem; padding:6px 10px; flex:1; min-width:180px;">
+                <option value="">Cargando mesas...</option>
+            </select>
+            <span id="table-spin-count" style="color:var(--text-dim); font-size:0.7rem;"></span>
+            <button id="add-table-btn" class="btn" style="background:rgba(74,124,255,0.12); color:var(--accent); border:1px solid rgba(74,124,255,0.3); font-size:0.7rem; padding:4px 10px; border-radius:6px;">+ Nueva</button>
+            <button id="clear-table-btn" class="btn" style="background:rgba(255,59,92,0.15); color:var(--red); border:1px solid rgba(255,59,92,0.35); font-size:0.7rem; padding:4px 10px; border-radius:6px;" title="Borrar sesión">🗑 Sesión</button>
+        </div>
+
+        <!-- Input row -->
+        <div class="input-row">
+            <input
+                id="num-input"
+                class="num-input"
+                type="number"
+                min="0"
+                max="36"
+                placeholder="0–36"
+                autocomplete="off"
+                aria-label="Número de ruleta"
+            />
+            <button id="submit-btn" class="btn-submit" aria-label="Ingresar">↵</button>
+            <button id="clear-btn" class="btn-clear" aria-label="Borrar todo">✕</button>
+        </div>
+
+        <span id="status-msg" class="status-msg status-info" role="status" aria-live="polite">
+            Ingresa los primeros 3 números.
+        </span>
+        <span id="ocr-badge" style="display:none; background:rgba(0,199,122,0.15); color:#00c77a; border-radius:4px; padding:2px 8px; font-size:0.7rem; margin-top:8px; display:inline-block; border:1px solid rgba(0,199,122,0.3);">🤖 OCR AUTO ACTIVO</span>
+
+    </aside>
+
+    <!-- ══════════════ RIGHT COLUMN ══════════════ -->
+    <main class="right-col">
+
+        <!-- Strategy Tabs -->
+        <div class="strat-tabs" id="strat-tabs" role="tablist"></div>
+
+
+        <!-- RECOMENDACIONES (Top 3 active) -->
+        <section class="panel" id="next-panel">
+            <div class="panel-title">⏭ RECOMENDACIONES</div>
+            <div id="next-content">
+                <p class="muted">Ingresa más números.</p>
+            </div>
+        </section>
+
+        <!-- TARGET ESTRATEGIA (All stacked) -->
+        <section class="panel" id="target-panel">
+            <div class="panel-title">🎯 TARGET ESTRATEGIA</div>
+            <div id="target-content">
+                <p class="muted">Ingresa al menos 3 números para analizar.</p>
+            </div>
+        </section>
+
+        <!-- TOP N° + TRAVEL DATA -->
+        <div class="bottom-grid">
+
+            <section class="panel" id="top-panel">
+                <div class="panel-title">⭐ PREDICCIONES TOP</div>
+                <div id="top-content">
+                    <p class="muted">Ingresa datos...</p>
+                </div>
+            </section>
+
+            <section class="panel" id="travel-panel">
+                <div class="panel-title">📊 TRAVEL DATA</div>
+                <div id="travel-content">
+                    <p class="muted">Ingresa al menos 2 números.</p>
+                </div>
+            </section>
+
+        </div>
+
+    </main>
+
+</div>
+
+<!-- Add table modal -->
+<div id="modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:1000; align-items:center; justify-content:center;">
+    <div class="glass" style="padding:24px; min-width:300px; max-width:380px; border-radius:12px; background:#070c2a; border:1px solid #4a7cff44;">
+        <h2 style="color:#f5c842; font-size:1rem; margin-bottom:16px;">Nueva Mesa</h2>
+        <label style="color:#5b6ea8; font-size:0.72rem;">Nombre *</label>
+        <input id="modal-name" class="num-input" type="text" placeholder="Ej: Betano Mesa 2" style="width:100%; margin-bottom:10px; text-align:left; font-size:1rem;" />
+        <label style="color:#5b6ea8; font-size:0.72rem;">Proveedor</label>
+        <input id="modal-provider" class="num-input" type="text" placeholder="Betano / Olimpo / Otro" style="width:100%; margin-bottom:10px; text-align:left; font-size:1rem;" />
+        <label style="color:#5b6ea8; font-size:0.72rem;">URL (opcional)</label>
+        <input id="modal-url" class="num-input" type="text" placeholder="https://..." style="width:100%; margin-bottom:16px; text-align:left; font-size:1rem;" />
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button id="modal-cancel" class="btn" style="background:rgba(255,59,92,0.15); color:#ff3b5c; border:1px solid rgba(255,59,92,0.35); padding:8px 16px; border-radius:6px;">Cancelar</button>
+            <button id="modal-save" class="btn btn-primary" style="background:linear-gradient(135deg,#4a7cff,#7c3bff); color:#fff; padding:8px 16px; border-radius:6px; border:none;">Guardar</button>
+        </div>
+    </div>
+</div>
+
+<script src="predictor.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
