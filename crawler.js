@@ -91,49 +91,67 @@ async function poll() {
         });
 
         const body = response.data;
-
-        // casino.org API returns a plain array directly: [{id, data:{result:{outcome:{number}}}, ...}]
-        let events = [];
-        if (Array.isArray(body)) {
-            events = body;
-        } else if (body && Array.isArray(body.content)) {
-            events = body.content;  // fallback if wrapped
-        }
+        let events = Array.isArray(body) ? body : (body?.content || []);
 
         if (!events.length) {
-            console.log(`⚠️ [T${TABLE_ID}] API returned 0 events. Will retry...`);
-            consecutiveErrors++;
+            console.log(`⚠️ [T${TABLE_ID}] API returned 0 events.`);
             setTimeout(poll, INTERVAL);
             return;
         }
 
         consecutiveErrors = 0;
 
-        // Most recent event is first (sorted by settledAt desc)
-        const latestEvent = events[0];
-        const eventId = latestEvent.id;
-
-        // PATH: data.result.outcome.number  (confirmed from live API)
-        const number = latestEvent?.data?.result?.outcome?.number;
-
-        if (number === undefined || number === null) {
-            const keys = JSON.stringify(Object.keys(latestEvent));
-            const dataKeys = latestEvent.data ? JSON.stringify(Object.keys(latestEvent.data)) : 'no data';
-            console.log(`⚠️ [T${TABLE_ID}] No number found. TopKeys:${keys} DataKeys:${dataKeys}`);
-            setTimeout(poll, INTERVAL);
-            return;
+        // 1. Filter only RESOLVED events
+        const resolvedEvents = events.filter(e => e.data && e.data.status === 'Resolved');
+        
+        // 2. Find events NEWER than our last known ID
+        // We look for the index of lastKnownEventId in the full resolved list
+        let newEvents = [];
+        if (!lastKnownEventId) {
+            // First run: just take the very latest one as seed
+            if (resolvedEvents.length > 0) {
+                lastKnownEventId = resolvedEvents[0].data.id || resolvedEvents[0].id;
+                console.log(`📡 [T${TABLE_ID}] Initialized with EventID: ${lastKnownEventId}`);
+            }
+        } else {
+            // Find where our last ID is. Since list is DESC (newest first), 
+            // everything BEFORE that index is "newer".
+            const lastIdx = resolvedEvents.findIndex(e => (e.data?.id || e.id) === lastKnownEventId);
+            
+            if (lastIdx === -1) {
+                // If last ID not found in the recent list (maybe we missed too many),
+                // just take the latest one to resync, or take all if list is small.
+                newEvents = [resolvedEvents[0]]; 
+            } else if (lastIdx > 0) {
+                // Slice all elements from 0 to lastIdx (exclusive)
+                newEvents = resolvedEvents.slice(0, lastIdx);
+            }
         }
 
-        // ── Deduplication by unique event ID ──────────────────
-        if (eventId === lastKnownEventId) {
-            console.log(`⏳ [T${TABLE_ID}] Same event (${eventId}), waiting for next spin... Last number: ${number}`);
-            setTimeout(poll, INTERVAL);
-            return;
-        }
+        // 3. Post new events in CHRONOLOGICAL order (oldest to newest)
+        // Since original list is newest first, we reverse it.
+        const toPost = newEvents.reverse();
 
-        // New event!
-        console.log(`✨ NEW SPIN [T${TABLE_ID}] EventId: ${eventId} → Number: ${number}`);
-        lastKnownEventId = eventId;
+        for (const ev of toPost) {
+            const evId = ev.data?.id || ev.id;
+            const num = ev.data?.result?.outcome?.number;
+            
+            if (num !== undefined && num !== null) {
+                console.log(`✨ NEW SPIN [T${TABLE_ID}] EventId: ${evId} → Number: ${num}`);
+                try {
+                    await axios.post(API_URL, {
+                        table_id: parseInt(TABLE_ID),
+                        number: parseInt(num),
+                        source: 'casino_api'
+                    }, { timeout: 10000 });
+                    console.log(`✅ [T${TABLE_ID}] Posted: ${num}`);
+                    lastKnownEventId = evId; // Update only after successful post
+                } catch (postErr) {
+                    console.error(`❌ [T${TABLE_ID}] API Post Error: ${postErr.message}`);
+                    break; // Stop and retry next poll if server is down
+                }
+            }
+        }
 
         // ── Post to our API ────────────────────────────────────
         try {

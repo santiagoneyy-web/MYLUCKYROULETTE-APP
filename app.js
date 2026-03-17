@@ -670,15 +670,16 @@ async function submitNumber(nOverride = null, skipApi = false) {
         let tpWin = false;
         const sName = s.name || '';
         
-        if (s.betZone && Array.isArray(s.betZone) && s.betZone.length > 0) {
-            // SIX STRATEGIE and agents that provide an explicit betZone (most precise)
-            tpWin = s.betZone.includes(n);
-        } else if (sName === 'FISICA STUDIO' || sName === 'SOPORTE PRO') {
-            // Physical agents use N9 (9 pocket radius around their target number)
-            tpWin = s.number !== null && wheelDistance(n, s.number) <= 9;
-        } else if (s.number !== null && s.number !== undefined) {
-            // Generic fallback: N9 radius
-            tpWin = wheelDistance(n, s.number) <= 9;
+        // Ensure we check the correct property for win detection
+        const betZone = s.betZone || [];
+        const targetNum = s.number;
+
+        if (betZone.length > 0) {
+            // SIX STRATEGIE or any agent with explicit zone
+            tpWin = betZone.includes(n);
+        } else if (targetNum !== null && targetNum !== undefined) {
+            // Physical agents or generic number targets use N9
+            tpWin = wheelDistance(n, targetNum) <= 9;
         }
         
         if (tpWin) {
@@ -691,8 +692,8 @@ async function submitNumber(nOverride = null, skipApi = false) {
         if (iaSignalsHistory[idx].length > 15) iaSignalsHistory[idx].shift();
 
         // ── Step B: Check classification for the GOLD badge (SMALL/BIG) ──
-        const isSmall = s.small !== null && wheelDistance(n, s.small) <= 4;
-        const isBig   = s.big   !== null && wheelDistance(n, s.big)   <= 4;
+        const isSmall = s.small !== null && s.small !== undefined && wheelDistance(n, s.small) <= 4;
+        const isBig   = s.big   !== null && s.big   !== undefined && wheelDistance(n, s.big)   <= 4;
         
         let hitType = null;
         if (isSmall) hitType = 'SMALL';
@@ -814,10 +815,31 @@ async function loadTableHistory(tableId) {
         const nums  = spins.map(s => s.number);
         statusMsg.textContent = `Cargando ${nums.length} tiradas...`;
         
-        // Replay history
+        // Replay history stats
+        statusMsg.textContent = `Analizando ${nums.length} tiradas...`;
+        
+        // Clean history array for re-simulation
+        const replayHistory = [];
+        let replaySignals = [null, null, null, null, null];
+        
         for (const n of nums) {
-            if (history.length >= 2) {
-                const prevSig = computeDealerSignature(history);
+            // A. Evaluamos señales del tiro anterior contra este numero
+            replaySignals.forEach((s, idx) => {
+                if (!s) return;
+                const bz = s.betZone || [];
+                const target = s.number;
+                let won = false;
+                if (bz.length > 0) won = bz.includes(n);
+                else if (target !== null && target !== undefined) won = wheelDistance(n, target) <= 9;
+                
+                if (won) { iaWins[idx]++; iaSignalsHistory[idx].push('win'); }
+                else { iaLosses[idx]++; iaSignalsHistory[idx].push('loss'); }
+                if (iaSignalsHistory[idx].length > 15) iaSignalsHistory[idx].shift();
+            });
+
+            // B. Actualizamos topHit (Polo check)
+            if (replayHistory.length >= 2) {
+                const prevSig = computeDealerSignature(replayHistory);
                 if (prevSig && prevSig.avgTravel !== null) {
                     const smallZone = [prevSig.casilla5, ...wheelNeighbors(prevSig.casilla5, 4)];
                     const bigZone = [prevSig.casilla14, ...wheelNeighbors(prevSig.casilla14, 4)];
@@ -827,11 +849,24 @@ async function loadTableHistory(tableId) {
                     if (topHitHistory.length > 12) topHitHistory.shift();
                 }
             }
-            history.push(n);
-            if (history.length >= 3) analyzeSpin(history, stats);
-            // Replay IA hits logic silently here for accuracy...
-            // (Omitting full IA replay to save performance on initial load, only core stats populated)
+
+            // C. Avanzamos historia y calculamos PROXIMAS señales
+            replayHistory.push(n);
+            if (replayHistory.length >= 3) {
+                const results = analyzeSpin(replayHistory, stats);
+                const prox = projectNextRound(replayHistory, stats);
+                const sig = computeDealerSignature(replayHistory);
+                const nextS = getIAMasterSignals(prox, sig, replayHistory) || [];
+                // Fill up to 5 agents
+                while (nextS.length < 5) nextS.push(null);
+                replaySignals = nextS;
+            }
         }
+
+        // Synchronize global states with replayed data
+        history.length = 0;
+        history.push(...replayHistory);
+        lastIaSignals = replaySignals;
 
         renderHistory();
         if (nums.length > 0) drawWheel(nums[nums.length-1]);
