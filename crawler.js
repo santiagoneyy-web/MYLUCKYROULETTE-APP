@@ -5,6 +5,8 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 puppeteer.use(StealthPlugin());
 
@@ -19,6 +21,25 @@ const TABLE_ID  = getArg('--table', '1');
 const TARGET_URL = getArg('--url', 'https://www.casino.org/casinoscores/es/immersive-roulette/');
 const API_URL    = getArg('--api', 'http://0.0.0.0:10000/api/spin');
 const INTERVAL   = parseInt(getArg('--interval', '15000'));
+
+// Custom Logger to save to separate folders per table
+const logDir = path.join(__dirname, 'logs', `table_${TABLE_ID}`);
+if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+const logFile = path.join(logDir, 'bot.log');
+
+const originalLog = console.log;
+console.log = function(...args) {
+    const msg = `[${new Date().toISOString()}] ` + args.join(' ');
+    originalLog(msg);
+    fs.appendFileSync(logFile, msg + '\n');
+};
+
+const originalError = console.error;
+console.error = function(...args) {
+    const msg = `[${new Date().toISOString()}] ERROR: ` + args.join(' ');
+    originalError(msg);
+    fs.appendFileSync(logFile, msg + '\n');
+};
 
 let lastKnownTimestamp = null;
 let lastKnownNumber = null;
