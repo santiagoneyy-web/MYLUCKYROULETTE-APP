@@ -16,7 +16,7 @@ let latestAgent5Top = null; // Stored from API calls
 let activeTab      = '-'; // active strategy tab key
 
 // ── API & Table State ─────────────────────────────────────────
-const API_BASE = 'http://localhost:3000/api';
+const API_BASE = '/api';
 let currentTableId = null;
 let pollingTimer   = null;
 let lastKnownSpinId = null;

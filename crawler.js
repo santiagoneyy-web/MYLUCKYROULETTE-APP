@@ -108,38 +108,36 @@ async function startScraper() {
             try {
                 if (page.isClosed()) return;
                 
-                // Extract spins from the DOM
+                // Extract spins from the DOM based on the site structure
                 const data = await page.evaluate(() => {
-                    const rowElements = Array.from(document.querySelectorAll('tr, .row, .spin-item, [class*="history"]'));
                     let extracted = [];
-                    
-                    for (let el of rowElements) {
-                        const text = el.innerText.trim().toLowerCase();
-                        
-                        // Look for a number between 0 and 36
-                        const numMatch = text.match(/\b([0-9]|[12][0-9]|3[0-6])\b/);
-                        if (!numMatch) continue;
-                        
-                        const number = parseInt(numMatch[1]);
-                        
-                        // Look for direction (CW=Clockwise/Derecha, CCW=CounterClockwise/Izquierda)
-                        let direction = null;
-                        if (text.includes('cw') || text.includes('right') || text.includes('der') || text.includes('clock')) {
-                            direction = 'CW';
-                        } else if (text.includes('ccw') || text.includes('left') || text.includes('izq') || text.includes('counter')) {
-                            direction = 'CCW';
-                        }
 
-                        // Try to find a time/timestamp like "14:23" or "2 mins ago"
-                        let timestamp = new Date().toISOString(); 
-                        const timeMatch = text.match(/\b\d{1,2}:\d{2}(:\d{2})?\b/);
-                        if (timeMatch) {
-                            timestamp = timeMatch[0]; // just grab the string for now to use as unique id
+                    // 1. Try GamblingCounting format
+                    const gcNumbers = document.querySelectorAll('.roulette-number');
+                    if (gcNumbers && gcNumbers.length > 0) {
+                        for (let el of Array.from(gcNumbers).slice(0, 5)) { // Only need recent ones
+                            const text = el.innerText.trim();
+                            const numMatch = text.match(/\b([0-9]|[12][0-9]|3[0-6])\b/);
+                            if (numMatch) {
+                                extracted.push({ number: parseInt(numMatch[1]), direction: null, timestamp_str: new Date().toISOString() });
+                            }
                         }
-
-                        extracted.push({ number, direction, timestamp_str: timestamp });
+                        if (extracted.length > 0) return extracted;
                     }
-                    
+
+                    // 2. Try CasinoScores (casino.org) format
+                    const csNumbers = document.querySelectorAll('[data-slot="badge"]');
+                    if (csNumbers && csNumbers.length > 0) {
+                        for (let el of Array.from(csNumbers).slice(0, 5)) {
+                            const text = el.innerText.trim();
+                            const numMatch = text.match(/\b([0-9]|[12][0-9]|3[0-6])\b/);
+                            if (numMatch) {
+                                extracted.push({ number: parseInt(numMatch[1]), direction: null, timestamp_str: new Date().toISOString() });
+                            }
+                        }
+                        if (extracted.length > 0) return extracted;
+                    }
+
                     return extracted;
                 });
 
