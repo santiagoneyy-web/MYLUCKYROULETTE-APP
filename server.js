@@ -302,7 +302,7 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
     if (db.getUseMongo()) {
         try {
             const Table = require('./models/Table');
-            await Table.updateOne({ id: 1 }, { $set: { name: 'Auto Speed Roulette', url: 'https://gamblingcounting.com/evolution-speed-roulette' } });
+            await Table.updateOne({ id: 1 }, { $set: { name: 'Auto Roulette', url: 'https://www.casino.org/casinoscores/es/auto-roulette/' } });
             await Table.updateOne({ id: 2 }, { $set: { name: 'Inmersive Roulette', url: 'https://www.casino.org/casinoscores/es/immersive-roulette/' } });
             console.log('✅ [BOOT] Table names synchronized with focused config.');
         } catch (e) {

@@ -1,14 +1,11 @@
 /**
- * crawler.js — Public Source Data Extractor
- * Uses Puppeteer to fetch roulette history from statistics sites.
+ * crawler.js — Casino.org Internal API Fetcher
+ * Uses casino.org's own JSON API endpoints instead of DOM scraping.
+ * This eliminates: ad issues, duplicate numbers, selenium detection, iframe confusion.
  */
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-
-puppeteer.use(StealthPlugin());
 
 const args = process.argv.slice(2);
 const getArg = (name, def) => {
@@ -16,230 +13,147 @@ const getArg = (name, def) => {
     return (idx > -1 && args[idx+1]) ? args[idx+1] : def;
 };
 
-// Defaults to Immersive
-const TABLE_ID  = getArg('--table', '1');
+const TABLE_ID   = getArg('--table', '1');
 const TARGET_URL = getArg('--url', 'https://www.casino.org/casinoscores/es/immersive-roulette/');
 const API_URL    = getArg('--api', 'http://0.0.0.0:10000/api/spin');
-const INTERVAL   = parseInt(getArg('--interval', '15000'));
+const INTERVAL   = parseInt(getArg('--interval', '12000'));
 
-// Custom Logger to save to separate folders per table
+// ── Casino.org API endpoint mapping (based on page URL) ───────
+function getCasinoApiUrl(pageUrl) {
+    const u = pageUrl.toLowerCase();
+    const BASE = 'https://api-cs.casino.org/svc-evolution-game-events/api';
+    if (u.includes('auto-roulette'))       return `${BASE}/autoroulette?page=0&size=20&sort=data.settledAt,desc&duration=6`;
+    if (u.includes('immersive-roulette'))  return `${BASE}/immersiveroulette?page=0&size=20&sort=data.settledAt,desc&duration=6`;
+    if (u.includes('speed-roulette'))      return `${BASE}/speedroulette?page=0&size=20&sort=data.settledAt,desc&duration=6`;
+    if (u.includes('lightning-roulette'))  return `${BASE}/lightningroulette?page=0&size=20&sort=data.settledAt,desc&duration=6`;
+    if (u.includes('roulette-1'))          return `${BASE}/roulette1?page=0&size=20&sort=data.settledAt,desc&duration=6`;
+    // Generic fallback: try to extract game slug from URL
+    const match = pageUrl.match(/casinoscores\/es\/([^\/]+)/);
+    if (match) {
+        const slug = match[1].replace(/-/g, '');
+        return `${BASE}/${slug}?page=0&size=20&sort=data.settledAt,desc&duration=6`;
+    }
+    return null;
+}
+
+// ── Logging ───────────────────────────────────────────────────
 const logDir = path.join(__dirname, 'logs', `table_${TABLE_ID}`);
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
 const logFile = path.join(logDir, 'bot.log');
 
 const originalLog = console.log;
-console.log = function(...args) {
-    const msg = `[${new Date().toISOString()}] ` + args.join(' ');
+console.log = function(...a) {
+    const msg = `[${new Date().toISOString()}] ` + a.join(' ');
     originalLog(msg);
     fs.appendFileSync(logFile, msg + '\n');
 };
-
 const originalError = console.error;
-console.error = function(...args) {
-    const msg = `[${new Date().toISOString()}] ERROR: ` + args.join(' ');
+console.error = function(...a) {
+    const msg = `[${new Date().toISOString()}] ERROR: ` + a.join(' ');
     originalError(msg);
     fs.appendFileSync(logFile, msg + '\n');
 };
 
-let lastKnownTimestamp = null;
-let lastKnownNumber = null;
+// ── State ─────────────────────────────────────────────────────
+let lastKnownEventId = null;
+let consecutiveErrors = 0;
 
-const getExecutablePath = () => {
-    if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
-    return null;
-};
+const CASINO_API_URL = getCasinoApiUrl(TARGET_URL);
 
 async function startScraper() {
     const delay = parseInt(getArg('--delay', '5000'));
     console.log(`⏳ Waiting ${delay/1000}s for API server to stabilize...`);
     await new Promise(r => setTimeout(r, delay));
 
-    console.log(`\n🤖 Starting Public Scraper for Table ${TABLE_ID}...`);
-    console.log(`🔗 Target: ${TARGET_URL}`);
-    
-    const exePath = getExecutablePath();
-    if (exePath) console.log(`🚀 Using Browser at: ${exePath}`);
+    console.log(`\n🤖 Starting API Scraper for Table ${TABLE_ID}`);
+    console.log(`🔗 Page: ${TARGET_URL}`);
+    console.log(`📡 Casino API: ${CASINO_API_URL}`);
 
-    let browser;
-    try {
-        // Use internally detected path if env not set
-        const finalExePath = exePath || puppeteer.executablePath();
-        console.log(`🎬 Launching browser from: ${finalExePath}`);
-
-        browser = await puppeteer.launch({
-            headless: true, // Simplified for modern Puppeteer
-            executablePath: finalExePath,
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-extensions'
-            ]
-        });
-    } catch (e) {
-        console.error("❌ Failed to launch browser:", e.message || e);
+    if (!CASINO_API_URL) {
+        console.error('❌ Could not determine casino.org API URL from page URL. Exiting.');
         return;
     }
 
-    const page = await browser.newPage();
-    
-    // Block images, css, and fonts to save memory and bypass ad-heavy sites
-    await page.setRequestInterception(true);
-    
-    // Aggressive Ad-Blocking Domains
-    const blockedDomains = [
-        'googlesyndication.com', 'adservice.google.com', 'google-analytics.com',
-        'doubleclick.net', 'adnxs.com', 'taboola.com', 'outbrain.com',
-        'amazon-adsystem.com', 'facebook.net', 'fontawesome.com', 'gravatar.com',
-        'hotjar.com', 'quantserve.com', 'scorecardresearch.com', 'pubmatic.com',
-        'rubiconproject.com', 'criteo.com', 'openx.net', 'adroll.com'
-    ];
+    poll();
+}
 
-    page.on('request', (req) => {
-        const url = req.url().toLowerCase();
-        const type = req.resourceType();
-        
-        const isAd = blockedDomains.some(d => url.includes(d));
-        const isMedia = ['image', 'stylesheet', 'font', 'media', 'webmanifest'].includes(type);
-        
-        if (isAd || isMedia || url.includes('ads') || url.includes('tracking') || url.includes('pixel')) {
-            req.abort();
-        } else {
-            req.continue();
-        }
-    });
-
+async function poll() {
     try {
-        console.log("⏳ Navigating to stats page...");
-        await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
-        await new Promise(r => setTimeout(r, 5000)); // extra wait for JS-rendered content
-        console.log("✅ Page loaded. Beginning extraction loop...");
-
-        let errorCount = 0;
-        let lastHistoryStr = ''; // closure variable — avoids the 'this' scope bug
-        
-        async function poll() {
-            try {
-                if (page.isClosed()) return;
-                
-                // --- EXTRACTION LOGIC (Search all frames) ---
-                let data = [];
-                const frames = page.frames();
-
-                for (const frame of frames) {
-                    try {
-                        const frameData = await frame.evaluate(() => {
-                            let extracted = [];
-                            // Priority selectors: gamblingcounting.com specific first, then generic
-                            const selectors = [
-                                '.roulette-tracker__number',
-                                '.number-tracker .number',
-                                '.tracker-numbers .num',
-                                '.roulette-results .result',
-                                '.game-results__item',
-                                '.recent-results .number',
-                                '.roulette-number', '.number-box',
-                                '.last-numbers .number',
-                                '[data-slot="badge"]', '.roulette-history-item',
-                                '.history-item', '.stats-number',
-                                '.ball-number', '.last-spin'
-                            ];
-                            
-                            let elements = [];
-                            for (const sel of selectors) {
-                                try {
-                                    const found = document.querySelectorAll(sel);
-                                    if (found && found.length > 0) {
-                                        elements = Array.from(found);
-                                        break; 
-                                    }
-                                } catch(e) {}
-                            }
-
-                            // Fallback: scan ALL elements for standalone numbers 0-36
-                            if (elements.length === 0) {
-                                const allEls = document.querySelectorAll('td, li, span, div');
-                                elements = Array.from(allEls).filter(el => {
-                                    const t = (el.innerText || el.textContent || '').trim();
-                                    return /^(3[0-6]|[12][0-9]|[0-9])$/.test(t) && !el.querySelector('*');
-                                }).slice(0, 20);
-                            }
-
-                            for (let el of elements.slice(0, 20)) {
-                                const text = (el.innerText || el.textContent || '').trim();
-                                const numMatch = text.match(/^(3[0-6]|[12][0-9]|[0-9])$/);
-                                if (numMatch) extracted.push(parseInt(numMatch[1]));
-                            }
-                            return extracted;
-                        });
-
-                        if (frameData && frameData.length >= 3) {
-                            data = frameData;
-                            break; 
-                        }
-                    } catch (frameErr) {}
-                }
-
-                if (data && data.length > 0) {
-                    errorCount = 0;
-                    const latestNumber = data[0];
-                    const historyStr = data.slice(0, 5).join(',');
-
-                    if (historyStr !== lastHistoryStr) {
-                        console.log(`✨ NEW DATA [Table ${TABLE_ID}] -> ${historyStr}`);
-                        
-                        if (latestNumber !== lastKnownNumber || historyStr !== lastHistoryStr) {
-                             console.log(`🚀 POSTING: ${latestNumber}`);
-                             try {
-                                 await axios.post(API_URL, {
-                                    table_id: parseInt(TABLE_ID),
-                                    number: latestNumber,
-                                    source: 'public_scraper'
-                                 });
-                                 lastKnownNumber = latestNumber;
-                             } catch (postErr) {
-                                 console.error("❌ API Post Error:", postErr.message);
-                             }
-                        }
-                        lastHistoryStr = historyStr;
-                    } else {
-                        console.log(`⏳ [Table ${TABLE_ID}] Same data, waiting for next spin...`);
-                    }
-                } else {
-                    errorCount++;
-                    console.log(`⚠️ [Table ${TABLE_ID}] No numbers found (attempt ${errorCount})`);
-                    if (errorCount > 6) {
-                        console.log("🔄 Reloading page...");
-                        await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                        await new Promise(r => setTimeout(r, 5000));
-                        errorCount = 0;
-                    }
-                }
-            } catch (e) {
-                console.error("❌ Poll Error:", e.message);
-                if (e.message.includes('detached') || e.message.includes('Protocol') || e.message.includes('Target closed')) {
-                    console.log("🔄 Critical error — reloading...");
-                    try {
-                        await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                        await new Promise(r => setTimeout(r, 4000));
-                        errorCount = 0;
-                    } catch (navErr) { console.error("❌ Reload failed:", navErr.message); }
-                }
+        // ── Fetch from casino.org API ──────────────────────────
+        const response = await axios.get(CASINO_API_URL, {
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'application/json',
+                'Referer': TARGET_URL,
+                'Origin': 'https://www.casino.org'
             }
-            setTimeout(poll, INTERVAL);
+        });
+
+        const body = response.data;
+        // The API returns: { content: [ { id, data: { outcome: { number }, settledAt } }, ... ] }
+        let events = [];
+        if (body && Array.isArray(body.content)) {
+            events = body.content;
+        } else if (Array.isArray(body)) {
+            events = body;
         }
 
-        poll();
+        if (!events.length) {
+            console.log(`⚠️ [T${TABLE_ID}] API returned 0 events. Will retry...`);
+            consecutiveErrors++;
+            setTimeout(poll, INTERVAL);
+            return;
+        }
 
-    } catch (err) {
-        console.error("💥 Fatal Bot Error:", err.message);
-        if (browser) await browser.close();
-        setTimeout(startScraper, 30000);
+        consecutiveErrors = 0;
+
+        // Most recent event is first (sorted by settledAt desc)
+        const latestEvent = events[0];
+        const eventId = latestEvent.id || latestEvent.data?.id;
+        const number = latestEvent.data?.outcome?.number ?? latestEvent.data?.number ?? latestEvent.outcome?.number;
+
+        if (number === undefined || number === null) {
+            console.log(`⚠️ [T${TABLE_ID}] Could not parse number from event. Keys: ${JSON.stringify(Object.keys(latestEvent))}`);
+            setTimeout(poll, INTERVAL);
+            return;
+        }
+
+        // ── Deduplication by unique event ID ──────────────────
+        if (eventId === lastKnownEventId) {
+            console.log(`⏳ [T${TABLE_ID}] Same event (${eventId}), waiting for next spin... Last number: ${number}`);
+            setTimeout(poll, INTERVAL);
+            return;
+        }
+
+        // New event!
+        console.log(`✨ NEW SPIN [T${TABLE_ID}] EventId: ${eventId} → Number: ${number}`);
+        lastKnownEventId = eventId;
+
+        // ── Post to our API ────────────────────────────────────
+        try {
+            await axios.post(API_URL, {
+                table_id: parseInt(TABLE_ID),
+                number: parseInt(number),
+                source: 'casino_api'
+            }, { timeout: 10000 });
+            console.log(`✅ [T${TABLE_ID}] Posted: ${number}`);
+        } catch (postErr) {
+            console.error(`❌ [T${TABLE_ID}] API Post Error: ${postErr.message}`);
+        }
+
+    } catch (fetchErr) {
+        consecutiveErrors++;
+        console.error(`❌ [T${TABLE_ID}] Casino API Error (${consecutiveErrors}): ${fetchErr.message}`);
+        // Back off on repeated errors
+        if (consecutiveErrors > 5) {
+            console.log(`🔄 [T${TABLE_ID}] Multiple errors, extending retry interval...`);
+            setTimeout(poll, INTERVAL * 3);
+            return;
+        }
     }
+
+    setTimeout(poll, INTERVAL);
 }
 
 startScraper();
