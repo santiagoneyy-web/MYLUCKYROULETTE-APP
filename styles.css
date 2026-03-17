@@ -106,10 +106,12 @@ body::after {
 
 .history-strip {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;        /* Single row — no wrapping */
+    overflow-x: hidden;       /* Hide if too many (JS limits to 15) */
     gap: 4px;
     width: 100%;
     min-height: 34px;
+    align-items: center;
 }
 
 .hist-ball {
@@ -621,7 +623,7 @@ body::after {
 
 /* ── TRAVEL DATA persistent list (sliding) ───────────────────── */
 .travel-scroll-container {
-    max-height: 220px;
+    max-height: 400px;   /* Accommodates up to 100 rows */
     overflow-y: auto;
     margin-top: 8px;
     scrollbar-width: thin;

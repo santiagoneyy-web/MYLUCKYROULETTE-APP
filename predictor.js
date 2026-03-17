@@ -396,7 +396,7 @@ function computeDealerSignature(history) {
     const smallNum = target5;
     const bigNum   = target14;
 
-    // ── Recommended Play (Oportunidad por Fase) ─────────────────────────
+    // ── Recommended Play — ANÁLISIS PROFUNDO BIG/SMALL ────────────────────
     const phases = travelHistory.map(t => Math.abs(t) <= 9 ? 'S' : 'B');
     const phaseStreaks = getPhaseStreaks(phases);
     
@@ -405,30 +405,77 @@ function computeDealerSignature(history) {
     let energyAlternating = false;
     let phaseStateText = 'MIDIENDO...';
 
-    if (phaseStreaks.length >= 2) {
+    if (phases.length >= 2) {
         const lastPhase = phases[phases.length - 1];
         
-        const recentPhases = phases.slice(-6);
-        let sScore = recentPhases.filter(p => p === 'S').length;
-        let bScore = recentPhases.filter(p => p === 'B').length;
+        // ── Factor 1: Recent momentum (last 6 plays, weighted more recent) ──
+        const recent6 = phases.slice(-6);
+        let sScore = 0, bScore = 0;
+        recent6.forEach((p, i) => {
+            const weight = i + 1; // More recent = higher weight
+            if (p === 'S') sScore += weight;
+            else bScore += weight;
+        });
         let dominant = sScore > bScore ? 'S' : (bScore > sScore ? 'B' : null);
 
+        // ── Factor 2: Phase streak acceleration/deceleration ──
         const allS = phaseStreaks.filter(x => x.phase === 'S').map(x => x.count);
         const allB = phaseStreaks.filter(x => x.phase === 'B').map(x => x.count);
+        const lastSStreak = allS.length > 0 ? allS[allS.length - 1] : 0;
+        const prevSStreak = allS.length > 1 ? allS[allS.length - 2] : 0;
+        const lastBStreak = allB.length > 0 ? allB[allB.length - 1] : 0;
+        const prevBStreak = allB.length > 1 ? allB[allB.length - 2] : 0;
         
-        // Un patrón se debilita cuando su streak actual fue cortado (cayó algo distinto) 
-        // y ese ultimó streak completado es menor al anterior de su propio bando.
-        const isS_Weakening = allS.length >= 2 && allS[allS.length - 1] < allS[allS.length - 2] && lastPhase !== 'S';
-        const isB_Weakening = allB.length >= 2 && allB[allB.length - 1] < allB[allB.length - 2] && lastPhase !== 'B';
-        
-        if (dominant === 'S' && isS_Weakening) {
-            recommendedPlay = 'BIG'; // S is weakening, flip B
+        // Weakening: streak is completed (different last phase) AND smaller than last
+        const isS_Weakening = allS.length >= 2 && lastSStreak < prevSStreak && lastPhase !== 'S';
+        const isB_Weakening = allB.length >= 2 && lastBStreak < prevBStreak && lastPhase !== 'B';
+        // Strengthening: current streak is building and larger than previous
+        const isS_Strengthening = lastPhase === 'S' && lastSStreak > prevSStreak && lastSStreak >= 2;
+        const isB_Strengthening = lastPhase === 'B' && lastBStreak > prevBStreak && lastBStreak >= 2;
+
+        // ── Factor 3: Recent 3-play mini-pattern (last hit momentum)
+        const last3 = phases.slice(-3);
+        const last3S = last3.filter(p => p === 'S').length;
+        const last3B = last3.filter(p => p === 'S').length; // count SMALL in last3
+        const recentMini = last3.length >= 3 ? (last3[2] === last3[1] && last3[1] === last3[0] ? lastPhase : null) : null;
+
+        // ── Factor 4: Ruptura detection: SSSSB or BBBBS ──
+        let isRupturaS = false, isRupturaB = false;
+        if (phases.length >= 4) {
+            const recentP = phases.slice(-5);
+            const smallStreak = recentP.slice(0, -1).filter(p => p === 'S').length;
+            const bigStreak = recentP.slice(0, -1).filter(p => p === 'B').length;
+            if (smallStreak >= 3 && recentP[recentP.length - 1] === 'B') isRupturaS = true;
+            if (bigStreak >= 3 && recentP[recentP.length - 1] === 'S') isRupturaB = true;
+        }
+
+        // ── Decision logic ──
+        if (isRupturaS) {
+            // SMALL zona quebrada → jugar BIG
+            recommendedPlay = 'BIG';
             recNumber = target14;
-            phaseStateText = 'SMALL DEBILITADO -> BIG';
-        } else if (dominant === 'B' && isB_Weakening) {
-            recommendedPlay = 'SMALL'; // B is weakening, flip S
+            phaseStateText = 'RUPTURA SMALL → JUGAR BIG';
+        } else if (isRupturaB) {
+            // BIG zona quebrada → jugar SMALL
+            recommendedPlay = 'SMALL';
             recNumber = target5;
-            phaseStateText = 'BIG DEBILITADO -> SMALL';
+            phaseStateText = 'RUPTURA BIG → JUGAR SMALL';
+        } else if (dominant === 'S' && isS_Weakening) {
+            recommendedPlay = 'BIG';
+            recNumber = target14;
+            phaseStateText = 'SMALL DEBILITADO → BIG';
+        } else if (dominant === 'B' && isB_Weakening) {
+            recommendedPlay = 'SMALL';
+            recNumber = target5;
+            phaseStateText = 'BIG DEBILITADO → SMALL';
+        } else if (isS_Strengthening) {
+            recommendedPlay = 'SMALL';
+            recNumber = target5;
+            phaseStateText = 'SMALL ACELERANDO';
+        } else if (isB_Strengthening) {
+            recommendedPlay = 'BIG';
+            recNumber = target14;
+            phaseStateText = 'BIG ACELERANDO';
         } else if (dominant === 'S') {
             recommendedPlay = 'SMALL';
             recNumber = target5;
@@ -443,7 +490,7 @@ function computeDealerSignature(history) {
             phaseStateText = 'ZONAS NIVELADAS';
         }
 
-        // Intercalation Override (ZigZag)
+        // ── Intercalation Override (ZigZag — last 4 alternate perfectly) ──
         if (phases.length >= 4) {
             const recent4 = phases.slice(-4);
             let altern = true;
@@ -452,19 +499,22 @@ function computeDealerSignature(history) {
             }
             if (altern) {
                 energyAlternating = true;
-                recommendedPlay = 'HIBRIDO'; // Neutralizamos el ataque
-                recNumber = target10;
-                phaseStateText = 'ZIG ZAG -> MODO PAUSA';
+                // Predict the opposite of the last phase
+                recommendedPlay = lastPhase === 'S' ? 'BIG' : 'SMALL';
+                recNumber = recommendedPlay === 'SMALL' ? target5 : target14;
+                phaseStateText = `ZIG-ZAG → ANTICIPA ${recommendedPlay}`;
             }
         }
-    } else if (travelHistory.length >= 1) {
+    } else if (phases.length >= 1) {
         recommendedPlay = phases[phases.length - 1] === 'S' ? 'SMALL' : 'BIG';
         recNumber = recommendedPlay === 'SMALL' ? target5 : target14;
+        phaseStateText = recommendedPlay === 'SMALL' ? 'PRIMERA LECTURA: SMALL' : 'PRIMERA LECTURA: BIG';
     } else {
         recommendedPlay = 'HIBRIDO';
         recNumber = target10;
         phaseStateText = 'Midiendo...';
     }
+
 
     // ── Last Hit Zone classification ─────────────────────────────
     let lastHitZone = null;
@@ -698,24 +748,26 @@ function getIAMasterSignals(prox, sig, history) {
 }
 
 function getBestMathematicalStrategy(prox) {
-    let best = prox[0];
+    if (!prox || !prox.length) {
+        return { strategy: '-', tp: 0, cor: [0], betZone: [0], rule: 'STOP', momentum: 0, streakWin: 0, streakLoss: 0 };
+    }
+    
+    let best = { ...prox[0], momentum: 0 };
     let maxMomentum = -Infinity;
     
     for (const p of prox) {
         let momentum = 0;
         const pat = p.recentPattern || "";
-        const len = pat.length;
         
         const winStreaks = pat.split('L').filter(s => s.length > 0).map(s => s.length);
         
-        // SIX STRATEGIE: Analyze Weakening Pattern (Drop in momentum size)
         if (winStreaks.length >= 2) {
             const lastW = winStreaks[winStreaks.length - 1];
             const prevW = winStreaks[winStreaks.length - 2];
             if (lastW < prevW && !pat.endsWith('W'.repeat(lastW + 1))) {
-                momentum -= 4; // Harsh penalty: Pattern is dying
+                momentum -= 4;
             }
-            if (lastW > prevW) momentum += 3; // Strengthening
+            if (lastW > prevW) momentum += 3;
         }
         
         if (p.streakWin >= 2) momentum += 3;
@@ -724,7 +776,6 @@ function getBestMathematicalStrategy(prox) {
         if (p.streakLoss >= 2) momentum -= 4;
         if (pat.endsWith('LL')) momentum -= 2;
         
-        // Target exact Guide Pattern: 'WWLW' (Hot Table - single resistant loss)
         if (pat.endsWith('WLW') || pat.endsWith('WWLW') || pat.endsWith('WWWLW')) momentum += 4;
         
         if (momentum > maxMomentum) {
@@ -733,7 +784,6 @@ function getBestMathematicalStrategy(prox) {
         }
     }
     
-    // Si la lectura determina que la racha del patrón simplemente colapsó y no hay opciones viables
     if (maxMomentum < -1) {
         best.rule = 'PAUSA (DEBILITAMIENTO)';
         best.confidence = "15%";
@@ -743,4 +793,15 @@ function getBestMathematicalStrategy(prox) {
     return best;
 }
 
-
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        STRATEGIES,
+        analyzeSpin,
+        pickRecommendation,
+        pickRecommendationTop2,
+        projectNextRound,
+        computeDealerSignature,
+        getIAMasterSignals,
+        getBestMathematicalStrategy
+    };
+}

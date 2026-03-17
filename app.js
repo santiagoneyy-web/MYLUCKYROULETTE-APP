@@ -5,13 +5,14 @@
 const history      = [];
 const stats        = {};
 const topHitHistory = []; // 'over' | 'under' | 'miss'
-// State for 4 IA Signals
-const iaSignalsHistory = [ [], [], [], [] ]; 
-const lastIaHits = [null, null, null, null];
-const iaWins = [0, 0, 0, 0];
-const iaLosses = [0, 0, 0, 0];
-let lastIaSignals = [null, null, null, null]; 
-let activeIaTab    = 0; // index of active IA signal (0-3)
+// State for 5 IA Signals (Agent 1-4 + Agent 5)
+const iaSignalsHistory = [ [], [], [], [], [] ]; 
+const lastIaHits = [null, null, null, null, null];
+const iaWins = [0, 0, 0, 0, 0];
+const iaLosses = [0, 0, 0, 0, 0];
+let lastIaSignals = [null, null, null, null, null]; 
+let activeIaTab    = 0; // index of active IA signal (0-4)
+let latestAgent5Top = null; // Stored from API calls
 let activeTab      = '-'; // active strategy tab key
 
 // ── API & Table State ─────────────────────────────────────────
@@ -58,6 +59,7 @@ async function apiAddTable(name, provider, url) { const r = await fetch(`${API_B
 async function apiFetchHistory(tableId) { const r = await fetch(`${API_BASE}/history/${tableId}`); return r.json(); }
 async function apiPostSpin(tableId, number) { const r = await fetch(`${API_BASE}/spin`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_id: tableId, number, source: 'manual' }) }); return r.json(); }
 async function apiClearHistory(tableId) { const r = await fetch(`${API_BASE}/history/${tableId}`, { method: 'DELETE' }); return r.json(); }
+async function apiFetchPredict(tableId) { const r = await fetch(`${API_BASE}/predict/${tableId}`); return r.json(); }
 
 // ── Number colors ─────────────────────────────────────────────
 const RED_NUMS   = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
@@ -152,7 +154,8 @@ function drawWheel(highlightNum = null) {
 // ── History strip ─────────────────────────────────────────────
 function renderHistory() {
     historyEl.innerHTML = '';
-    history.slice(-18).forEach((n, i, arr) => {
+    // Show only last 15 balls to prevent overflow
+    history.slice(-15).forEach((n, i, arr) => {
         const ball = document.createElement('div');
         ball.className = `hist-ball hist-${numColor(n)}`;
         ball.textContent = n;
@@ -267,213 +270,228 @@ function renderTargetPanel(results, real) {
 
 // ── IA AGENTS (3-SLOTS) panel ───────────────────────────────
 function renderSignalsPanel(signals, sig, real) {
-    if (!sig || sig.avgTravel === null || real === undefined) {
-        topPanel.innerHTML = '<p class="muted">Ingresa datos...</p>';
-        return;
-    }
+    try {
+        if (!sig || sig.avgTravel === null || real === undefined) {
+            topPanel.innerHTML = '<p class="muted">Ingresa datos...</p>';
+            return;
+        }
 
-    if (!signals || signals.length < 2) return;
+        if (!signals || !signals.length) {
+            topPanel.innerHTML = '<p class="muted">Esperando señales...</p>';
+            return;
+        }
+        // Make sure activeIaTab is within bounds
+        if (activeIaTab >= signals.length) activeIaTab = 0;
 
-    // IA Tab Strip
-    const tabButtons = signals.map((s, idx) => {
-        const isActive = idx === activeIaTab;
-        return `
-            <button class="ia-tab ${isActive ? 'active' : ''}" onclick="setActiveIaTab(${idx})">
-                ${s.name.split(' ')[0]}
-            </button>
-        `;
-    }).join('');
+        // Helper: Build Travel Recommendation HTML
+        const getTravelRec = () => {
+            const isStable = sig.directionState === 'stable';
+            const playIsClear = sig.recommendedPlay === 'SMALL' || sig.recommendedPlay === 'BIG';
+            if (!isStable || !playIsClear) return '';
 
-    const s = signals[activeIaTab];
-    const isWin = s.streakWin > 0;
-    
-    // Direction label: CW (Der ↻), CCW (Izq ↺)
-    const dirTxt = sig.directionState === 'zigzag' ? 'ZIG-ZAG ⚡' :
-                   (sig.directionState === 'stable' ? (sig.currentTrendDir >= 0 ? 'Der. ↻' : 'Izq. ↺') : 'Midiendo...');
-    
-    const dots = iaSignalsHistory[activeIaTab].slice(-10).map(h => {
-        const hIsWin = h === 'win';
-        const cls = hIsWin ? 'm-hist-w' : 'm-hist-l';
-        return `<span class="m-hist-badge ${cls}">${hIsWin ? 'W' : 'L'}</span>`;
-    }).join('');
+            const isSmall = sig.recommendedPlay === 'SMALL';
+            const lanzaTarget = isSmall ? sig.casilla5 : sig.casilla14;
+            const recClass = isSmall ? 'rec-small' : 'rec-big';
+            const recRuleText = isSmall ? 'SMALL' : 'BIG';
+            const casillaLabel = isSmall ? 'CASILLA 5' : 'CASILLA 14';
 
-    let content = '';
-    const isPausa = s.rule === 'STOP' || s.rule.includes('PAUSA') || s.confidence === '0%';
-    const displayDirTxt = isPausa ? 'CHARGING' : dirTxt;
+            const cat = isSmall ? 'N4_S' : 'N4_B';
+            const w = (auditStats[cat] && auditStats[cat].w) || 0;
+            const l = (auditStats[cat] && auditStats[cat].l) || 0;
+            const wlHTML = `<span style="font-size:0.65rem; color:var(--text-dim); margin-left:auto;">W:${w} L:${l}</span>`;
 
-    // Zone Badge logic for all agents
-    const showZoneBadge = sig.directionState === 'stable' && (sig.recommendedPlay === 'SMALL' || sig.recommendedPlay === 'BIG');
-    const zoneBadgeCls = sig.recommendedPlay === 'SMALL' ? 'badge-win' : 'badge-loss';
-    const zoneBadgeText = sig.recommendedPlay;
-    const zoneBadgeHTML = showZoneBadge ? `<span class="badge ${zoneBadgeCls}" style="font-size:0.6rem; padding:1px 6px; margin-left:8px; border:1px solid currentColor;">PROX: ${zoneBadgeText}</span>` : '';
-
-    if (s.name === 'SIX STRATEGIE') {
-        const rs = s.streakWin > 0 ? `W${s.streakWin}` : s.streakLoss > 0 ? `L${s.streakLoss}` : '-';
-        content = `
-            <div class="ia-active-slot slot-math">
-                <div class="ia-slot-header">
-                    <span class="ia-slot-name">${s.strategy} ${zoneBadgeHTML}</span>
-                    <span class="ia-slot-conf" style="${isPausa ? 'color:var(--text-dim)' : ''}">${s.confidence} CONF.</span>
-                </div>
-                <div class="ia-main-val" style="display:flex; flex-direction:column; align-items:center;">
-                    <span class="tp-num" style="font-size:3.5rem; line-height: 1; ${isPausa ? 'color:var(--text-dim); letter-spacing:8px;' : ''}">${isPausa ? '...' : s.tp}</span>
-                    <div style="font-size:0.8rem; color:var(--text); margin-top:8px; font-weight:700;">
-                        COR: <span style="font-size:0.85rem; color:var(--gold);">${isPausa ? '...' : [...new Set(s.cor)].filter(c=>c!==s.tp).join(', ')}</span>
+            return `
+                <div class="rec-block ${recClass}" style="margin-top:10px; padding:6px 10px; border-radius:6px; font-size:0.75rem; border:1px solid rgba(255,255,255,0.05); background:rgba(0,0,0,0.2);">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="color:var(--gold); font-weight:900;">⚔️ JUGAR ${recRuleText}</span>
+                        <span style="opacity:0.3">|</span>
+                        <span>${casillaLabel}</span>
+                        <span style="opacity:0.3">|</span>
+                        <span style="font-weight:700; color:var(--gold)">${lanzaTarget}<sup>n4</sup></span>
+                        ${wlHTML}
                     </div>
-                    <div style="font-size:0.75rem; color:var(--text-dim); margin-top:4px;">
-                        [ ZONA TOTAL: ${s.betZone ? s.betZone.length : 9} FICHAS ]
-                    </div>
-                </div>
-                <div class="ia-slot-footer">
-                    <div>RACHA: <strong class="${s.streakWin > 0 ? 'text-green' : 'text-red'}">${rs}</strong></div>
-                    <div class="ia-reason">${s.reason}</div>
-                    <div class="ia-rule">${s.rule}</div>
-                </div>
-            </div>
-        `;
-    } else if (s.name === 'COMBINATION') {
-        const isAtaque = s.mode === 'ATAQUE_ZONA';
-        const isCaos = s.mode === 'TOP_NUMBER';
-        const isActive = isAtaque || isCaos;
-        const androidPausa = s.confidence === '0%' || s.mode === 'NEUTRAL';
+                </div>`;
+        };
+
+        const travelRecHTML = getTravelRec();
+
+        // IA Tab Strip
+        const tabButtons = signals.map((s, idx) => {
+            const isActive = idx === activeIaTab;
+            const name = s && s.name ? s.name.split(' ')[0] : 'IA';
+            return `
+                <button class="ia-tab ${isActive ? 'active' : ''}" onclick="setActiveIaTab(${idx})">
+                    ${name}
+                </button>
+            `;
+        }).join('');
+
+        const s = signals[activeIaTab] || signals[0];
+        if (!s) {
+            topPanel.innerHTML = `<div class="ia-tabs-strip">${tabButtons}</div><p class="muted">Sin señal.</p>`;
+            return;
+        }
+
+        const sName = s.name || 'IA';
+        const sRule = s.rule || 'ANALIZANDO';
+        const sConf = s.confidence || '0%';
+        const sReason = s.reason || 'SINCRO...';
         
-        const zoneLabel = s.targetZone === 'SMALL' ? 'SMALL' : (s.targetZone === 'BIG' ? 'BIG' : '—');
-        const zoneColor = s.targetZone === 'SMALL' ? 'var(--green)' : (s.targetZone === 'BIG' ? 'var(--red)' : 'var(--gold)');
-        const androidGlow = isActive ? `box-shadow: 0 0 20px ${zoneColor}44; border-color: ${zoneColor}66;` : '';
+        // Direction label
+        const dirTxt = sig.directionState === 'zigzag' ? 'ZIG-ZAG ⚡' :
+                       (sig.directionState === 'stable' ? (sig.currentTrendDir >= 0 ? 'Der. ↻' : 'Izq. ↺') : 'Midiendo...');
+        
+        const currentHist = iaSignalsHistory[activeIaTab] || [];
+        const dots = currentHist.slice(-10).map(h => {
+            const hIsWin = h === 'win';
+            const cls = hIsWin ? 'm-hist-w' : 'm-hist-l';
+            return `<span class="m-hist-badge ${cls}">${hIsWin ? 'W' : 'L'}</span>`;
+        }).join('');
 
-        let innerContent = '';
-        if (isAtaque) {
-            innerContent = `
-                <div style="font-size:0.7rem; color:var(--text-dim); letter-spacing:2px; margin-bottom:6px;">PREDICCIÓN HÍBRIDA</div>
-                <div style="font-size:2.8rem; font-weight:900; color:${zoneColor}; letter-spacing:2px; text-shadow:0 0 18px ${zoneColor}88;">${zoneLabel}</div>
-                <div style="font-size:0.75rem; color:var(--text); margin-top:6px; font-weight:700;">
-                    TARGET FÍSICO: <span style="color:${zoneColor}; font-weight:900;">${s.number}<sup>n4</sup></span>
+        let content = '';
+        const isPausa = sRule === 'STOP' || sRule.includes('PAUSA') || sConf === '0%';
+        const displayDirTxt = isPausa ? 'CHARGING' : dirTxt;
+
+        const showZoneBadge = sig.directionState === 'stable' && (sig.recommendedPlay === 'SMALL' || sig.recommendedPlay === 'BIG');
+        const zoneBadgeCls = sig.recommendedPlay === 'SMALL' ? 'badge-win' : 'badge-loss';
+        const zoneBadgeText = sig.recommendedPlay;
+        const zoneBadgeHTML = showZoneBadge ? `<span class="badge ${zoneBadgeCls}" style="font-size:0.6rem; padding:1px 6px; margin-left:8px; border:1px solid currentColor;">PROX: ${zoneBadgeText}</span>` : '';
+
+        if (sName === 'FISICA STUDIO') {
+            const isPausaFisica = sConf === '0%' || sRule === 'STOP';
+            const numColor = isPausaFisica ? 'var(--text-dim)' : 'var(--accent)';
+            content = `
+                <div class="ia-active-slot slot-escudo">
+                    <div class="ia-slot-header"><span class="ia-slot-name">🎯 FÍSICA STUDIO ${zoneBadgeHTML}</span><span class="ia-slot-conf">${sConf} CONF.</span></div>
+                    <div class="ia-grid">
+                        <div class="ia-side-box"><div class="ia-side-lbl">SMALL</div><div class="ia-side-num">${s.small}<sup>n4</sup></div></div>
+                        <div class="ia-center-box active-val">
+                            <div class="ia-main-num" style="color:${numColor}">${isPausaFisica ? '...' : s.number + '<sup>n9</sup>'}</div>
+                            <div class="ia-dir-lbl">TENDENCIA: ${isPausaFisica ? '⏸ STOP' : displayDirTxt}</div>
+                        </div>
+                        <div class="ia-side-box"><div class="ia-side-lbl">BIG</div><div class="ia-side-num">${s.big}<sup>n4</sup></div></div>
+                    </div>
+                    <div class="ia-slot-footer">
+                        <div class="ia-stats-mini">W: ${iaWins[activeIaTab]} L: ${iaLosses[activeIaTab]}</div>
+                        <div class="ia-reason">${sReason}</div>
+                        <div class="ia-rule">${sRule}</div>
+                    </div>
+                    ${travelRecHTML}
                 </div>
             `;
-        } else if (isCaos) {
-            innerContent = `
-                <div style="font-size:0.7rem; color:var(--gold); letter-spacing:2px; margin-bottom:6px;">ESCUDO ANTI-CAOS</div>
-                <div style="font-size:3.2rem; font-weight:900; color:var(--gold); line-height:1; text-shadow:0 0 15px rgba(255,215,0,0.4);">${s.number}<sup>n9</sup></div>
-                <div style="font-size:0.75rem; color:var(--text); margin-top:6px; font-weight:700;">
-                    ANCLAJE TOP NUMBER
+        } else if (sName === 'SIX STRATEGIE') {
+            const rs = s.streakWin > 0 ? `W${s.streakWin}` : (s.streakLoss > 0 ? `L${s.streakLoss}` : '-');
+            content = `
+                <div class="ia-active-slot slot-math">
+                    <div class="ia-slot-header">
+                        <span class="ia-slot-name">${s.strategy || 'SIX'} ${zoneBadgeHTML}</span>
+                        <span class="ia-slot-conf" style="${isPausa ? 'color:var(--text-dim)' : ''}">${sConf} CONF.</span>
+                    </div>
+                    <div class="ia-main-val" style="display:flex; flex-direction:column; align-items:center; padding:10px 0;">
+                        <span class="tp-num" style="font-size:3.5rem; line-height:1; ${isPausa ? 'color:var(--text-dim);' : ''}">${isPausa ? '...' : (s.tp !== undefined ? s.tp : '...')}</span>
+                        <div style="font-size:0.8rem; color:var(--text); margin-top:8px; font-weight:700;">
+                            COR: <span style="font-size:0.85rem; color:var(--gold);">${isPausa ? '...' : [...new Set(s.cor || [])].filter(c=>c!==s.tp).join(', ')}</span>
+                        </div>
+                    </div>
+                    <div class="ia-slot-footer">
+                        <div>RACHA: <strong class="${s.streakWin > 0 ? 'text-green' : 'text-red'}">${rs}</strong></div>
+                        <div class="ia-reason">${sReason}</div>
+                        <div class="ia-rule">${sRule}</div>
+                    </div>
+                    ${travelRecHTML}
+                </div>
+            `;
+        } else if (sName === 'COMBINATION') {
+            const isAtaque = s.mode === 'ATAQUE_ZONA';
+            const isCaos = s.mode === 'TOP_NUMBER';
+            const zoneLabel = s.targetZone === 'SMALL' ? 'SMALL' : (s.targetZone === 'BIG' ? 'BIG' : '—');
+            const zoneColor = s.targetZone === 'SMALL' ? 'var(--green)' : (s.targetZone === 'BIG' ? 'var(--red)' : 'var(--gold)');
+            const androidGlow = (isAtaque || isCaos) ? `box-shadow:0 0 20px ${zoneColor}44; border-color:${zoneColor}66;` : '';
+            let innerContent;
+            if (isAtaque) {
+                innerContent = `
+                    <div style="font-size:0.7rem; color:var(--text-dim); letter-spacing:2px;">PREDICCIÓN HÍBRIDA</div>
+                    <div style="font-size:2.8rem; font-weight:900; color:${zoneColor}; text-shadow:0 0 18px ${zoneColor}88;">${zoneLabel}</div>
+                    <div style="font-size:0.75rem; color:var(--text); margin-top:6px;">TARGET N4: <span style="color:${zoneColor}; font-weight:900;">${s.number}<sup>n4</sup></span></div>`;
+            } else if (isCaos) {
+                innerContent = `
+                    <div style="font-size:0.7rem; color:var(--gold); letter-spacing:2px;">ESCUDO ANTI-CAOS</div>
+                    <div style="font-size:3.2rem; font-weight:900; color:var(--gold); line-height:1;">${s.number}<sup>n9</sup></div>
+                    <div style="font-size:0.75rem; color:var(--text); margin-top:6px;">ANCLAJE TOP NUMBER</div>`;
+            } else {
+                innerContent = `<div style="font-size:2rem; color:var(--text-dim); opacity:0.5;">···</div><div style="font-size:0.68rem; color:var(--text-dim);">SINCRONIZANDO...</div>`;
+            }
+            content = `
+                <div class="ia-active-slot slot-lanza" style="${androidGlow}">
+                    <div class="ia-slot-header"><span class="ia-slot-name">🤖 ANDROIDE</span><span class="ia-slot-conf">${sConf} CONF.</span></div>
+                    <div class="ia-main-val" style="display:flex; flex-direction:column; align-items:center; padding:12px 0;">${innerContent}</div>
+                    <div class="ia-slot-footer">
+                        <div class="ia-stats-mini">W: ${iaWins[activeIaTab]} L: ${iaLosses[activeIaTab]}</div>
+                        <div class="ia-reason">${sReason}</div>
+                        <div class="ia-rule">${sRule}</div>
+                    </div>
+                    ${travelRecHTML}
+                </div>
+            `;
+        } else if (sName === 'SOPORTE PRO') {
+            const isSmallMode = s.mode === 'SOPORTE_SMALL';
+            const sopPausa = sConf === '0%';
+            const modeColor = isSmallMode ? 'var(--green)' : 'var(--red)';
+            content = `
+                <div class="ia-active-slot slot-escudo">
+                    <div class="ia-slot-header"><span class="ia-slot-name">${sName}</span><span class="ia-slot-conf">${sConf} CONF.</span></div>
+                    <div class="ia-grid">
+                        <div class="ia-side-box"><div class="ia-side-lbl">SMALL</div><div class="ia-side-num">${s.small}<sup>n4</sup></div></div>
+                        <div class="ia-center-box active-val">
+                            <div class="ia-main-num" style="${sopPausa ? 'color:var(--text-dim)' : `color:${modeColor}`}">${sopPausa ? '...' : s.number + '<sup>n9</sup>'}</div>
+                            <div class="ia-dir-lbl">TENDENCIA: ${displayDirTxt}</div>
+                        </div>
+                        <div class="ia-side-box"><div class="ia-side-lbl">BIG</div><div class="ia-side-num">${s.big}<sup>n4</sup></div></div>
+                    </div>
+                    <div class="ia-slot-footer"><div class="ia-reason">${sReason}</div><div class="ia-rule">${sRule}</div></div>
+                    ${travelRecHTML}
+                </div>
+            `;
+        } else if (sName === 'IA AUTÓNOMA') {
+            // IA Bot: Always show the number if available, regardless of confidence status
+            const hasNumber = s.number !== null && s.number !== undefined;
+            content = `
+                <div class="ia-active-slot slot-escudo" style="border-color:var(--gold)">
+                    <div class="ia-slot-header"><span class="ia-slot-name">🤖 IA AUTÓNOMA</span><span class="ia-slot-conf" style="color:var(--gold)">${sConf}</span></div>
+                    <div class="ia-main-val" style="display:flex; flex-direction:column; align-items:center; padding:20px 0;">
+                        <div style="font-size:0.75rem; color:var(--gold); font-weight:900; margin-bottom:10px;">ESCUDO BDD N9</div>
+                        <div class="ia-main-num" style="color:var(--gold); font-size:4rem; line-height:1;">${hasNumber ? s.number : '...'}<sup style="font-size:1.2rem; opacity:0.7;">n9</sup></div>
+                        ${hasNumber ? `<div style="font-size:0.65rem; color:var(--gold); opacity:0.7; margin-top:6px;">TOP POR SIMILITUD HISTÓRICA</div>` : `<div style="font-size:0.65rem; color:var(--text-dim); margin-top:6px;">BUSCANDO EN BASE DE DATOS...</div>`}
+                        <div class="ia-rule-pro" style="margin-top:12px; color:var(--gold);">${sRule}</div>
+                    </div>
+                    <div class="ia-slot-footer"><div class="ia-reason">${sReason}</div></div>
+                    ${travelRecHTML}
                 </div>
             `;
         } else {
-            innerContent = `
-                <div style="font-size:2.2rem; color:var(--text-dim); letter-spacing:10px; opacity:0.5;">···</div>
-                <div style="font-size:0.68rem; color:var(--text-dim); margin-top:8px; letter-spacing:1px;">SINCRONIZANDO VECTORES...</div>
+            const num = s.number !== undefined ? s.number : (s.tp !== undefined ? s.tp : '...');
+            content = `
+                <div class="ia-active-slot slot-escudo">
+                    <div class="ia-slot-header"><span class="ia-slot-name">${sName}</span><span class="ia-slot-conf">${sConf}</span></div>
+                    <div class="ia-main-val" style="display:flex; flex-direction:column; align-items:center; padding:15px 0;">
+                        <div class="ia-main-num">${isPausa ? '...' : num}</div>
+                        <div class="ia-rule-pro" style="margin-top:8px;">${sRule}</div>
+                    </div>
+                    <div class="ia-slot-footer"><div class="ia-reason">${sReason}</div></div>
+                    ${travelRecHTML}
+                </div>
             `;
         }
 
-        content = `
-            <div class="ia-active-slot slot-lanza" style="${androidGlow}">
-                <div class="ia-slot-header">
-                    <span class="ia-slot-name">🤖 ANDROIDE PERFECTO ${zoneBadgeHTML}</span>
-                    <span class="ia-slot-conf" style="${androidPausa ? 'color:var(--text-dim)' : `color:${zoneColor};`}">${s.confidence} CONF.</span>
-                </div>
-
-                <div class="ia-main-val" style="display:flex; flex-direction:column; align-items:center; padding: 12px 0;">
-                    ${innerContent}
-                </div>
-
-                <div class="ia-slot-footer">
-                    <div class="ia-stats-mini">W: ${iaWins[activeIaTab]} L: ${iaLosses[activeIaTab]}</div>
-                    <div class="ia-reason">${s.reason}</div>
-                    <div class="ia-rule">${s.rule}</div>
-                </div>
-            </div>
+        topPanel.innerHTML = `
+            <div class="ia-tabs-strip">${tabButtons}</div>
+            ${content}
+            <div class="ia-pattern-strip">${dots}</div>
         `;
-    } else if (s.name === 'SOPORTE PRO') {
-        const isSmallMode = s.mode === 'SOPORTE_SMALL';
-        const soportePausa = s.confidence === '0%';
-        const modeColor = isSmallMode ? 'var(--green)' : 'var(--red)';
-        const modeLabel = isSmallMode ? '🛡️ SOPORTE SMALL' : '🛡️ SOPORTE BIG';
-        const activeBox = isSmallMode ? s.casilla1 : s.casilla19;
-        const activeLabel = isSmallMode ? 'CASILLA 1' : 'CASILLA 19';
-        const soporteGlow = soportePausa ? '' : `box-shadow: 0 0 16px ${modeColor}33; border-color: ${modeColor}44;`;
-
-        content = `
-            <div class="ia-active-slot slot-escudo" style="${soporteGlow}">
-                <div class="ia-slot-header">
-                    <span class="ia-slot-name">${modeLabel} ${zoneBadgeHTML}</span>
-                    <span class="ia-slot-conf" style="${soportePausa ? 'color:var(--text-dim)' : `color:${modeColor}`}">${s.confidence} CONF.</span>
-                </div>
-
-                <div class="ia-grid">
-                    <div class="ia-side-box">
-                        <div class="ia-side-lbl">SMALL</div>
-                        <div class="ia-side-num" style="font-size:1.1rem">${s.small}<sup>n4</sup></div>
-                        <div class="ia-side-theory">CASILLA 5</div>
-                    </div>
-
-                    <div class="ia-center-box active-val">
-                        <div style="font-size:0.6rem; color:var(--text-dim); letter-spacing:2px; margin-bottom:4px;">${activeLabel}</div>
-                        <div class="ia-main-num" style="${soportePausa ? 'color:var(--text-dim); letter-spacing:6px;' : `color:${modeColor};`}">
-                            ${soportePausa ? '...' : `${activeBox}<sup>n9</sup>`}
-                        </div>
-                        <div class="ia-dir-lbl" style="${soportePausa ? 'color:var(--text-dim)' : ''}">
-                            TENDENCIA: ${soportePausa ? 'CHARGING' : displayDirTxt}
-                        </div>
-                        <div class="ia-rule-pro">${s.rule}</div>
-                    </div>
-
-                    <div class="ia-side-box">
-                        <div class="ia-side-lbl">BIG</div>
-                        <div class="ia-side-num" style="font-size:1.1rem">${s.big}<sup>n4</sup></div>
-                        <div class="ia-side-theory">CASILLA 14</div>
-                    </div>
-                </div>
-
-                <div class="ia-slot-footer">
-                    <div class="ia-stats-mini">W: ${iaWins[activeIaTab]} L: ${iaLosses[activeIaTab]}</div>
-                    <div class="ia-reason">${s.reason}</div>
-                </div>
-            </div>
-        `;
-    } else {
-        const isEscudo = s.mode === 'ESCUDO';
-        const numN = isEscudo ? 'n9' : 'n4';
-        
-        content = `
-            <div class="ia-active-slot ${isEscudo ? 'slot-escudo' : 'slot-lanza'}">
-                <div class="ia-slot-header">
-                    <span class="ia-slot-name">${s.name} ${zoneBadgeHTML} — ${isEscudo ? '🛡️ ESCUDO' : '⚔️ LANZA'}</span>
-                    <span class="ia-slot-conf">${s.confidence} CONF.</span>
-                </div>
-                
-                <div class="ia-grid">
-                    <div class="ia-side-box">
-                        <div class="ia-side-lbl">SMALL</div>
-                        <div class="ia-side-num">${s.small}<sup>n4</sup></div>
-                        <div class="ia-side-theory">4 FICHAS</div>
-                    </div>
-
-                    <div class="ia-center-box active-val">
-                        <div class="ia-main-num" style="${isPausa ? 'color:var(--text-dim); letter-spacing:4px;' : ''}">${isPausa ? '...' : s.number + `<sup>${numN}</sup>`}</div>
-                        <div class="ia-dir-lbl" style="${isPausa ? 'color:var(--text-dim)' : ''}">TENDENCIA: ${displayDirTxt}</div>
-                        <div class="ia-rule-pro">${s.rule}</div>
-                    </div>
-
-                    <div class="ia-side-box">
-                        <div class="ia-side-lbl">BIG</div>
-                        <div class="ia-side-num">${s.big}<sup>n4</sup></div>
-                        <div class="ia-side-theory">14 FICHAS</div>
-                    </div>
-                </div>
-
-                <div class="ia-slot-footer">
-                    <div class="ia-stats-mini">W: ${iaWins[activeIaTab]} L: ${iaLosses[activeIaTab]}</div>
-                    <div class="ia-reason">${s.reason}</div>
-                </div>
-            </div>
-        `;
+    } catch (e) {
+        console.error("Error UI render:", e);
+        topPanel.innerHTML = `<div style="color:var(--red); font-size:0.7rem; padding:10px;">⚠ Error UI: ${e.message}</div>`;
     }
-
-    topPanel.innerHTML = `
-        <div class="ia-tabs-strip">${tabButtons}</div>
-        ${content}
-        <div class="ia-pattern-strip">${dots}</div>
-    `;
 }
 
 window.setActiveIaTab = (idx) => {
@@ -481,7 +499,20 @@ window.setActiveIaTab = (idx) => {
     const sig = computeDealerSignature(history);
     const results = analyzeSpin(history, stats);
     const prox = projectNextRound(history, stats);
-    const signals = getIAMasterSignals(prox, sig, history);
+    const signals = getIAMasterSignals(prox, sig, history) || [];
+    
+    // Always push Agent 5 to ensure slot visibility
+    signals.push({
+        name: 'IA AUTÓNOMA',
+        number: latestAgent5Top,
+        small: null,
+        big: null,
+        confidence: latestAgent5Top !== null ? "MAX%" : "0%",
+        reason: latestAgent5Top !== null ? "SIMILITUD HISTÓRICA BDD" : "SINCRONIZANDO BDD...",
+        rule: latestAgent5Top !== null ? "ESTADÍSTICA PURA N9" : "CARGANDO...",
+        mode: 'ESCUDO'
+    });
+
     renderSignalsPanel(signals, sig, history[history.length-1]);
 };
 
@@ -525,13 +556,22 @@ function renderTravelPanel(sig, currentSignals = null) {
         return;
     }
 
-    // LISTADO DESLIZANTE: Mostramos todo el historial para detectar patrones largos
-    const fullHistory = sig.travelHistory.slice().reverse();
-    const rows = fullHistory.map((t, idx) => {
+    // Compute state label safely here (avoids undefined `state` bug)
+    let stateLabel = '—', stateIcon = '●', stateCls = '';
+    if (sig.directionState === 'stable') { stateLabel = 'ESTABLE'; stateIcon = '▶'; stateCls = 'state-stable'; }
+    else if (sig.directionState === 'zigzag') { stateLabel = 'ZIG-ZAG'; stateIcon = '⚡'; stateCls = 'state-zigzag'; }
+    else if (sig.directionState === 'debilitado') { stateLabel = 'DEBILITADO'; stateIcon = '⬇'; stateCls = 'state-weak'; }
+    else { stateLabel = 'MIDIENDO'; stateIcon = '⌛'; stateCls = ''; }
+
+    // Show last 100 rows (scrollable panel)
+    const MAX_ROWS = 100;
+    const limitedHistory = sig.travelHistory.slice(-MAX_ROWS).reverse();
+    const rows = limitedHistory.map((t, idx) => {
         const abs = Math.abs(t);
         const dir = t > 0 ? 'DER. ↻' : t < 0 ? 'IZQ. ↺' : '-';
         const phaseClass = abs <= 9 ? 'text-green' : 'text-red';
-        const num = history[history.length - 1 - idx];
+        const histIdx = history.length - 1 - idx;
+        const num = histIdx >= 0 ? history[histIdx] : '?';
         const isLast = idx === 0;
         
         return `
@@ -544,95 +584,19 @@ function renderTravelPanel(sig, currentSignals = null) {
         `;
     }).join('');
 
-    // Direction state badge (Technical terminology)
-    const stateMap = {
-        stable:   { cls: 'state-stable',   icon: '🟢', label: `ESTABLE — ${sig.currentTrendDir >= 0 ? 'DER. ↻' : 'IZQ. ↺'}` },
-        charging: { cls: 'state-charging',  icon: '🟡', label: 'CHARGING (DATOS)' },
-        zigzag:   { cls: 'state-charging',  icon: '⚡', label: 'ZIG ZAG DETECTADO' },
-        debilitado: { cls: 'state-unstable', icon: '⚠️', label: 'DIR. DEBILITADA' },
-        unstable: { cls: 'state-unstable',  icon: '🔴', label: 'TURBULENTO' }
-    };
-    const state = stateMap[sig.directionState] || stateMap.unstable;
-
-    // Recommendation block (Matrix-Driven)
-    let recHTML = '';
-    
-    // Last Hit Badge (for manual analysis)
     const hitZone = sig.lastHitZone || 'NONE';
     const hitZoneClass = hitZone === 'SMALL' ? 'badge-win' : (hitZone === 'BIG' ? 'badge-loss' : '');
-    const lastHitBadge = hitZone !== 'NONE' ? `<div class="badge ${hitZoneClass}" style="margin-left:auto; padding:4px 12px; font-size:0.75rem; letter-spacing:1px; box-shadow:0 0 8px var(--${hitZone === 'SMALL' ? 'green' : 'red'});">LAST HIT: ${hitZone}</div>` : '';
-    const lastSig = currentSignals ? currentSignals[0] : (lastIaSignals ? lastIaSignals[0] : null); // FISICA STUDIO es nuestro Agente Pro
+    const lastHitBadge = hitZone !== 'NONE' ? `<div class="badge ${hitZoneClass}" style="margin-left:auto; padding:4px 10px; font-size:0.7rem; letter-spacing:1px;">LAST: ${hitZone}</div>` : '';
     
-    if (lastSig) {
-        const isStop = lastSig.rule === 'STOP';
-        
-        // ── QUALITY FILTER ─────────────────────────────────────────
-        // Only show recommendation when:
-        // 1. Direction must be STABLE (never on charging/turbulento/zigzag)
-        // 2. Zone must be definitively BIG or SMALL (not HIBRIDO/NIVELADAS)
-        // 3. Agent must not be in STOP/PAUSA mode
-        const dirIsStable = sig.directionState === 'stable';
-        const playIsClear = sig.recommendedPlay === 'SMALL' || sig.recommendedPlay === 'BIG';
-        const shouldShowRec = dirIsStable && playIsClear && !isStop;
-
-        if (!shouldShowRec) {
-            // No recommendation - leave recHTML empty (silence = discipline)
-        } else {
-            const isSmall = sig.recommendedPlay === 'SMALL';
-            // Always use casilla5 (SMALL, +4) or casilla14 (BIG, +14) in playing direction
-            const lanzaTarget = isSmall ? sig.casilla5 : sig.casilla14;
-            const recClass = isSmall ? 'rec-small' : 'rec-big';
-            const recRuleText = isSmall ? 'SMALL' : 'BIG';
-            const dirUsed = sig.playingDir >= 0 ? 'Der. ↻' : 'Izq. ↺';
-            const casillaLabel = isSmall ? 'CASILLA 5' : 'CASILLA 14';
-
-            // Win/loss counter for zone
-            const cat = isSmall ? 'N4_S' : 'N4_B';
-            const w = auditStats[cat].w;
-            const l = auditStats[cat].l;
-            const wlHTML = `<span style="font-size:0.65rem; color:var(--text-dim); margin-left:auto;">W:${w} L:${l}</span>`;
-
-            // Phase label (DEBILITADO → DOMINANTE)
-            const phaseLabel = sig.phaseStateText && !sig.phaseStateText.includes('NIVELADAS') && !sig.phaseStateText.includes('MIDIENDO')
-                ? `<div style="font-size:0.6rem; color:var(--gold); margin-bottom:4px; margin-left:8px; opacity:0.85; font-weight:700">📌 ${sig.phaseStateText}</div>`
-                : '';
-
-            recHTML = `
-                ${phaseLabel}
-                <div class="rec-block ${recClass} rec-lanza" style="display:flex; align-items:center; gap:8px;">
-                    <span class="rec-arrow">▶</span>
-                    <span class="rec-play">⚔️ JUGAR ${recRuleText}</span>
-                    <span class="rec-sep">|</span>
-                    <span class="rec-rule" style="font-size:0.7rem; letter-spacing:1px;">${casillaLabel}</span>
-                    <span class="rec-sep">|</span>
-                    <span style="font-size:0.65rem; color:var(--text); font-weight:700">${dirUsed}</span>
-                    <span class="rec-sep">|</span>
-                    <span class="rec-num">${lanzaTarget} <sup>N4</sup></span>
-                    ${wlHTML}
-                </div>
-            `;
-        }
-    }
-
     travelPanel.innerHTML = `
-        <div class="travel-header-row" style="display:flex; align-items:center;">
-            <div class="dir-state-badge ${state.cls}">${state.icon} ${state.label}</div>
+        <div class="travel-header-row" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+            <div class="dir-state-badge ${stateCls}" style="font-size:0.7rem; padding:3px 8px;">${stateIcon} ${stateLabel}</div>
             ${lastHitBadge}
         </div>
-        ${recHTML}
         <div class="travel-scroll-container">
             <table class="travel-table">
-                <thead>
-                    <tr>
-                        <th>N°</th>
-                        <th>DIST</th>
-                        <th>DIR</th>
-                        <th>PHASE</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${rows}
-                </tbody>
+                <thead><tr><th>N°</th><th>DIST</th><th>DIR</th><th>PHASE</th></tr></thead>
+                <tbody>${rows}</tbody>
             </table>
         </div>
     `;
@@ -658,7 +622,8 @@ async function submitNumber(nOverride = null, skipApi = false) {
 
     if (!skipApi) {
         try {
-            await apiPostSpin(currentTableId, n);
+            const spinResult = await apiPostSpin(currentTableId, n);
+            latestAgent5Top = (spinResult && spinResult.predictions) ? spinResult.predictions.agent5_top : null;
         } catch(e) {
             statusMsg.textContent = '⚠ Error al guardar en BD.';
             statusMsg.className = 'status-msg status-error';
@@ -766,8 +731,21 @@ async function submitNumber(nOverride = null, skipApi = false) {
     const prox    = projectNextRound(history, stats);
     
     // 5. Señales IA (basadas en resultados actuales para la SIGUIENTE tirada)
-    const signals = getIAMasterSignals(prox, sig, history);
-    lastIaSignals = signals || [null, null, null, null]; 
+    const signals = getIAMasterSignals(prox, sig, history) || [];
+    
+    // Inject Agent 5 (Backend AI)
+    signals.push({
+        name: 'IA AUTÓNOMA',
+        number: latestAgent5Top,
+        small: null,
+        big: null,
+        confidence: latestAgent5Top !== null ? "MAX%" : "0%",
+        reason: latestAgent5Top !== null ? "SIMILITUD HISTÓRICA BDD" : "SINCRONIZANDO BDD...",
+        rule: latestAgent5Top !== null ? "ESTADÍSTICA PURA N9" : "CARGANDO...",
+        mode: 'ESCUDO'
+    });
+    
+    lastIaSignals = signals.length ? signals : [null, null, null, null, null];
 
     renderTravelPanel(sig, signals);
     buildStratTabs(results);
@@ -786,7 +764,7 @@ function wipeData() {
     iaWins.fill(0);
     iaLosses.fill(0);
     Object.keys(auditStats).forEach(k => { auditStats[k].w=0; auditStats[k].l=0; });
-    lastIaSignals = [null, null, null, null];
+    lastIaSignals = [null, null, null, null, null];
     Object.keys(stats).forEach(k => delete stats[k]);
     historyEl.innerHTML      = '';
     targetPanel.innerHTML    = '<p class="muted">Ingresa al menos 3 números para analizar.</p>';
@@ -816,6 +794,13 @@ async function loadTableHistory(tableId) {
     wipeData();
     try {
         const spins = await apiFetchHistory(tableId);
+        
+        let initialPred = { agent5_top: null };
+        if (spins.length >= 3) {
+            initialPred = await apiFetchPredict(tableId);
+        }
+        latestAgent5Top = initialPred.agent5_top;
+        
         const nums  = spins.map(s => s.number);
         statusMsg.textContent = `Cargando ${nums.length} tiradas...`;
         
@@ -845,8 +830,21 @@ async function loadTableHistory(tableId) {
             const results = analyzeSpin(history, stats);
             const prox = projectNextRound(history, stats);
             const sig = computeDealerSignature(history);
-            const signals = getIAMasterSignals(prox, sig, history);
-            lastIaSignals = signals || [null, null, null, null]; 
+            const signals = getIAMasterSignals(prox, sig, history) || [];
+            
+            // Always push Agent 5 to ensure slot visibility
+            signals.push({
+                name: 'IA AUTÓNOMA',
+                number: latestAgent5Top,
+                small: null,
+                big: null,
+                confidence: latestAgent5Top !== null ? "MAX%" : "0%",
+                reason: latestAgent5Top !== null ? "SIMILITUD HISTÓRICA BDD" : "SINCRONIZANDO BDD...",
+                rule: latestAgent5Top !== null ? "ESTADÍSTICA PURA N9" : "CARGANDO...",
+                mode: 'ESCUDO'
+            });
+            
+            lastIaSignals = signals.length ? signals : [null, null, null, null, null]; 
             
             buildStratTabs(results);
             renderTargetPanel(results, history[history.length-1]);
@@ -875,7 +873,9 @@ function startAutoPolling(tableId) {
         try {
             const spins = await apiFetchHistory(tableId);
             if (!spins.length) return;
-            const latestId = spins[spins.length - 1].id;
+            
+            const lastSpinObj = spins[spins.length - 1];
+            const latestId = lastSpinObj.id;
             if (lastKnownSpinId === null) { lastKnownSpinId = latestId; return; }
             if (latestId !== lastKnownSpinId) {
                 const newSpins = spins.filter(s => s.id > lastKnownSpinId);
@@ -883,8 +883,29 @@ function startAutoPolling(tableId) {
                 const autoBadge = document.getElementById('ocr-badge'); // Reuse for now
                 if (autoBadge) autoBadge.style.display = 'inline-block';
                 for (const spin of newSpins) {
-                    // Critical: Just update UI, DON'T re-post to API
                     await submitNumber(spin.number, true);
+                }
+                
+                // Fetch fresh prediction after adding new spins
+                if (history.length >= 3) {
+                    const freshPred = await apiFetchPredict(tableId);
+                    latestAgent5Top = freshPred.agent5_top;
+                    
+                    // Render UI with latest Agent 5 data natively
+                    const prox = projectNextRound(history, stats);
+                    const sig = computeDealerSignature(history);
+                    const signals = getIAMasterSignals(prox, sig, history) || [];
+                    signals.push({
+                        name: 'IA AUTÓNOMA',
+                        number: latestAgent5Top,
+                        small: null,
+                        big: null,
+                        confidence: latestAgent5Top !== null ? "MAX%" : "0%",
+                        reason: latestAgent5Top !== null ? "SIMILITUD HISTÓRICA BDD" : "SINCRONIZANDO BDD...",
+                        rule: latestAgent5Top !== null ? "ESTADÍSTICA PURA N9" : "CARGANDO...",
+                        mode: 'ESCUDO'
+                    });
+                    renderSignalsPanel(signals, sig, history[history.length-1]);
                 }
             }
         } catch {}

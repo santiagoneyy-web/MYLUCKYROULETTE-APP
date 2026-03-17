@@ -6,6 +6,9 @@ const express = require('express');
 const cors    = require('cors');
 const path    = require('path');
 const db      = require('./database');
+const Spin    = require('./models/Spin'); // MongoDB Model
+const agent5  = require('./agent5');      // Autonomous AI & Physics
+const predictor = require('./predictor'); // Agents 1-4
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -53,14 +56,117 @@ app.get('/api/history/:tableId', (req, res) => {
     });
 });
 
-app.post('/api/spin', (req, res) => {
-    const { table_id, number, source } = req.body;
+app.post('/api/spin', async (req, res) => {
+    // ── NODO 1: INGESTA ──
+    const { table_id, number, source, direction } = req.body;
     if (table_id == null || number == null) return res.status(400).json({ error: 'table_id and number required' });
     if (number < 0 || number > 36) return res.status(400).json({ error: 'number must be 0-36' });
-    db.addSpin(table_id, number, source || 'manual', (err, id) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ id, table_id, number, source });
-    });
+
+    try {
+        const isMongo = db.getUseMongo();
+        let currentHistory = [];
+        
+        // Fetch history to drive the agents
+        if (isMongo) {
+            currentHistory = await Spin.find({ table_id }).sort({ id: 1 }).exec();
+        } else {
+            // Fallback JSON relies on db.getHistory callback
+            currentHistory = await new Promise((resolve, reject) => {
+                db.getHistory(table_id, null, (err, rows) => {
+                    if (err) reject(err); else resolve(rows);
+                });
+            });
+        }
+        
+        const numsOnly = currentHistory.map(s => s.number);
+        const prevSpin = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1] : null;
+        
+        // ── NODO 2: PROCESAMIENTO FÍSICO ──
+        const prevNumber = prevSpin ? prevSpin.number : null;
+        const physics = agent5.getPhysics(prevNumber, number);
+        const sector = agent5.getSector(number);
+
+        // ── NODO 4: EVALUACIÓN (Del tiro anterior contra el número actual) ──
+        if (isMongo && prevSpin && prevSpin.predictions) {
+            prevSpin.results = {
+                agent1_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent1_top),
+                agent2_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent2_top),
+                agent3_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent3_top),
+                agent4_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent4_top),
+                agent5_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent5_top)
+            };
+            await prevSpin.save(); // Sync eval back to db
+        }
+
+        // Add the new number to the local array to generate predictions for the NEXT round
+        numsOnly.push(number);
+
+        // ── NODO 3: IA & AGENTES (Predicciones para el FUTURO) ──
+        let newPredictions = {
+            agent1_top: null, agent2_top: null, agent3_top: null, agent4_top: null, agent5_top: null
+        };
+
+        if (numsOnly.length >= 3) {
+            // Run prediction algorithms
+            const stats = {};
+            // Simulate the analysis pipeline to build the stats
+            for (let i = 2; i < numsOnly.length; i++) {
+                predictor.analyzeSpin(numsOnly.slice(0, i + 1), stats);
+            }
+            
+            const nextRound = predictor.projectNextRound(numsOnly, stats);
+            const signature = predictor.computeDealerSignature(numsOnly);
+            const masterSignals = predictor.getIAMasterSignals(nextRound, signature, numsOnly);
+
+            if (masterSignals && masterSignals.length > 0) {
+                const ag1 = masterSignals.find(s => s.name === 'FISICA STUDIO');
+                const ag2 = masterSignals.find(s => s.name === 'SIX STRATEGIE');
+                const ag3 = masterSignals.find(s => s.name === 'COMBINATION');
+                const ag4 = masterSignals.find(s => s.name === 'SOPORTE PRO');
+                
+                if (ag1) newPredictions.agent1_top = ag1.number;
+                // Agent 2 provides TP (Top probability core)
+                if (ag2 && ag2.tp !== undefined) newPredictions.agent2_top = ag2.tp;
+                if (ag3) newPredictions.agent3_top = ag3.number;
+                if (ag4) newPredictions.agent4_top = ag4.number;
+            }
+
+            // Agent 5 (Historical Similarity on MongoDB)
+            if (isMongo) {
+                const ag5Top = await agent5.predictAgent5(table_id, numsOnly);
+                newPredictions.agent5_top = ag5Top;
+            }
+        }
+
+        // ── NODO 4: SINCRONIZACIÓN (Guardar la inyección enriquecida) ──
+        if (isMongo) {
+            const maxSpin = await Spin.findOne().sort('-id').exec();
+            const newId = maxSpin ? maxSpin.id + 1 : 1;
+
+            const newSpin = new Spin({
+                id: newId,
+                table_id,
+                number,
+                source: source || 'bot',
+                distance: physics.distance,
+                direction: direction || physics.direction,
+                sector,
+                predictions: newPredictions
+            });
+            await newSpin.save();
+            res.json(newSpin);
+        } else {
+            // Fallback
+            db.addSpin(table_id, number, source || 'bot', (err, id) => {
+                if (err) return res.status(500).json({ error: err.message });
+                res.json({ id, table_id, number, source, note: 'Saved to fallback JSON without rich predictions' });
+            });
+        }
+
+    } catch (e) {
+        console.error('Pipeline Error:', e);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Batch import (for OCR auto-capture)
@@ -91,6 +197,54 @@ app.delete('/api/history/:tableId', (req, res) => {
     });
 });
 
+// Real-time prediction endpoint (called at page load)
+app.get('/api/predict/:tableId', async (req, res) => {
+    const tableId = req.params.tableId;
+    try {
+        let spins = [];
+        const isMongo = db.getUseMongo();
+        if (isMongo) {
+            spins = await Spin.find({ table_id: tableId }).sort({ id: 1 }).exec();
+        } else {
+            spins = await new Promise((resolve, reject) => {
+                db.getHistory(tableId, null, (err, rows) => {
+                    if (err) reject(err); else resolve(rows);
+                });
+            });
+        }
+        const numsOnly = spins.map(s => s.number);
+        if (numsOnly.length < 3) return res.json({ agent5_top: null, message: 'Not enough data' });
+
+        // Full prediction pipeline
+        const stats = {};
+        for (let i = 2; i < numsOnly.length; i++) {
+            predictor.analyzeSpin(numsOnly.slice(0, i + 1), stats);
+        }
+        const nextRound = predictor.projectNextRound(numsOnly, stats);
+        const signature = predictor.computeDealerSignature(numsOnly);
+        const masterSignals = predictor.getIAMasterSignals(nextRound, signature, numsOnly);
+        
+        let predictions = { agent1_top: null, agent2_top: null, agent3_top: null, agent4_top: null, agent5_top: null };
+        if (masterSignals && masterSignals.length > 0) {
+            const ag1 = masterSignals.find(s => s.name === 'FISICA STUDIO');
+            const ag2 = masterSignals.find(s => s.name === 'SIX STRATEGIE');
+            const ag3 = masterSignals.find(s => s.name === 'COMBINATION');
+            const ag4 = masterSignals.find(s => s.name === 'SOPORTE PRO');
+            if (ag1) predictions.agent1_top = ag1.number;
+            if (ag2 && ag2.tp !== undefined) predictions.agent2_top = ag2.tp;
+            if (ag3) predictions.agent3_top = ag3.number;
+            if (ag4) predictions.agent4_top = ag4.number;
+        }
+        if (isMongo) {
+            predictions.agent5_top = await agent5.predictAgent5(tableId, numsOnly);
+        }
+        res.json(predictions);
+    } catch (e) {
+        console.error('Predict endpoint error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/api/stats/:tableId', (req, res) => {
     db.getStats(req.params.tableId, (err, row) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -99,8 +253,7 @@ app.get('/api/stats/:tableId', (req, res) => {
 });
 
 // ---- Start ----
-app.listen(PORT, () => {
-    console.log(`\n🎰 Roulette Predictor Server running at http://localhost:${PORT}`);
-    console.log(`   Open your browser at: http://localhost:${PORT}`);
-    console.log(`   API ready at:          http://localhost:${PORT}/api/\n`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n🎰 Roulette Predictor Server running at http://0.0.0.0:${PORT}`);
+    console.log(`   API ready at:          http://0.0.0.0:${PORT}/api/\n`);
 });

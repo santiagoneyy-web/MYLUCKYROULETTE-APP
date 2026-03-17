@@ -61,25 +61,28 @@
     <!-- ══════════════ RIGHT COLUMN ══════════════ -->
     <main class="right-col">
 
-        <!-- Strategy Tabs -->
-        <div class="strat-tabs" id="strat-tabs" role="tablist"></div>
+        <!-- CONSOLIDATED STRATEGIES -->
+        <details class="panel" id="strategies-accordion" style="margin-bottom: 15px;">
+            <summary class="panel-title" style="cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: center;">
+                <span>⏭ 6 ESTRATEGIAS (MATEMÁTICAS)</span>
+                <span style="font-size: 0.8rem; opacity: 0.6;">▼ Expandir</span>
+            </summary>
+            
+            <div style="padding-top: 15px;">
+                <!-- Strategy Tabs -->
+                <div class="strat-tabs" id="strat-tabs" role="tablist"></div>
 
+                <!-- RECOMENDACIONES (Top 3 active) -->
+                <div id="next-content" style="margin-top: 15px;">
+                    <p class="muted">Ingresa más números.</p>
+                </div>
 
-        <!-- RECOMENDACIONES (Top 3 active) -->
-        <section class="panel" id="next-panel">
-            <div class="panel-title">⏭ RECOMENDACIONES</div>
-            <div id="next-content">
-                <p class="muted">Ingresa más números.</p>
+                <!-- TARGET ESTRATEGIA (All stacked) -->
+                <div id="target-content" style="margin-top: 15px; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
+                    <p class="muted">Ingresa al menos 3 números para analizar.</p>
+                </div>
             </div>
-        </section>
-
-        <!-- TARGET ESTRATEGIA (All stacked) -->
-        <section class="panel" id="target-panel">
-            <div class="panel-title">🎯 TARGET ESTRATEGIA</div>
-            <div id="target-content">
-                <p class="muted">Ingresa al menos 3 números para analizar.</p>
-            </div>
-        </section>
+        </details>
 
         <!-- TOP N° + TRAVEL DATA -->
         <div class="bottom-grid">
