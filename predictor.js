@@ -260,19 +260,29 @@ function getIAMasterSignals(prox, sig, history) {
         radius: "N9"
     });
 
-    // 5. CELULA (COMBINADO TOTAL)
+    // 5. CELULA (COMBINADO TOTAL - SNIPER HYBRID)
+    // Primary: n9 target based on physics, Secondary: n4 snipes on small/big
     let targetSnipe = isBigTrend ? sig.casilla14 : sig.casilla5;
     if (isZoneZigZag) targetSnipe = (history[history.length-1] >= 10 && history[history.length-1] <= 19) ? sig.casilla5 : sig.casilla14;
     
     signals.push({
         name: 'CELULA',
         number: targetSnipe,
+        top: targetSnipe,
         confidence: "92%",
         reason: "SNIPE COMBINADO",
         rule: "SNIPER",
         mode: 'GANANCIA',
-        betZone: getWheelNeighbors(targetSnipe, 4),
-        radius: "N4"
+        betZone: getWheelNeighbors(targetSnipe, 9), // Main target is n9
+        radius: "N9",
+        smallSnipe: sig.casilla5,
+        bigSnipe: sig.casilla14
+    });
+
+    // Populate secondary snipes for all agents to fill the 3-column UI
+    signals.forEach(s => {
+        if (!s.smallSnipe) s.smallSnipe = sig.casilla5;
+        if (!s.bigSnipe) s.bigSnipe = sig.casilla14;
     });
 
     return signals;

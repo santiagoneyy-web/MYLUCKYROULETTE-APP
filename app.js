@@ -55,35 +55,31 @@ function renderAgentCard(signals) {
 
     const nameEl    = document.getElementById('active-agent-name');
     const confEl    = document.getElementById('agent-confidence');
-    const stratEl   = document.getElementById('agent-strategy');
-    const statusEl  = document.getElementById('agent-status');
-    const syncEl    = document.getElementById('agent-sync');
+    const statusMsg = document.getElementById('agent-status-msg');
     const targetEl  = document.getElementById('target-number');
     const radiusEl  = document.getElementById('pi-radius');
-    const zoneEl    = document.getElementById('pi-zone');
-    const casillaEl = document.getElementById('pi-casilla');
+    const tendEl    = document.getElementById('pi-tendency');
+    const psSmall   = document.getElementById('psn-small-val');
+    const psBig     = document.getElementById('psn-big-val');
     const winsEl    = document.getElementById('agent-wins');
     const lossesEl  = document.getElementById('agent-losses');
     const dotsEl    = document.getElementById('result-dots');
 
-    if (nameEl)   nameEl.innerText   = AGENT_NAMES[activeIaTab];
-    if (confEl)   confEl.innerText   = s.confidence || '0%';
-    if (stratEl)  stratEl.innerText  = s.rule || AGENT_MODES[activeIaTab];
-    if (statusEl) statusEl.innerText = s.reason || 'ANALIZANDO...';
-    if (syncEl)   syncEl.innerText   = s.mode ? `MODO: ${s.mode}` : 'SINCRONIZANDO BDD...';
+    if (nameEl)   nameEl.innerText   = (AGENT_NAMES[activeIaTab] || 'AGENT').toUpperCase();
+    if (confEl)   confEl.innerText   = (s.confidence || '90%') + ' CONF.';
+    if (statusMsg) statusMsg.innerText = (s.rule || AGENT_MODES[activeIaTab]) + ' ' + (s.radius || 'N9');
     if (targetEl) targetEl.innerText = s.top !== undefined ? s.top : '--';
-    if (radiusEl) radiusEl.innerText = s.radius || 'N9';
-
-    // Zone label
-    const top = s.top;
-    if (zoneEl) {
-        if (top >= 1 && top <= 9)        { zoneEl.innerText = 'SMALL'; zoneEl.style.color = 'var(--green)'; }
-        else if (top >= 10 && top <= 19) { zoneEl.innerText = 'BIG';   zoneEl.style.color = 'var(--red)'; }
-        else                             { zoneEl.innerText = '--';     zoneEl.style.color = 'var(--muted)'; }
+    if (radiusEl) radiusEl.innerText = s.radius ? s.radius.toLowerCase() : 'n9';
+    
+    // Tendency from last dist
+    if (tendEl && history.length >= 2) {
+        const d = calcDist(history[history.length-2], history[history.length-1]);
+        tendEl.innerText = `TENDENCIA: ${d >= 0 ? 'Der.' : 'Izq.'} ${d >= 0 ? '↺' : '↻'}`;
     }
 
-    // Casilla
-    if (casillaEl) casillaEl.innerText = top !== undefined ? top : '--';
+    // Secondary snipes (SMALL/BIG)
+    if (psSmall) psSmall.innerText = s.smallSnipe !== undefined ? s.smallSnipe : '--';
+    if (psBig)   psBig.innerText   = s.bigSnipe !== undefined   ? s.bigSnipe   : '--';
 
     // W-L
     const h = iaSignalsHistory[activeIaTab] || [];
@@ -139,7 +135,7 @@ function renderTravelPanel() {
         patEl.className = `badge ${patClass}`;
     }
 
-    // Last zone badge
+    // Last zone badge (based on number for the badge, but distance for the table)
     const lastN = history[history.length - 1];
     if (lastZEl) {
         if (lastN >= 1 && lastN <= 9)        { lastZEl.textContent = 'LAST: SMALL'; lastZEl.style.color = 'var(--green)'; }
@@ -157,16 +153,17 @@ function renderTravelPanel() {
         const numClass = (n === 0) ? 'num-zero' : (RED_NUMS.has(n) ? 'num-red' : 'num-black');
         const dirClass = dist >= 0 ? 'dir-der' : 'dir-izq';
         
+        // Correct classification based on DISTANCE (Phase 31 Fix)
         let phaseHtml = '';
-        if (n >= 1 && n <= 9)        phaseHtml = `<span class="phase-small">SMALL</span>`;
-        else if (n >= 10 && n <= 19) phaseHtml = `<span class="phase-big">BIG</span>`;
+        if (absDist >= 1 && absDist <= 9)        phaseHtml = `<span class="phase-pill pill-small">SMALL</span>`;
+        else if (absDist >= 10 && absDist <= 19) phaseHtml = `<span class="phase-pill pill-big">BIG</span>`;
 
         const isLast = (i === 0);
         return `<tr>
-            <td class="row-n ${isLast ? 'last-row' : ''}">${idxInHistory + 1}${isLast ? '<span style="font-size:8px;color:var(--accent)"> ★</span>' : ''}</td>
+            <td class="row-n">${idxInHistory + 1}${isLast ? '<span style="font-size:8px;color:var(--accent)"> ★</span>' : ''}</td>
             <td class="${numClass}">${n}</td>
             <td style="color:var(--text2)">${absDist}p</td>
-            <td class="${dirClass}">${dir} <span style="font-size:9px;opacity:0.6">↺</span></td>
+            <td class="${dirClass}">${dir} <span style="font-size:9px;opacity:0.6">${dist >= 0 ? '↺' : '↻'}</span></td>
             <td>${phaseHtml}</td>
         </tr>`;
     }).join('');

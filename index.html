@@ -45,37 +45,32 @@
         </div>
         <div class="agent-sync-row" id="agent-sync">SINCRONIZANDO BDD...</div>
 
-        <!-- Bottom play info -->
-        <div class="play-info-bar" id="play-info-bar">
-            <div class="play-chip">
-                <span class="pi-label">JUGAR</span>
-                <span class="pi-val" id="pi-zone">--</span>
+        <!-- 3-Column Prediction Grid -->
+        <div class="prediction-grid-3" id="prediction-grid">
+            <div class="p-box pb-left">
+                <span class="p-label">SMALL</span>
+                <span class="p-val" id="psn-small-val">--</span>
+                <span class="p-sub">n4</span>
             </div>
-            <div class="play-chip">
-                <span class="pi-label">CASILLA</span>
-                <span class="pi-val" id="pi-casilla">--</span>
+            <div class="p-box pb-center">
+                <div class="p-val-main" id="target-number">--</div>
+                <div class="p-sub-main" id="pi-radius">n9</div>
+                <div class="p-tendency" id="pi-tendency">TENDENCIA: --</div>
             </div>
-            <div class="play-chip target-chip">
-                <span class="pi-val big-target" id="target-number">--</span>
-                <span class="pi-label"><span id="pi-radius">N9</span></span>
-            </div>
-            <div class="play-chip wl-chip">
-                <span class="pi-label">W:<span id="agent-wins">0</span></span>
-                <span class="pi-label">L:<span id="agent-losses">0</span></span>
+            <div class="p-box pb-right">
+                <span class="p-label">BIG</span>
+                <span class="p-val" id="psn-big-val">--</span>
+                <span class="p-sub">n4</span>
             </div>
         </div>
 
-        <!-- History dots -->
-        <div class="result-dots" id="result-dots">
-            <span class="rd rd-loss">L</span>
-            <span class="rd rd-loss">L</span>
+        <div class="agent-footer-stats">
+            <span class="st">W:<span id="agent-wins">0</span> L:<span id="agent-losses">0</span></span>
+            <span class="status-msg" id="agent-status-msg">SOPORTE BIG N9</span>
         </div>
-    </section>
 
-    <!-- ═══ SUBMIT NUMBER ═══ -->
-    <section class="submit-section">
-        <input type="number" id="spin-number" min="0" max="36" placeholder="Nº (0-36)" class="spin-input" />
-        <button class="spin-btn" onclick="submitNumber()">▶ REGISTRAR</button>
+        <!-- Result dots -->
+        <div class="result-dots" id="result-dots"></div>
     </section>
 
     <!-- ═══ TRAVEL DATA ═══ -->

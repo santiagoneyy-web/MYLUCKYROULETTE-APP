@@ -40,7 +40,7 @@ function getPhysics(prev, current) {
     
     let distanceClass = 'ULTRA';
     if (absDist >= 1 && absDist <= 9) distanceClass = 'Small';
-    else if (absDist >= 10 && absDist <= 18) distanceClass = 'Big';
+    else if (absDist >= 10 && absDist <= 19) distanceClass = 'Big';
     
     return { distance: distanceClass, direction };
 }
