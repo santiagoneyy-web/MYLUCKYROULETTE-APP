@@ -6,11 +6,11 @@ const history      = [];
 const iaSignalsHistory = [ [], [], [], [], [] ]; 
 let activeIaTab    = 0; 
 let lastIaSignals = [
-    { top: 17, rule: 'READY', radius:'N9' },
-    { top: 16, rule: 'READY', radius:'N2/N3' },
-    { top: 5,  rule: 'READY', radius:'N9' },
-    { top: 22, rule: 'READY', radius:'N9' },
-    { top: 10, rule: 'READY', radius:'N4' }
+    { top: 17, rule: 'READY', radius:'N9', smallSnipe: 5, bigSnipe: 14 },
+    { top: 16, rule: 'READY', radius:'N2/N3', smallSnipe: 5, bigSnipe: 14  },
+    { top: 5,  rule: 'READY', radius:'N9', smallSnipe: 5, bigSnipe: 14  },
+    { top: 22, rule: 'READY', radius:'N9', smallSnipe: 5, bigSnipe: 14  },
+    { top: 10, rule: 'READY', radius:'N4', smallSnipe: 5, bigSnipe: 14  }
 ]; 
 
 // Agent names as per user request
@@ -286,11 +286,11 @@ function submitNumber(val, silent = false, batch = false) {
                     const agCel  = masterSignals.find(s => s.name === 'CELULA');
                     
                     lastIaSignals = [
-                        { top: ag17?.number,   confidence: ag17?.confidence,   reason: ag17?.reason,   rule: ag17?.rule,   mode: ag17?.mode,   radius: ag17?.radius   || 'N9'  },
-                        { top: ag16?.tp,        confidence: ag16?.confidence,   reason: ag16?.reason,   rule: ag16?.rule,   mode: ag16?.mode,   radius: 'N2/N3',        tp: ag16?.tp, cors: ag16?.cor },
-                        { top: ag1717?.number, confidence: ag1717?.confidence, reason: ag1717?.reason, rule: ag1717?.rule, mode: ag1717?.mode, radius: ag1717?.radius || 'N9'  },
-                        { top: agN18?.number,  confidence: agN18?.confidence,  reason: agN18?.reason,  rule: agN18?.rule,  mode: agN18?.mode,  radius: agN18?.radius  || 'N9'  },
-                        { top: agCel?.number,  confidence: agCel?.confidence,  reason: agCel?.reason,  rule: agCel?.rule,  mode: agCel?.mode,  radius: agCel?.radius  || 'N4'  }
+                        { top: ag17?.number,   confidence: ag17?.confidence,   reason: ag17?.reason,   rule: ag17?.rule,   mode: ag17?.mode,   radius: ag17?.radius   || 'N9', smallSnipe: ag17?.smallSnipe, bigSnipe: ag17?.bigSnipe },
+                        { top: ag16?.tp,        confidence: ag16?.confidence,   reason: ag16?.reason,   rule: ag16?.rule,   mode: ag16?.mode,   radius: 'N2/N3',        tp: ag16?.tp, cors: ag16?.cor, smallSnipe: ag16?.smallSnipe, bigSnipe: ag16?.bigSnipe },
+                        { top: ag1717?.number, confidence: ag1717?.confidence, reason: ag1717?.reason, rule: ag1717?.rule, mode: ag1717?.mode, radius: ag1717?.radius || 'N9', smallSnipe: ag1717?.smallSnipe, bigSnipe: ag1717?.bigSnipe },
+                        { top: agN18?.number,  confidence: agN18?.confidence,  reason: agN18?.reason,  rule: agN18?.rule,  mode: agN18?.mode,  radius: agN18?.radius  || 'N9', smallSnipe: agN18?.smallSnipe, bigSnipe: agN18?.bigSnipe },
+                        { top: agCel?.number,  confidence: agCel?.confidence,  reason: agCel?.reason,  rule: agCel?.rule,  mode: agCel?.mode,  radius: agCel?.radius  || 'N4', smallSnipe: agCel?.smallSnipe, bigSnipe: agCel?.bigSnipe }
                     ];
                 }
             } catch(e) { console.error('Predict error:', e); }
