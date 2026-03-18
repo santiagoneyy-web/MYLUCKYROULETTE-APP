@@ -158,12 +158,17 @@ function getIAMasterSignals(prox, sig, history) {
     const lastNum = history[history.length - 1];
     const signals = [];
 
+    // Analyze Patterns
+    const isBigTrend = history.slice(-5).filter(n => n >= 10 && n <= 18).length >= 3;
+    const isSmallTrend = history.slice(-5).filter(n => n >= 1 && n <= 9).length >= 3;
+    
+    // Zig Zag Detectors
+    const isDirZigZag = history.length >= 3 && Math.sign(calcDist(history[history.length-2], history[history.length-1])) !== Math.sign(calcDist(history[history.length-3], history[history.length-2]));
+    const isZoneZigZag = history.length >= 3 && (history[history.length-1] >= 10) !== (history[history.length-2] >= 10);
+
     // 1. Android n16 (Six Strategie - The User's Core Logic)
     const ssOutcomes = getSixStrategieSignals(lastNum);
-    // Find the best strategy based on recent performance or just pick the base '+' for now
-    // In a full implementation, we would track hit rates for these 6.
     const activeSS = ssOutcomes[0]; // Base '+' strategy
-    
     signals.push({
         name: 'Android n16',
         tp: activeSS.tp,
@@ -172,43 +177,67 @@ function getIAMasterSignals(prox, sig, history) {
         number: activeSS.tp,
         confidence: "94%",
         reason: activeSS.reason,
-        rule: activeSS.rule,
-        mode: 'SIX STRATEGIE'
+        rule: 'SIX STRATEGIE',
+        mode: 'ZONAS'
     });
 
-    // 2. Android n17 (Physical Matrix - Base sig.casilla1)
+    // 2. Android n17 (FÍSICA - Casilla 1)
     signals.push({
         name: 'Android n17',
         number: sig.casilla1,
         confidence: "88%",
-        reason: "MATRIZ",
+        reason: "MATRIZ FISICA",
         rule: "FISICA",
         mode: "ESCUDO",
         betZone: getWheelNeighbors(sig.casilla1, 3)
     });
 
-    // 3. Android 1717 (Hybrid)
-    const isZigZag = history.length >= 3 && Math.sign(calcDist(history[history.length-2], history[history.length-1])) !== Math.sign(calcDist(history[history.length-3], history[history.length-2]));
-    let target1717 = isZigZag ? sig.casilla14 : sig.casilla5;
+    // 3. Android 1717 (HIBRIDA - Casilla 10 / N9)
+    // Goal: Cover a specific direction regardless of S/B.
+    const targetHibrida = sig.casilla10;
     signals.push({
         name: 'Android 1717',
-        number: target1717,
+        number: targetHibrida,
         confidence: "90%",
-        reason: isZigZag ? "ZIGZAG" : "CONSTANTE",
+        reason: "DIRECCION ESTABLE",
         rule: "HIBRIDO",
         mode: 'ATAQUE',
-        betZone: getWheelNeighbors(target1717, 3)
+        betZone: getWheelNeighbors(targetHibrida, 9) // N9 neighbors
     });
 
-    // 4. N18 (Soporte Pro)
+    // 4. N18 (SOPORTE - Casilla 19 o 1 / N9)
+    let targetSoporte = sig.casilla19; // Default for BIG
+    let sopReason = "ZONA BIG (DIS:18)";
+    if (isSmallTrend) {
+        targetSoporte = sig.casilla1;
+        sopReason = "ZONA SMALL (DIS:1)";
+    }
     signals.push({
         name: 'N18',
-        number: sig.casilla19,
+        number: targetSoporte,
         confidence: "86%",
-        reason: "ZONA OPUESTA",
+        reason: sopReason,
         rule: "SOPORTE",
         mode: 'SOPORTE',
-        betZone: getWheelNeighbors(sig.casilla19, 3)
+        betZone: getWheelNeighbors(targetSoporte, 9) // N9 neighbors
+    });
+
+    // 5. CELULA (SMALL & BIG Snipes - Casilla 5/14 / N4)
+    let targetSnipe = isBigTrend ? sig.casilla14 : sig.casilla5;
+    let snipeReason = isBigTrend ? "BIG SNIPE (DIS:13)" : "SMALL SNIPE (DIS:4)";
+    if (isZoneZigZag) {
+        targetSnipe = (history[history.length-1] >= 10) ? sig.casilla5 : sig.casilla14;
+        snipeReason = "ZIG ZAG SNIPE";
+    }
+    
+    signals.push({
+        name: 'CELULA',
+        number: targetSnipe,
+        confidence: "92%",
+        reason: snipeReason,
+        rule: "SNIPER",
+        mode: 'GANANCIA',
+        betZone: getWheelNeighbors(targetSnipe, 4) // N4 neighbors
     });
 
     return signals;
