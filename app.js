@@ -258,9 +258,8 @@ async function submitNumber(val, silent = false, batch = false) {
 
     if (!batch) {
         renderHistory(); 
-        renderTravelPanel(sig); 
+        renderTravelPanel(null); 
         drawWheel(history[history.length - 1]);
-        renderSignalsPanel(finalSigs);
         
         if (!silent) {
             numInput.value = ''; 
