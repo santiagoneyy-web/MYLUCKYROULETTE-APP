@@ -285,47 +285,27 @@ window.toggleSettings = () => {
 const clearBtn = document.getElementById('clear-btn');
 if (clearBtn) clearBtn.addEventListener('click', wipeData);
 
-tableSelect.addEventListener('change', async () => {
-    currentTableId = tableSelect.value; if (!currentTableId) return;
-    const spins = await apiFetchHistory(currentTableId); 
-    wipeData(); 
-    for (const s of spins) {
-        if (s && s.number !== undefined) await submitNumber(s.number, true, true);
-    }
-    submitNumber(null, true, false);
-});
-
-async function loadTables() { 
-    const ts = await apiFetchTables(); 
+document.addEventListener('DOMContentLoaded', () => { 
     if (tableSelect) {
-        tableSelect.innerHTML = '<option value="">-- MESA --</option>' + ts.map(t => `<option value="${t.id}">${t.name}</option>`).join(''); 
-        // Auto-select first table if none selected
-        if (ts.length > 0 && !currentTableId) {
-            tableSelect.value = ts[0].id;
-            tableSelect.dispatchEvent(new Event('change'));
-        }
-    }
-}
-
-// Real-time synchronization interval
-async function syncData() {
-    if (!currentTableId) return;
-    try {
-        const spins = await apiFetchHistory(currentTableId);
-        // Only trigger full update if new spins arrived
-        if (spins.length !== history.length) {
-            wipeData();
+        tableSelect.addEventListener('change', async () => {
+            currentTableId = tableSelect.value; if (!currentTableId) return;
+            const spins = await apiFetchHistory(currentTableId); 
+            wipeData(); 
             for (const s of spins) {
                 if (s && s.number !== undefined) await submitNumber(s.number, true, true);
             }
             submitNumber(null, true, false);
-        }
-    } catch (e) { console.error("Sync Error:", e); }
-}
+        });
+    }
+    
+    loadTables().then(() => {
+        // Force initial render
+        renderHistory();
+        renderTravelPanel(null);
+        drawWheel();
+        renderSignalsPanel(lastIaSignals);
+    });
 
-document.addEventListener('DOMContentLoaded', () => { 
-    loadTables(); 
     updateClock();
-    // Start auto-sync polling
     setInterval(syncData, 5000); 
 });
