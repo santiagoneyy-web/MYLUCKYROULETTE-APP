@@ -169,29 +169,30 @@ async function submitNumber(val, silent = false, batch = false) {
         });
     }
 
-    // 2. UI RENDERING (Triggered if not in batch mode, even if no number was provided)
-    if (!batch) {
-        if (typeof computeDealerSignature === 'undefined' || typeof analyzeSpin === 'undefined') {
-            console.error("❌ Critical: predictor.js logic not loaded.");
-            return;
-        }
+    // 2. LOGIC EVALUATION (Generate predictions for the NEXT spin)
+    if (typeof computeDealerSignature === 'undefined' || typeof analyzeSpin === 'undefined') {
+        console.error("❌ Critical: predictor.js logic not loaded.");
+        return;
+    }
 
-        const sig = computeDealerSignature(history);
-        const res = analyzeSpin(history, stats);
-        const prx = projectNextRound(history, stats);
-        const sigs = getIAMasterSignals(prx, sig, history) || [];
-        
-        // Agent 5 (Célula)
-        sigs.push({ 
-            name: 'Célula', 
-            number: latestAgent5Top,
-            confidence: latestAgent5Top !== null ? (latestAgent5Dna ? 'PERFECTION' : 'MAX') : '0%',
-            rule: latestAgent5Dna ? 'PERFECT DNA' : (latestAgent5Top !== null ? 'BDD' : 'APRENDIENDO'),
-            reason: latestAgent5Top !== null ? (latestAgent5Dna ? 'SINCRONIA TOTAL' : 'HISTÓRICO') : (history.length < 50 ? `GRABANDO ${history.length}/50` : 'ANALIZANDO...')
-        });
-        
-        lastIaSignals = sigs;
-        
+    const sig = computeDealerSignature(history);
+    const res = analyzeSpin(history, stats);
+    const prx = projectNextRound(history, stats);
+    const sigs = getIAMasterSignals(prx, sig, history) || [];
+    
+    // Agent 5 (Célula)
+    sigs.push({ 
+        name: 'Célula', 
+        number: latestAgent5Top,
+        confidence: latestAgent5Top !== null ? (latestAgent5Dna ? 'PERFECTION' : 'MAX') : '0%',
+        rule: latestAgent5Dna ? 'PERFECT DNA' : (latestAgent5Top !== null ? 'BDD' : 'APRENDIENDO'),
+        reason: latestAgent5Top !== null ? (latestAgent5Dna ? 'SINCRONIA TOTAL' : 'HISTÓRICO') : (history.length < 50 ? `GRABANDO ${history.length}/50` : 'ANALIZANDO...')
+    });
+    
+    lastIaSignals = sigs;
+
+    // 3. UI RENDERING (Skip if batching for performance)
+    if (!batch) {
         renderHistory(); 
         drawWheel(isNaN(n) ? null : n); 
         buildStratTabs(res); 
@@ -214,9 +215,25 @@ numInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitNumber(
 clearBtn.addEventListener('click', wipeData);
 tableSelect.addEventListener('change', async () => {
     currentTableId = tableSelect.value; if (!currentTableId) return;
-    const spins = await apiFetchHistory(currentTableId); wipeData();
+    const spins = await apiFetchHistory(currentTableId); 
+    wipeData(); // Reset local state
+    
+    // 1. Ingest history (This evaluates logic for each spin to build stats)
     for (const s of spins) await submitNumber(s.number, true, true);
+    if (tableSpinCount) tableSpinCount.textContent = `(${spins.length})`;
+    
+    // 2. Sync latest prediction for the NEXT round
+    try {
+        const p = await apiFetchPredict(currentTableId);
+        if (p) {
+            latestAgent5Top = p.agent5_top;
+            latestAgent5Dna = p.agent5_dna || false;
+            console.log("🧬 [Master Brain] Initial prediction synchronized:", latestAgent5Top);
+        }
+    } catch(e) { console.error("Sync error:", e); }
+
+    // 3. Trigger final UI update
     submitNumber(null, true, false);
 });
-async function loadTables() { const ts = await apiFetchTables(); tableSelect.innerHTML = '<option value="">-- Mesa --</option>' + ts.map(t => `<option value="${t.id}">${t.name}</option>`).join(''); }
+async function loadTables() { const ts = await apiFetchTables(); if (tableSelect) tableSelect.innerHTML = '<option value="">-- Mesa --</option>' + ts.map(t => `<option value="${t.id}">${t.name}</option>`).join(''); }
 document.addEventListener('DOMContentLoaded', () => { loadTables(); drawWheel(null); });
