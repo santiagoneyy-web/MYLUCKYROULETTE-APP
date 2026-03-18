@@ -38,11 +38,25 @@ function saveFallback() {
 }
 
 async function initDB() {
-    if (process.env.MONGODB_URI) {
+    let mongoUri = process.env.MONGODB_URI;
+    
+    if (mongoUri) {
         try {
-            await mongoose.connect(process.env.MONGODB_URI);
+            console.log('📡 [DB] Connecting to MongoDB Atlas...');
+            
+            // Basic sanitization: if the user put a raw password with special chars like ')' 
+            // We should warn that it must be encoded, or try a simple fix.
+            if (mongoUri.includes(')') && !mongoUri.includes('%29')) {
+                console.warn('⚠️ [DB] Warning: Your MONGODB_URI contains ")". If connection fails, please encode it as %29');
+            }
+
+            await mongoose.connect(mongoUri, {
+                serverSelectionTimeoutMS: 5000, // 5s timeout instead of waiting forever
+                connectTimeoutMS: 10000
+            });
+            
             useMongo = true;
-            console.log('✅ [DB] Connected to MongoDB Atlas.');
+            console.log('✅ [DB] Connected to MongoDB Atlas successfully.');
 
             // Pre-seed tables if empty
             const tableCount = await Table.countDocuments();
@@ -50,38 +64,15 @@ async function initDB() {
                 console.log('[DB] Seeding default tables in MongoDB...');
                 await Table.insertMany(fallbackData.tables);
             }
-
-            // Resync logic: if JSON has spins, upload them to Mongo and clear JSON
-            loadFallback();
-            if (fallbackData.spins && fallbackData.spins.length > 0) {
-                console.log(`[DB] Resyncing ${fallbackData.spins.length} spins from JSON to MongoDB...`);
-                
-                // Mongoose handles `_id`, we just push our objects. However, `id` might conflict if we don't handle it.
-                // We'll generate new incremental IDs for them.
-                const maxSpin = await Spin.findOne().sort('-id').exec();
-                let nextId = maxSpin ? maxSpin.id + 1 : 1;
-                
-                const spinsToInsert = fallbackData.spins.map(s => {
-                    return {
-                        ...s,
-                        id: nextId++
-                    };
-                });
-                
-                await Spin.insertMany(spinsToInsert);
-                console.log('[DB] Resync complete. Clearing local JSON cache.');
-                
-                // Clear the fallback JSON spins
-                fallbackData.spins = [];
-                saveFallback();
-            }
+            console.log('✅ [DB] Fresh Session: Local JSON sync disabled.');
         } catch (err) {
-            console.error('❌ [DB] MongoDB Connection Error. Falling back to JSON.', err.message);
+            console.error('❌ [DB] MongoDB Connection Failed:', err.message);
+            console.log('ℹ️ [DB] Tip: Ensure your IP is whitelisted in MongoDB Atlas (Network Access -> Add IP Address -> Allow Access From Anywhere).');
             useMongo = false;
             loadFallback();
         }
     } else {
-        console.warn('⚠️ [DB] No MONGODB_URI found. Defaulting to JSON storage.');
+        console.warn('⚠️ [DB] No MONGODB_URI found in .env file. Falling back to JSON storage.');
         useMongo = false;
         loadFallback();
     }

@@ -587,65 +587,48 @@ function getIAMasterSignals(prox, sig, history) {
     
     // TOP NUMBER (MODO ESCUDO N9)
     let escudoTarget = sig.recommendedPlay === 'SMALL' ? sig.casilla1 : (sig.recommendedPlay === 'BIG' ? sig.casilla19 : sig.casilla10);
+    // ── NODO DE CONFIANZA AGNOSTICO ──
+    const MIN_CONF_THRESHOLD = 70;
+    const getFinalSignal = (val, confStr, rule, reason, mode) => {
+        const confInt = parseInt(confStr) || 0;
+        if (confInt < MIN_CONF_THRESHOLD) {
+            return { val: null, conf: "0%", rule: "CONFIDENCIA BAJA", reason: "UMBRAL NO ALCANZADO", mode: 'PAUSA' };
+        }
+        return { val, conf: confStr, rule, reason, mode };
+    };
+
+    const fis = getFinalSignal(escudoTarget, finalConf, finalRule, finalReason, 'ESCUDO');
     
-    if (sig.energyAlternating || isDirZigZag) {
-        escudoTarget = sig.casilla10; 
-        finalReason = "ZIG ZAG INESTABLE (CHOP) - RIESGO";
-        finalRule = "STOP";
-        finalConf = "0%";
-    } else if (sig.isFuga || sig.recommendedPlay === 'HIBRIDO') {
-        escudoTarget = sig.casilla10;
-        finalReason = sig.isFuga ? "FUGA DETECTADA - BLOQUEO HÍBRIDO" : "DISTANCIA INCONSTANTE - HÍBRIDO";
-        finalRule = "HÍBRIDO N9";
-        finalConf = "88%";
-    } else if (sig.isRuptura) {
-        escudoTarget = sig.casilla19;
-        finalReason = "RUPTURA DETECTADA - POLO BIG";
-        finalRule = "SOPORTE BIG N9";
-        finalConf = "91%";
-    } else {
-        finalRule = sig.recommendedPlay === 'SMALL' ? "SOPORTE SMALL N9" : "SOPORTE BIG N9";
-        finalReason = isStable ? "BLOQUEO PREVENTIVO" : "DIR. INEXACTA - BLOQUEO TOTAL";
-        finalConf = isStable ? "88%" : "85%";
-    }
-
-    if (isChaos && !isStable) {
-        finalRule = "STOP";
-        finalReason = "CAOS DETECTADO - PAUSA";
-        finalConf = "0%";
-    }
-
-    // JUGADA EXACTA (MODO ATAQUE N4)
-    let lanzaTarget = sig.recommendedPlay === 'SMALL' ? sig.casilla5 : (sig.recommendedPlay === 'BIG' ? sig.casilla14 : sig.casilla10);
-
     // Agent 1: FISICA STUDIO (Physical Matrix - TOP NUMBER N9)
     signals.push({
         name: 'FISICA STUDIO',
-        number: escudoTarget,
+        number: fis.val,
         small: sig.casilla5,
         big: sig.casilla14,
-        confidence: finalConf,
-        reason: finalReason,
-        rule: finalRule,
-        mode: 'ESCUDO', // Siempre N9
-        lanzaTarget: lanzaTarget, // Para la recomendación abajo
-        recPlay: sig.recommendedPlay, // Exponer decision
+        confidence: fis.conf,
+        reason: fis.reason,
+        rule: fis.rule,
+        mode: fis.mode,
+        lanzaTarget: (sig.recommendedPlay === 'SMALL' ? sig.casilla5 : sig.casilla14),
+        recPlay: sig.recommendedPlay,
         energyAlternating: sig.energyAlternating
     });
 
     // Agent 2: SIX STRATEGIE (Mathematical Momentum)
     const bestStrat = getBestMathematicalStrategy(prox);
+    const six = getFinalSignal(bestStrat.tp, (bestStrat.momentum > 0 ? "92%" : "85%"), bestStrat.rule, "MOMENTUM MATEMÁTICO", 'MATH');
+    
     signals.push({
         name: 'SIX STRATEGIE',
         strategy: bestStrat.strategy,
-        tp: bestStrat.tp,
+        tp: six.val,
         cor: bestStrat.cor,
-        betZone: bestStrat.betZone, // CRITICAL: pass betZone for correct win/loss eval
-        number: bestStrat.tp,       // also expose as .number so generic evaluator works
-        confidence: bestStrat.momentum > 0 ? "92%" : "85%",
-        reason: "MOMENTUM MATEMÁTICO",
-        rule: bestStrat.rule,
-        mode: 'MATH',
+        betZone: six.val !== null ? bestStrat.betZone : [], 
+        number: six.val,
+        confidence: six.conf,
+        reason: six.reason,
+        rule: six.rule,
+        mode: six.mode,
         streakWin: bestStrat.streakWin,
         streakLoss: bestStrat.streakLoss
     });

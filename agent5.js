@@ -54,10 +54,18 @@ async function predictAgent5(tableId, currentHistoryNumbers) {
     // and see what the *next* number was mostly.
     
     try {
-        // Query MongoDB for the last 5000 spins for this table
-        // We could use an aggregation pipeline, but for simplicity we fetch and scan.
-        // It's very fast in Node.js for 5000 records.
-        const history = await Spin.find({ table_id: tableId }).sort({ id: 1 }).limit(5000).exec();
+        let history = [];
+        if (Spin.db.readyState === 1) { // 1 = connected
+            history = await Spin.find({ table_id: tableId }).sort({ id: 1 }).limit(5000).exec();
+        } else {
+            // Fallback to local file if Mongo is not connected
+            const db = require('./database');
+            history = await new Promise((resolve, reject) => {
+                db.getHistory(tableId, 5000, (err, rows) => {
+                    if (err) reject(err); else resolve(rows);
+                });
+            });
+        }
         const nums = history.map(h => h.number);
         
         let nextNumberFrequencies = {};

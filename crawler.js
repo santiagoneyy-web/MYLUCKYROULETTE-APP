@@ -153,17 +153,6 @@ async function poll() {
             }
         }
 
-        // ── Post to our API ────────────────────────────────────
-        try {
-            await axios.post(API_URL, {
-                table_id: parseInt(TABLE_ID),
-                number: parseInt(number),
-                source: 'casino_api'
-            }, { timeout: 10000 });
-            console.log(`✅ [T${TABLE_ID}] Posted: ${number}`);
-        } catch (postErr) {
-            console.error(`❌ [T${TABLE_ID}] API Post Error: ${postErr.message}`);
-        }
 
     } catch (fetchErr) {
         consecutiveErrors++;

@@ -139,10 +139,15 @@ app.post('/api/spin', async (req, res) => {
                 if (ag4) newPredictions.agent4_top = ag4.number;
             }
 
-            // Agent 5 (Historical Similarity on MongoDB)
-            if (isMongo) {
+            // Agent 5 (Historical Similarity)
+            // It now works with both Mongo and JSON as fallback
+            const historyCount = numsOnly.length;
+            if (historyCount >= 50) {
                 const ag5Top = await agent5.predictAgent5(table_id, numsOnly);
                 newPredictions.agent5_top = ag5Top;
+                console.log(`🤖 [Agent 5] Generated prediction based on ${historyCount} spins.`);
+            } else {
+                console.log(`⏳ [Agent 5] Waiting for more data (${historyCount}/50)...`);
             }
         }
 
@@ -272,9 +277,10 @@ app.get('/api/admin/wipe-all-spins-securely', async (req, res) => {
 // DELETE all spins for all tables (frontend "Wipe All" button)
 app.delete('/api/wipe-all', async (req, res) => {
     try {
+        console.log('🧹 [Wipe All] Triggering full database cleaning...');
         if (db.getUseMongo()) {
             const result = await Spin.deleteMany({});
-            res.json({ success: true, deleted: result.deletedCount, message: `Borrados ${result.deletedCount} registros de todas las mesas.` });
+            res.json({ success: true, deleted: result.deletedCount, message: `Borrados ${result.deletedCount} registros de MongoDB.` });
         } else {
             db.wipeAllSpins((err) => {
                 if (err) return res.status(500).json({ error: err.message });
@@ -282,6 +288,7 @@ app.delete('/api/wipe-all', async (req, res) => {
             });
         }
     } catch (e) {
+        console.error('Wipe failed:', e);
         res.status(500).json({ error: e.message });
     }
 });

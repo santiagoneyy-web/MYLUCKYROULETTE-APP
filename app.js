@@ -10,6 +10,8 @@ const iaSignalsHistory = [ [], [], [], [], [] ];
 const lastIaHits = [null, null, null, null, null];
 const iaWins = [0, 0, 0, 0, 0];
 const iaLosses = [0, 0, 0, 0, 0];
+let recommendedWin = 0;
+let recommendedLoss = 0;
 let lastIaSignals = [null, null, null, null, null]; 
 let activeIaTab    = 0; // index of active IA signal (0-4)
 let latestAgent5Top = null; // Stored from API calls
@@ -452,7 +454,11 @@ function renderSignalsPanel(signals, sig, real) {
                         </div>
                         <div class="ia-side-box"><div class="ia-side-lbl">BIG</div><div class="ia-side-num">${s.big}<sup>n4</sup></div></div>
                     </div>
-                    <div class="ia-slot-footer"><div class="ia-reason">${sReason}</div><div class="ia-rule">${sRule}</div></div>
+                    <div class="ia-slot-footer">
+                        <div class="ia-stats-mini">SESIÓN W: ${recommendedWin} L: ${recommendedLoss} | AGENTE W: ${iaWins[activeIaTab]} L: ${iaLosses[activeIaTab]}</div>
+                        <div class="ia-reason">${sReason}</div>
+                        <div class="ia-rule">${sRule}</div>
+                    </div>
                     ${travelRecHTML}
                 </div>
             `;
@@ -607,7 +613,7 @@ function renderTravelPanel(sig, currentSignals = null) {
 }
 
 // ── Main submit ───────────────────────────────────────────────
-async function submitNumber(nOverride = null, skipApi = false) {
+async function submitNumber(nOverride = null, skipApi = false, isSilent = false) {
     const val = nOverride !== null ? String(nOverride) : numInput.value.trim();
     const n = parseInt(val, 10);
     
@@ -658,27 +664,25 @@ async function submitNumber(nOverride = null, skipApi = false) {
     // 2. Actualizar historia
     history.push(n);
 
+    if (isSilent) return; // Skip heavy UI/calc if silent batch mode
+
     // Draw wheel with latest number highlighted
     drawWheel(n);
     renderHistory();
 
     // 3. Detección de HIT para SEÑALES IA (evaluación por zona específica de cada agente)
+    // CRITICAL: We only evaluate ONCE per unique spin.
     lastIaSignals.forEach((s, idx) => {
-        if (!s) return;
+        if (!s || s.evaluated) return; // Skip if already evaluated for this spin
+        s.evaluated = true; 
         
-        // ── Step A: Check win/loss using the agent's OWN zone ──
         let tpWin = false;
-        const sName = s.name || '';
-        
-        // Ensure we check the correct property for win detection
         const betZone = s.betZone || [];
         const targetNum = s.number;
 
         if (betZone.length > 0) {
-            // SIX STRATEGIE or any agent with explicit zone
             tpWin = betZone.includes(n);
         } else if (targetNum !== null && targetNum !== undefined) {
-            // Physical agents or generic number targets use N9
             tpWin = wheelDistance(n, targetNum) <= 9;
         }
         
@@ -690,19 +694,18 @@ async function submitNumber(nOverride = null, skipApi = false) {
             iaSignalsHistory[idx].push('loss');
         }
         if (iaSignalsHistory[idx].length > 15) iaSignalsHistory[idx].shift();
+        
+        // ── Recommended Play Global Counter ──
+        if (idx === activeIaTab) {
+            if (tpWin) recommendedWin++; else recommendedLoss++;
+        }
 
-        // ── Step B: Check classification for the GOLD badge (SMALL/BIG) ──
         const isSmall = s.small !== null && s.small !== undefined && wheelDistance(n, s.small) <= 4;
         const isBig   = s.big   !== null && s.big   !== undefined && wheelDistance(n, s.big)   <= 4;
         
         let hitType = null;
         if (isSmall) hitType = 'SMALL';
         else if (isBig) hitType = 'BIG';
-        else if (tpWin && s.small !== null && s.big !== null) {
-            const distS = wheelDistance(n, s.small);
-            const distB = wheelDistance(n, s.big);
-            hitType = distS <= distB ? 'SMALL' : 'BIG';
-        }
         lastIaHits[idx] = hitType;
     });
 
@@ -925,10 +928,11 @@ function startAutoPolling(tableId) {
             if (latestId !== lastKnownSpinId) {
                 const newSpins = spins.filter(s => s.id > lastKnownSpinId);
                 lastKnownSpinId = latestId;
-                const autoBadge = document.getElementById('ocr-badge'); // Reuse for now
-                if (autoBadge) autoBadge.style.display = 'inline-block';
-                for (const spin of newSpins) {
-                    await submitNumber(spin.number, true);
+                
+                // Process all new numbers silently first, then do ONE final UI update
+                for (let i = 0; i < newSpins.length; i++) {
+                    const isLast = (i === newSpins.length - 1);
+                    await submitNumber(newSpins[i].number, true, !isLast); 
                 }
                 
                 // Fetch fresh prediction after adding new spins
@@ -953,7 +957,9 @@ function startAutoPolling(tableId) {
                     renderSignalsPanel(signals, sig, history[history.length-1]);
                 }
             }
-        } catch {}
+        } catch (e) {
+            console.error("Polling error:", e);
+        }
     }, 5000);
 }
 
