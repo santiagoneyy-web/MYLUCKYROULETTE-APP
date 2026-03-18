@@ -60,14 +60,7 @@
     </main>
 
     <!-- ════════ INPUT SIDEBAR (Right) ════════ -->
-    <aside class="input-panel">
-        <div class="wheel-section" style="padding:20px; text-align:center; border-bottom:1px solid var(--border);">
-            <div class="wheel-wrap" style="position:relative; display:inline-block;">
-                <canvas id="wheel-canvas" width="180" height="180"></canvas>
-            </div>
-            <div id="history-strip" class="history-balls" style="margin-top:15px; display:flex; flex-wrap:wrap; gap:5px; justify-content:center;"></div>
-        </div>
-        <div class="manual-input" style="padding:20px;">
+        <div class="manual-input" style="padding:20px; border-bottom:1px solid var(--border);">
             <div style="font-size:0.6rem; text-transform:uppercase; color:var(--text-dim); margin-bottom:8px;">Manual Entry</div>
             <div style="display:flex; gap:5px;">
                 <input id="num-input" type="number" placeholder="#" style="width:60px; height:40px; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:8px; color:#fff; text-align:center; font-size:1.2rem; font-weight:700;" />
@@ -76,11 +69,16 @@
             </div>
             <div id="status-msg" class="status-banner" style="margin-top:10px; font-size:0.65rem; color:var(--accent); text-align:center;">System Online</div>
         </div>
+
+        <!-- History Strip moved up -->
+        <div style="padding:20px; border-bottom:1px solid var(--border);">
+            <div style="font-size:0.6rem; text-transform:uppercase; color:var(--text-dim); margin-bottom:8px;">Recent Numbers</div>
+            <div id="history-strip" class="history-balls" style="display:flex; flex-wrap:wrap; gap:5px; justify-content:center;"></div>
+        </div>
         
-        <!-- System Actions -->
-        <div style="padding:0 20px; margin-top:auto;">
-            <button id="add-table-btn" style="width:100%; margin-bottom:10px; padding:10px; background:rgba(74,124,255,0.1); color:var(--accent); border:1px solid var(--accent); border-radius:8px; font-size:0.7rem;">+ Nueva Mesa</button>
-            <button id="wipe-all-btn" style="width:100%; margin-bottom:20px; padding:10px; background:rgba(255,30,30,0.1); color:var(--red); border:1px solid rgba(255,30,30,0.3); border-radius:8px; font-size:0.7rem;">⚠ Wipe Databases</button>
+        <!-- System Actions Simplified -->
+        <div style="padding:20px; margin-top:auto;">
+            <button id="wipe-all-btn" style="width:100%; padding:10px; background:rgba(255,30,30,0.1); color:var(--red); border:1px solid rgba(255,30,30,0.3); border-radius:8px; font-size:0.7rem;">⚠ Wipe Databases</button>
         </div>
     </aside>
 </div>

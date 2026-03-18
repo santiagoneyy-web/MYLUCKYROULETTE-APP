@@ -36,25 +36,7 @@ function wheelDistance(a, b) {
     return dist > 18 ? 37 - dist : dist;
 }
 
-function drawWheel(highlightNum = null) {
-    const canvas = document.getElementById('wheel-canvas');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d'), cx = canvas.width / 2, cy = canvas.height / 2;
-    const outerR = cx - 4, innerR = outerR * 0.52, slice = (2 * Math.PI) / 37;
-    const WHEEL_ORDER = [0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26];
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    WHEEL_ORDER.forEach((n, i) => {
-        const ang = i * slice - Math.PI / 2;
-        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, outerR, ang, ang + slice);
-        ctx.fillStyle = n === 0 ? '#00ffa2' : (RED_NUMS.has(n) ? '#ff4b7d' : '#1a1a1a');
-        ctx.fill();
-        if (highlightNum === n) { ctx.lineWidth = 4; ctx.strokeStyle = '#f5c842'; ctx.stroke(); }
-        ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang + slice/2);
-        ctx.fillStyle = '#fff'; ctx.font = 'bold 9px Arial'; ctx.textAlign = 'center';
-        ctx.fillText(n, outerR * 0.82, 4); ctx.restore();
-    });
-    ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, 2*Math.PI); ctx.fillStyle = '#040818'; ctx.fill();
-}
+function drawWheel(highlightNum = null) { /* Removed for professional alignment */ }
 
 function renderHistory() {
     if (!historyEl) return;
@@ -101,18 +83,25 @@ function renderSignalsPanel(signals) {
             return;
         }
 
-        const h = (iaSignalsHistory[activeIaTab] || []).slice(-15);
-        const w = h.filter(x => x === 'win').length;
-        const l = h.filter(x => x === 'loss').length;
+        const h15 = (iaSignalsHistory[activeIaTab] || []).slice(-15);
+        const w15 = h15.filter(x => x === 'win').length;
+        const hit15 = h15.length > 0 ? Math.round((w15 / h15.length) * 100) : 0;
+
+        const hTotal = iaSignalsHistory[activeIaTab] || [];
+        const wTotal = hTotal.filter(x => x === 'win').length;
+        const hitTotal = hTotal.length > 0 ? Math.round((wTotal / hTotal.length) * 100) : 0;
 
         grid.innerHTML = `
         <div class="agent-card-pro">
             <div class="card-header-pro">
-                <span class="card-title-pro">${names[activeIaTab]} ANALYSIS (LAST 15: <span style="color:var(--green);">${w}W</span>/<span style="color:var(--red);">${l}L</span>)</span>
-                <span class="status-pill" style="color:var(--green); border-color:rgba(0,255,162,0.3);">CONF: ${s.confidence || '70%'}</span>
+                <span class="card-title-pro">${names[activeIaTab]} ANALYSIS</span>
+                <div style="text-align:right;">
+                    <div class="hit-rate-major">${hit15}% <small>HIT RATE</small></div>
+                    <div class="hit-rate-minor">HISTORICAL: ${hitTotal}%</div>
+                </div>
             </div>
             
-            <div class="target-pocket-pro">
+            <div class="target-pocket-pro" style="margin-top:10px;">
                 <div class="target-num-pro">${s.top} <span style="font-size:0.8rem; vertical-align:middle; opacity:0.6;">n9</span></div>
                 <div class="target-label-pro">TARGETED POCKET</div>
             </div>
@@ -200,15 +189,11 @@ async function submitNumber(val, silent = false, batch = false) {
         lastIaSignals.forEach((s, idx) => {
             if (!s || s.confidence === '0%' || s.rule === 'STOP') return;
             let win = false;
-            
-            // Top Number covers n9 (dist <= 4)
-            // Small/Big cover n4 (dist <= 2)
             const target = s.number !== null && s.number !== undefined ? s.number : s.top;
             if (target !== null && target !== undefined) {
                 const dist = wheelDistance(n, target);
-                win = (dist <= 4); // User clarified Top = n9
+                win = (dist <= 4); 
             }
-            
             if (win) iaWins[idx]++; else iaLosses[idx]++;
             iaSignalsHistory[idx].push(win ? 'win' : 'loss');
         });
@@ -233,7 +218,6 @@ async function submitNumber(val, silent = false, batch = false) {
 
     if (!batch) {
         renderHistory(); 
-        drawWheel(isNaN(n) ? null : n); 
         renderTravelPanel(sig); 
         renderSignalsPanel(finalSigs);
         
@@ -251,7 +235,6 @@ function wipeData() {
     iaSignalsHistory.forEach(h => h.length = 0); 
     lastIaSignals.fill(null); 
     renderHistory(); 
-    drawWheel(null); 
 }
 
 window.setActiveIaTab = (idx) => { activeIaTab = idx; submitNumber(null, true, false); };
@@ -276,6 +259,5 @@ async function loadTables() {
 
 document.addEventListener('DOMContentLoaded', () => { 
     loadTables(); 
-    drawWheel(null); 
     updateClock();
 });
