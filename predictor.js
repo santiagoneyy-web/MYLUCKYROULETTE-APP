@@ -115,18 +115,20 @@ function getWheelNeighbors(num, radius) {
 function getSixStrategieSignals(lastNum) {
     if (lastNum === undefined || lastNum === null) return [];
     
-    // The 6 Strategies defined by user (+3/-3 base with offsets)
-    const offsets = [
-        { name: '+',    val: 3 },
-        { name: '-',    val: -3 },
-        { name: '+,+1', val: 4 },
-        { name: '+,-1', val: 2 },
-        { name: '-,-1', val: -4 },
-        { name: '-,+1', val: -2 }
+    // Dynamic offset based on the Terminal (Last Digit) of the number
+    const t = lastNum % 10;
+    
+    const strategies = [
+        { name: '+',     tp: (lastNum + t + 37) % 37 },
+        { name: '-',     tp: (lastNum - t + 37) % 37 },
+        { name: '-,+1',  tp: (lastNum - t + 1 + 37) % 37 },
+        { name: '-,-1',  tp: (lastNum - t - 1 + 37) % 37 },
+        { name: '+,+1',  tp: (lastNum + t + 1 + 37) % 37 },
+        { name: '+,-1',  tp: (lastNum + t - 1 + 37) % 37 }
     ];
 
-    return offsets.map(s => {
-        let tp = (lastNum + s.val + 37) % 37;
+    return strategies.map(s => {
+        let tp = s.tp;
         const cors = TERMINALS_MAP[tp] || [];
         
         // Neighbor Logic: 1 COR -> N3/N3 | 2 COR -> N2/N3 | 3+ COR -> N2/N2
