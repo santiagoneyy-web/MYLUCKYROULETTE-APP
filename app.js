@@ -132,55 +132,38 @@ setInterval(updateClock, 1000);
 
 function renderSignalsPanel(signals) {
     const tabStrip = document.getElementById('strat-tabs');
-    const cardCont = document.getElementById('analysis-card-container');
-    if (!tabStrip || !cardCont) return;
+    const activeLabel = document.getElementById('active-agent-name');
+    if (!tabStrip) return;
 
     try {
         const names = ['N17', 'N16', 'N17PLUS', 'N18', 'CELULA'];
         tabStrip.innerHTML = names.map((name, idx) => {
             const h = iaSignalsHistory[idx] || [];
-            const wTotal = h.filter(x => x === 'win').length;
-            const hitTotal = h.length > 0 ? Math.round((wTotal / h.length) * 100) : 0;
-            return `<button class="nav-item ${idx === activeIaTab ? 'active' : ''}" onclick="setActiveIaTab(${idx})">
-                <span>${name}</span>
-                <span class="status-pill">${hitTotal}%</span>
-            </button>`;
+            const winCount = h.filter(x => x === 'win').length;
+            const hitRate = h.length > 0 ? Math.round((winCount / h.length) * 100) : 0;
+            const wL = h.length > 0 ? `(W-L ${winCount}-${h.length-winCount})` : '(W-L 0-0)';
+            
+            return `<div class="nav-item ${idx === activeIaTab ? 'active' : ''}" onclick="setActiveIaTab(${idx})" style="flex:1; background:rgba(255,255,255,0.02); border:1px solid ${idx === activeIaTab ? 'var(--gold)' : 'var(--border)'}; padding:8px; border-radius:4px; text-align:center; cursor:pointer;">
+                <span style="font-size:0.8rem; font-weight:800; color:#fff;">${name}</span>
+                <span style="display:block; font-size:0.55rem; color:var(--text-dim);">${wL}</span>
+            </div>`;
         }).join('');
 
-        if (activeAgentLabel) activeAgentLabel.innerText = names[activeIaTab];
+        if (activeLabel) activeLabel.innerText = names[activeIaTab];
 
         const s = signals[activeIaTab];
+        const targetEl = document.getElementById('target-number');
+        const smallLabel = document.getElementById('pred-small-val');
+        const bigLabel = document.getElementById('pred-big-val');
+
         if (!s || !s.top || s.rule === 'STOP') {
-            cardCont.style.display = 'none';
+            if (targetEl) targetEl.innerText = '--';
         } else {
-            cardCont.style.display = 'flex';
-            cardCont.innerHTML = `
-                <div class="analysis-header">
-                    <div class="analysis-title">${names[activeIaTab]} ANALYSIS</div>
-                    <div style="font-size:0.6rem; color:var(--text-dim);">CONFIDENCE: <span style="color:var(--green);">${s.confidence || '85%'}</span></div>
-                </div>
-                <div class="analysis-main">
-                    <div class="target-circle">
-                        <span class="target-num-big">${s.top}</span>
-                        <span style="font-size:0.5rem; opacity:0.5; margin-top:-5px;">TARGETED</span>
-                    </div>
-                </div>
-                <div class="analysis-footer-grid">
-                    <div class="footer-box">
-                        <div class="footer-label">SMALL</div>
-                        <div style="color:#fff; font-weight:800; font-size:0.9rem;">${s.small || '--'}</div>
-                    </div>
-                    <div class="footer-box active">
-                        <div class="footer-label">TOP</div>
-                        <div style="color:var(--gold); font-weight:900; font-size:1.1rem;">${s.top}</div>
-                    </div>
-                    <div class="footer-box">
-                        <div class="footer-label">BIG</div>
-                        <div style="color:#fff; font-weight:800; font-size:0.9rem;">${s.big || '--'}</div>
-                    </div>
-                </div>`;
+            if (targetEl) targetEl.innerText = s.top;
+            if (smallLabel) smallLabel.style.opacity = (s.top <= 9) ? '1' : '0.3';
+            if (bigLabel) bigLabel.style.opacity = (s.top >= 10 && s.top <= 18) ? '1' : '0.3';
         }
-    } catch (e) { console.error("Pro Signal Render Error:", e); }
+    } catch (e) { console.error("Signal Render Error:", e); }
 }
 
 function renderTravelPanel(sig) {
@@ -188,27 +171,28 @@ function renderTravelPanel(sig) {
     if (!cont) return;
 
     if (!history || history.length < 2) {
-        cont.innerHTML = '<tr><td colspan="7" class="muted" style="padding:20px; text-align:center;">Analyzing patterns (min 2 spins required)...</td></tr>';
+        cont.innerHTML = '<tr><td colspan="5" class="muted" style="padding:20px; text-align:center;">Analyzing patterns (min 2 spins required)...</td></tr>';
         return;
     }
 
-    const rows = history.slice(-100).reverse().map((n, i) => {
-        const isLatest = i === 0;
+    const rows = history.slice(-50).reverse().map((n, i) => {
+        const idx = history.length - 1 - i;
+        const dist = (idx > 0) ? calcDist(history[idx-1], history[idx]) : 0;
+        const dir = dist >= 0 ? 'CW' : 'CCW';
         const colorClass = RED_NUMS.has(n) ? 'val-down' : (n === 0 ? 'val-up' : 'val-neutral');
-        const prev = history[history.length - 2 - i];
-        const dist = prev !== undefined ? calcDist(prev, n) : 0;
         
-        // Define Small/Big for Travel Data
-        const isSmall = n > 0 && n <= 18;
-        const phaseLabel = isSmall ? 'SMALL' : 'BIG';
-        const phaseClass = isSmall ? 'badge-win' : 'badge-loss';
+        // Corrected Logic: Small 1-9, Big 10-18
+        let phase = '---';
+        if (n >= 1 && n <= 9) phase = 'SMALL';
+        else if (n >= 10 && n <= 18) phase = 'BIG';
+        else if (n > 18) phase = 'ULTRA';
 
-        return `<tr class="${isLatest ? 'travel-row-last' : ''}">
-            <td>${history.length - i}</td>
-            <td class="${colorClass}" style="font-weight:900;">${n}</td>
-            <td class="${Math.abs(dist) > 9 ? 'val-down' : 'val-up'}">${Math.abs(dist)}p</td>
-            <td>${dist > 0 ? 'DER' : (dist < 0 ? 'IZQ' : '---')}</td>
-            <td><span class="badge ${phaseClass}" style="font-size:0.65rem; padding:4px 12px; width:70px; display:inline-block; text-align:center;">${phaseLabel}</span></td>
+        return `<tr>
+            <td style="padding:10px 12px; color:var(--text-dim);">${idx + 1}</td>
+            <td class="${colorClass}" style="padding:10px 12px; font-weight:900;">${n}</td>
+            <td style="padding:10px 12px; color:${dist >= 0 ? 'var(--green)' : 'var(--red)'}">${dist >= 0 ? '+' : ''}${dist}</td>
+            <td style="padding:10px 12px; color:var(--accent); font-weight:800;">${dir}</td>
+            <td style="padding:10px 12px; font-weight:900; color:${phase === 'SMALL' ? 'var(--green)' : (phase === 'BIG' ? 'var(--red)' : '#fff')}">${phase}</td>
         </tr>`;
     }).join('');
 

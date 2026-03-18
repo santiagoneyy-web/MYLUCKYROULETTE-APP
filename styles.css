@@ -1,20 +1,19 @@
 /* ── Pro v3.1 Variables ─────────────────────────────────────── */
 :root {
-    --bg:           #02050e; /* Near black */
-    --sidebar-bg:   #040818;
-    --surface:      rgba(15, 23, 62, 0.6);
-    --border:       rgba(255, 255, 255, 0.08);
-    --accent:       #4c82ff; /* Cyber Blue */
-    --accent-glow:  rgba(76, 130, 255, 0.3);
-    --gold:         #f5c842; /* Premium Gold */
-    --gold-glow:    rgba(245, 200, 66, 0.3);
-    --green:        #00ffa2;
-    --red:          #ff4b7d;
-    --text:         #e2eaff;
-    --text-dim:     #6b7ba3;
-    --font:         'Outfit', sans-serif;
-    --mono:         'Share Tech Mono', monospace;
-    --shadow:       0 8px 32px 0 rgba(0, 0, 0, 0.6);
+    --bg: #03080e;
+    --sidebar-bg: #0a1118;
+    --panel-bg: rgba(7, 13, 22, 0.8);
+    --accent: #00d2ff;
+    --accent-glow: rgba(0, 210, 255, 0.3);
+    --gold: #f5c842;
+    --gold-glow: rgba(245, 200, 66, 0.4);
+    --text: #e0e6ed;
+    --text-dim: #94a3b8;
+    --border: rgba(0, 210, 255, 0.15);
+    --red: #ff3b5c;
+    --green: #00ffa2;
+    --font: 'Inter', sans-serif;
+    --mono: 'JetBrains Mono', monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
