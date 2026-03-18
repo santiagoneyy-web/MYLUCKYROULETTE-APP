@@ -71,12 +71,11 @@ function drawWheel(highlightNum = null) {
     });
     ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, 2*Math.PI); ctx.fillStyle = '#070c2a'; ctx.fill();
 }
-
 function renderHistory() {
     historyEl.innerHTML = '';
-    history.slice(-20).reverse().forEach(n => {
+    history.slice(-15).reverse().forEach((n, idx) => {
         const div = document.createElement('div');
-        div.className = `ball ball-${numColor(n)}`;
+        div.className = `hist-ball hist-${numColor(n)} ${idx === 0 ? 'hist-latest' : ''}`;
         div.textContent = n;
         historyEl.appendChild(div);
     });
@@ -87,25 +86,77 @@ function buildStratTabs(results) {
     if (!results) { stratTabs.innerHTML = ''; return; }
     stratTabs.innerHTML = results.map(r => {
         const isActive = r.strategy === activeTab;
-        return `<button class="strat-tab ${isActive ? 'active' : ''}" onclick="activeTab='${r.strategy}'; submitNumber(null,true,false)">${r.strategy}</button>`;
+        const h = r.outcomes || [];
+        const last = h[h.length-1];
+        const cls = last === true ? 'tab-win' : (last === false ? 'tab-loss' : '');
+        return `<button class="strat-tab ${isActive ? 'active' : ''} ${cls}" onclick="activeTab='${r.strategy}'; submitNumber(null,true,false)">${r.strategy}</button>`;
     }).join('');
 }
 
 function renderTargetPanel(results) {
     if (!targetPanel) return;
-    if (!results) { targetPanel.innerHTML = '<p class="muted">Ingresa datos...</p>'; return; }
+    if (!results || results.length === 0) { targetPanel.innerHTML = '<p class="muted">Ingresa datos...</p>'; return; }
     const r = results.find(x => x.strategy === activeTab) || results[0];
-    targetPanel.innerHTML = `<div class="target-card"><h3>Estrategia ${r.strategy}</h3><div class="bet-zone">${r.betZone.join(', ')}</div></div>`;
+    const hitRate = r.hitRate || 0;
+    const barClass = hitRate > 50 ? 'bar-high' : (hitRate > 35 ? 'bar-mid' : 'bar-low');
+    
+    targetPanel.innerHTML = `<div class="target-header">
+        <span class="target-strat-name">Estrategia ${r.strategy}</span>
+        <span class="badge ${hitRate > 45 ? 'badge-win' : 'badge-neutral'}">${hitRate.toFixed(1)}% HIT</span>
+    </div>
+    <div class="hit-bar-wrap">
+        <div class="hit-bar ${barClass}" style="width: ${hitRate}%"></div>
+        <span class="hit-label">${hitRate.toFixed(1)}%</span>
+    </div>
+    <div class="detail-row"><span class="det-lbl">ZONA DE APUESTA:</span> <span class="tp-num">${r.betZone.join(', ')}</span></div>
+    <div class="pattern-row">
+        ${(r.outcomes || []).slice(-12).map(o => `<div class="dot ${o ? 'dot-w' : 'dot-l'}">${o ? 'W' : 'L'}</div>`).join('')}
+    </div>`;
 }
 
 function renderNextPanel(prox) {
     if (!nextPanel) return;
-    nextPanel.innerHTML = prox.slice(0, 3).map(p => `<div>${p.strategy}: ${p.hitRate.toFixed(1)}%</div>`).join('');
+    const top = prox.slice(0, 3);
+    nextPanel.innerHTML = `<div class="stats-row">
+        ${top.map(p => `<div><span class="stat-lbl">${p.strategy}:</span> ${p.hitRate.toFixed(1)}%</div>`).join('')}
+    </div>`;
 }
 
 function renderTravelPanel(sig) {
     if (!travelPanel) return;
-    travelPanel.innerHTML = `<div>Tendencia: ${sig.directionState}</div><div>Rec: ${sig.recommendedPlay}</div>`;
+    const hist = sig.travelHistory || [];
+    const rows = [];
+    const maxEntries = 12;
+    
+    for (let i = 0; i < Math.min(history.length, maxEntries); i++) {
+        const idx = history.length - 1 - i;
+        const n = history[idx];
+        const t = hist[idx - 1]; // travel associated with getting to this number
+        const dist = t !== undefined ? Math.abs(t) : '-';
+        const dir = t !== undefined ? (t > 0 ? 'DER. ↻' : (t < 0 ? 'IZQ. ↺' : '-')) : '-';
+        const phase = dist === '-' ? '-' : (dist <= 9 ? 'SMALL' : 'BIG');
+        
+        rows.push(`<tr class="${i === 0 ? 'travel-row-last' : ''}">
+            <td class="text-gold"><strong>${n}</strong> ${i === 0 ? '<span class="travel-last-badge">★ LAST</span>' : ''}</td>
+            <td class="${dist > 9 ? 'text-red' : ''}">${dist}${dist !== '-' ? 'p' : ''}</td>
+            <td>${dir}</td>
+            <td><span class="badge ${phase === 'SMALL' ? 'badge-win' : 'badge-loss'}" style="font-size:0.5rem;">${phase}</span></td>
+        </tr>`);
+    }
+
+    travelPanel.innerHTML = `
+        <div class="travel-header-row">
+            <div class="dir-state-badge ${sig.directionState === 'stable' ? 'state-stable' : 'state-unstable'}">
+                ${sig.directionState === 'stable' ? '▶ ESTABLE' : '▶ VOLÁTIL'}
+            </div>
+            <div class="last-hit-badge">LAST: ${sig.recommendedPlay}</div>
+        </div>
+        <div class="travel-scroll-container">
+            <table class="travel-table">
+                <thead><tr><th>N°</th><th>DIST</th><th>DIR</th><th>PHASE</th></tr></thead>
+                <tbody>${rows.join('')}</tbody>
+            </table>
+        </div>`;
 }
 
 function renderSignalsPanel(signals) {
@@ -123,39 +174,45 @@ function renderSignalsPanel(signals) {
         let content = '<p class="muted">Buscando señal...</p>';
 
         if (s) {
-            const isPerfect = (s.name === 'Célula' && s.confidence === 'PERFECTION');
+            const isPerfect = (s.name === 'IA' && s.confidence === 'PERFECTION');
             const slotClass = s.mode === 'FISICA' ? 'slot-escudo' : (s.mode === 'ATAQUE' ? 'slot-lanza' : (s.mode === 'MATH' ? 'slot-math' : ''));
             
             if (activeIaTab === 0) { // FISICA STUDIO
                 content = `<div class="ia-active-slot slot-escudo">
                     <div class="ia-slot-header"><span class="ia-slot-name">🎯 FÍSICA STUDIO</span><span class="ia-slot-conf">${s.confidence || '0%'} CONF.</span></div>
-                    <div class="ia-grid">
-                        <div class="ia-side-box"><div class="ia-side-lbl">SMALL</div><div class="ia-side-num">${s.small || '0'}<sup>n4</sup></div></div>
-                        <div class="ia-center-box">
-                            <div class="ia-main-num">${s.number || '...'}<sup>n9</sup></div>
-                            <div class="ia-dir-lbl">TENDENCIA: ${s.rule || '...'}</div>
+                    <div class="ia-grid" style="display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 10px; align-items: center;">
+                        <div class="ia-side-box" style="background:rgba(255,255,255,0.03); border-radius:10px; padding:10px; text-align:center;">
+                            <div class="ia-side-lbl" style="font-size:0.6rem; color:var(--text-dim); margin-bottom:5px;">SMALL</div>
+                            <div class="ia-side-num" style="font-size:1.4rem; font-weight:800; color:#fff;">${s.small || '0'}<sup>n4</sup></div>
                         </div>
-                        <div class="ia-side-box"><div class="ia-side-lbl">BIG</div><div class="ia-side-num">${s.big || '0'}<sup>n4</sup></div></div>
+                        <div class="ia-center-box" style="text-align:center;">
+                            <div class="ia-main-num" style="font-size:3.5rem; font-weight:900; color:var(--gold); line-height:1; text-shadow: 0 0 20px rgba(245,200,66,0.4);">${s.number || '...'}<sup>n9</sup></div>
+                            <div class="ia-dir-lbl" style="font-size:0.75rem; color:#fff; margin-top:8px;">TENDENCIA: ${s.rule || 'MOMENTUM'}</div>
+                        </div>
+                        <div class="ia-side-box" style="background:rgba(255,255,255,0.03); border-radius:10px; padding:10px; text-align:center;">
+                            <div class="ia-side-lbl" style="font-size:0.6rem; color:var(--text-dim); margin-bottom:5px;">BIG</div>
+                            <div class="ia-side-num" style="font-size:1.4rem; font-weight:800; color:#fff;">${s.big || '0'}<sup>n4</sup></div>
+                        </div>
                     </div>
-                    <div class="ia-slot-footer">
-                        <div class="ia-reason">RUPTURA DETECTADA - POLO ${s.mode || '...'}</div>
-                        <div class="ia-reason">SOPORTE ${s.mode === 'SOPORTE' ? 'PRO' : 'BIG N9'}</div>
+                    <div class="ia-slot-footer" style="display:flex; justify-content:space-between; font-size:0.65rem; border-top:1px solid var(--border); padding-top:10px; margin-top:15px;">
+                        <div class="ia-reason" style="color:var(--text-dim);">RUPTURA DETECTADA - POLO ${s.mode || 'MATH'}</div>
+                        <div class="ia-reason" style="color:var(--gold);">SOPORTE BIG N9</div>
                     </div>
                 </div>`;
             } else { // OTHER AGENTS & IA AUTÓNOMA
-                content = `<div class="ia-active-slot ${slotClass} ${isPerfect ? 'slot-perfect' : ''}">
+                content = `<div class="ia-active-slot ${slotClass} ${isPerfect ? 'slot-perfect' : ''}" style="min-height: 180px; display: flex; flex-direction: column; justify-content: space-between;">
                     <div class="ia-slot-header">
                         <span class="ia-slot-name">${activeIaTab === 4 ? '🤖 IA AUTÓNOMA' : s.name}</span>
-                        <span class="ia-slot-conf">${s.confidence || '0%'}</span>
+                        <span class="ia-slot-conf" style="color:var(--green); font-weight:700;">${s.confidence || '0%'}</span>
                     </div>
-                    <div class="ia-center-box">
-                        <div class="ia-rule-pro" style="color:var(--gold); font-size:0.7rem;">${s.rule || 'ANALIZANDO'}</div>
-                        <div class="ia-main-num">${s.number !== null ? s.number : (s.tp || '...')}</div>
-                        <div class="ia-dir-lbl" style="font-size:0.6rem; opacity:0.6;">SINCRONIZANDO BDD...</div>
+                    <div class="ia-center-box" style="text-align:center; padding: 10px 0;">
+                        <div class="ia-rule-pro" style="color:var(--gold); font-size:0.8rem; letter-spacing:2px; text-transform:uppercase;">${s.rule || 'ANALIZANDO'}</div>
+                        <div class="ia-main-num" style="font-size:3.2rem; font-weight:900; color:#fff; line-height:1; margin:10px 0;">${s.number !== null ? s.number : (s.tp || '...')}</div>
+                        <div class="ia-dir-lbl" style="font-size:0.65rem; color:var(--text-dim);">SINCRONIZANDO BDD...</div>
                     </div>
-                    <div class="ia-slot-footer">
-                        <div class="badge ${s.mode === 'ATAQUE' ? 'rec-lanza' : 'rec-escudo'}">JUGAR ${s.mode || '...'}</div>
-                        <div class="ia-reason">W:${iaWins[activeIaTab]} L:${iaLosses[activeIaTab]}</div>
+                    <div class="ia-slot-footer" style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:10px;">
+                        <div class="badge ${s.mode === 'ATAQUE' ? 'via-tp' : 'via-cor'}" style="font-size:0.65rem; padding:2px 8px;">MODO: ${s.mode || 'ESCUDO'}</div>
+                        <div class="ia-reason" style="font-family:var(--mono); font-size:0.75rem;"><span style="color:var(--green);">W:${iaWins[activeIaTab]}</span> <span style="color:var(--red);">L:${iaLosses[activeIaTab]}</span></div>
                     </div>
                 </div>`;
             }
@@ -184,7 +241,7 @@ async function submitNumber(val, silent = false, batch = false) {
 
         // Evaluate previous signals against this new number
         lastIaSignals.forEach((s, idx) => {
-            if (!s || s.confidence === '0%' || s.rule === 'STOP') return;
+            if (!s || s.confidence === '0%' || s.rule === 'STOP' || s.rule === 'PAUSA (BAJA CONF.)') return;
             let win = false;
             
             // Evaluation logic based on agent type
@@ -192,13 +249,12 @@ async function submitNumber(val, silent = false, batch = false) {
                 win = s.betZone.includes(n);
             } else if (s.number !== null && s.number !== undefined) {
                 const dist = wheelDistance(n, s.number);
-                const maxDist = (idx === 0 || idx === 4) ? 2 : 4; // FISICA/IA are tighter (N2), others N4
+                const maxDist = (idx === 0 || idx === 4) ? 2 : 4; 
                 win = (dist <= maxDist);
             }
             
             if (win) iaWins[idx]++; else iaLosses[idx]++;
             iaSignalsHistory[idx].push(win ? 'win' : 'loss');
-            if (activeIaTab === idx) { if (win) recommendedWin++; else recommendedLoss++; }
         });
     }
 
@@ -211,28 +267,25 @@ async function submitNumber(val, silent = false, batch = false) {
     const sig = computeDealerSignature(history);
     const res = analyzeSpin(history, stats);
     const prx = projectNextRound(history, stats);
-        const sigs = getIAMasterSignals(prx, sig, history) || [];
-        
-        // Ensure sigs match the names array: ['FISICA', 'SIX', 'COMBINATION', 'SOPORTE', 'IA']
-        // 0: FISICA (n17), 1: SIX (n16), 2: COMBINATION (1717), 3: SOPORTE (N18)
-        
-        // Re-map for UI consistency
-        const finalSigs = [
-            { ...sigs[1], name: 'FISICA', mode: 'FISICA' },      // n17 -> FISICA
-            { ...sigs[0], name: 'SIX', mode: 'MATH' },        // n16 -> SIX
-            { ...sigs[2], name: 'COMBINATION', mode: 'ATAQUE' }, // 1717 -> COMBINATION
-            { ...sigs[3], name: 'SOPORTE', mode: 'SOPORTE' },    // N18 -> SOPORTE
-            { 
-                name: 'IA', 
-                mode: latestAgent5Dna ? 'ATAQUE' : 'MATH',
-                number: latestAgent5Top,
-                confidence: latestAgent5Top !== null ? (latestAgent5Dna ? 'PERFECTION' : 'MAX') : '0%',
-                rule: latestAgent5Dna ? 'PERFECT DNA' : (latestAgent5Top !== null ? 'BDD Master' : 'APRENDIENDO'),
-                reason: latestAgent5Top !== null ? (latestAgent5Dna ? 'SINCRONIA TOTAL' : 'AUTÓNOMO') : (history.length < 50 ? `GRABANDO ${history.length}/50` : 'ANALIZANDO...')
-            }
-        ];
-        
-        lastIaSignals = finalSigs;
+    const sigs = getIAMasterSignals(prx, sig, history) || [];
+    
+    // Ensure sigs match the names array: ['FISICA', 'SIX', 'COMBINATION', 'SOPORTE', 'IA']
+    const finalSigs = [
+        { ...sigs[1], name: 'FISICA', mode: 'FISICA', small: sig.casilla5, big: sig.casilla14 }, // FISICA tab
+        { ...sigs[0], name: 'SIX', mode: 'MATH' },
+        { ...sigs[2], name: 'COMBINATION', mode: 'ATAQUE' },
+        { ...sigs[3], name: 'SOPORTE', mode: 'SOPORTE' },
+        { 
+            name: 'IA', 
+            mode: latestAgent5Dna ? 'ATAQUE' : 'MATH',
+            number: latestAgent5Top,
+            confidence: latestAgent5Top !== null ? (latestAgent5Dna ? 'PERFECTION' : 'MAX') : '0%',
+            rule: latestAgent5Dna ? 'PERFECT DNA' : (latestAgent5Top !== null ? 'BDD Master' : 'APRENDIENDO'),
+            reason: latestAgent5Top !== null ? (latestAgent5Dna ? 'SINCRONIA TOTAL' : 'AUTÓNOMO') : (history.length < 50 ? `GRABANDO ${history.length}/50` : 'ANALIZANDO...')
+        }
+    ];
+    
+    lastIaSignals = finalSigs;
 
     // 3. UI RENDERING (Skip if batching for performance)
     if (!batch) {
@@ -242,7 +295,7 @@ async function submitNumber(val, silent = false, batch = false) {
         renderTargetPanel(res); 
         renderNextPanel(prx); 
         renderTravelPanel(sig); 
-        renderSignalsPanel(sigs);
+        renderSignalsPanel(finalSigs);
         
         if (!silent) {
             numInput.value = ''; 
@@ -251,32 +304,47 @@ async function submitNumber(val, silent = false, batch = false) {
     }
 }
 
-function wipeData() { history.length = 0; iaWins.fill(0); iaLosses.fill(0); iaSignalsHistory.forEach(h => h.length = 0); renderHistory(); drawWheel(null); }
+function wipeData() { 
+    history.length = 0; 
+    iaWins.fill(0); 
+    iaLosses.fill(0); 
+    iaSignalsHistory.forEach(h => h.length = 0); 
+    lastIaSignals.fill(null); 
+    Object.keys(stats).forEach(k => delete stats[k]);
+    renderHistory(); 
+    drawWheel(null); 
+}
+
 window.setActiveIaTab = (idx) => { activeIaTab = idx; submitNumber(null, true, false); };
 submitBtn.addEventListener('click', () => submitNumber());
 numInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitNumber(); });
 clearBtn.addEventListener('click', wipeData);
+
 tableSelect.addEventListener('change', async () => {
     currentTableId = tableSelect.value; if (!currentTableId) return;
     const spins = await apiFetchHistory(currentTableId); 
-    wipeData(); // Reset local state
+    wipeData(); 
     
-    // 1. Ingest history (This evaluates logic for each spin to build stats)
-    for (const s of spins) await submitNumber(s.number, true, true);
+    // Ingest history objects {number}
+    for (const s of spins) {
+        if (s && s.number !== undefined) await submitNumber(s.number, true, true);
+    }
     if (tableSpinCount) tableSpinCount.textContent = `(${spins.length})`;
     
-    // 2. Sync latest prediction for the NEXT round
+    // Sync latest prediction
     try {
         const p = await apiFetchPredict(currentTableId);
         if (p) {
             latestAgent5Top = p.agent5_top;
             latestAgent5Dna = p.agent5_dna || false;
-            console.log("🧬 [Master Brain] Initial prediction synchronized:", latestAgent5Top);
         }
     } catch(e) { console.error("Sync error:", e); }
 
-    // 3. Trigger final UI update
     submitNumber(null, true, false);
 });
-async function loadTables() { const ts = await apiFetchTables(); if (tableSelect) tableSelect.innerHTML = '<option value="">-- Mesa --</option>' + ts.map(t => `<option value="${t.id}">${t.name}</option>`).join(''); }
+
+async function loadTables() { 
+    const ts = await apiFetchTables(); 
+    if (tableSelect) tableSelect.innerHTML = '<option value="">-- Mesa --</option>' + ts.map(t => `<option value="${t.id}">${t.name}</option>`).join(''); 
+}
 document.addEventListener('DOMContentLoaded', () => { loadTables(); drawWheel(null); });
