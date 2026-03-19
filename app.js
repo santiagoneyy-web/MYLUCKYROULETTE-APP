@@ -106,12 +106,6 @@ function renderAgentCard(signals) {
         ).join('');
     }
 
-    // Unified Dominance & Trend (V25 Fix)
-    const domEl = document.getElementById('agent-dominance');
-    if (domEl && s.dominance && s.trend) {
-        domEl.innerHTML = `DOMINANCIA: ${s.dominance} | TENDENCIA: ${s.trend}`;
-    }
-
     if (tendEl && s.trend) {
         tendEl.innerText = `TENDENCIA: ${s.trend === 'DER' ? 'Der.' : 'Izq.'} ${s.trend === 'DER' ? '↺' : '↻'}`;
     }
@@ -276,53 +270,20 @@ function renderTravelPanel() {
 }
 
 // ─── SUBMIT NUMBER ─────────────────────────────────────────
-function submitNumber(val, silent = false, batch = false, skipSignals = false) {
+function submitNumber(val) {
     const inputEl = document.getElementById('spin-number');
     const raw = val !== undefined ? val : (inputEl ? inputEl.value : '');
     const n = parseInt(raw);
     
     if (!isNaN(n) && n >= 0 && n <= 36) {
-        history.push(n);
-        if (inputEl && !batch) inputEl.value = '';
-
-        // Compute new predictions (Only for manual input or newly synced data)
-        if (!skipSignals && typeof computeDealerSignature === 'function' && history.length >= 3) {
-            try {
-                const sig  = computeDealerSignature(history);
-                const prox = projectNextRound(history, {});
-                const masterSignals = getIAMasterSignals(prox, sig, history);
-                
-                if (masterSignals && masterSignals.length > 0) {
-                    const ag17   = masterSignals.find(s => s.name === 'Android n17');
-                    const ag16   = masterSignals.find(s => s.name === 'Android n16');
-                    const ag1717 = masterSignals.find(s => s.name === 'Android 1717');
-                    const agN18  = masterSignals.find(s => s.name === 'N18');
-                    const agCel  = masterSignals.find(s => s.name === 'CELULA');
-                    
-                    lastIaSignals = [
-                        { top: ag17?.number,   confidence: ag17?.confidence,   reason: ag17?.reason,   rule: ag17?.rule,   mode: ag17?.mode,   radius: ag17?.radius   || 'N9', smallSnipe: ag17?.smallSnipe, bigSnipe: ag17?.bigSnipe },
-                        { top: ag16?.tp,        confidence: ag16?.confidence,   reason: ag16?.reason,   rule: ag16?.rule,   mode: ag16?.mode,   radius: 'N2/N3',        tp: ag16?.tp, cors: ag16?.cor, smallSnipe: ag16?.smallSnipe, bigSnipe: ag16?.bigSnipe },
-                        { top: ag1717?.number, confidence: ag1717?.confidence, reason: ag1717?.reason, rule: ag1717?.rule, mode: ag1717?.mode, radius: ag1717?.radius || 'N9', smallSnipe: ag1717?.smallSnipe, bigSnipe: ag1717?.bigSnipe },
-                        { top: agN18?.number,  confidence: agN18?.confidence,  reason: agN18?.reason,  rule: agN18?.rule,  mode: agN18?.mode,  radius: agN18?.radius  || 'N9', smallSnipe: agN18?.smallSnipe, bigSnipe: agN18?.bigSnipe },
-                        { top: agCel?.number,  confidence: agCel?.confidence,  reason: agCel?.reason,  rule: agCel?.rule,  mode: agCel?.mode,  radius: agCel?.radius  || 'N4', smallSnipe: agCel?.smallSnipe, bigSnipe: agCel?.bigSnipe }
-                    ];
-                }
-            } catch(e) { console.error('Predict error:', e); }
-        }
-
-        // Post to backend (non-blocking)
-        if (currentTableId && !batch) {
+        if (inputEl) inputEl.value = '';
+        if (currentTableId) {
             fetch('/api/spin', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ table_id: currentTableId, number: n, source: 'manual' })
             }).catch(() => {});
         }
-    }
-
-    if (!batch) {
-        renderSignalsPanel(lastIaSignals);
-        renderTravelPanel();
     }
 }
 
@@ -340,67 +301,59 @@ async function syncData() {
                 history.length = 0;
                 iaSignalsHistory.forEach(h => h.length = 0);
                 lastKnownSpinId = null;
-                renderSignalsPanel(lastIaSignals);
+                renderSignalsPanel(lastIaSignals || []);
             }
         } else {
             const latestS = spins[spins.length - 1];
             
-            // DB RESET DETECTION
-            if (lastKnownSpinId !== null && latestS.id < lastKnownSpinId) {
+            // 1. SYNC GAP DETECTION (Robustness FIX)
+            // If server has data we don't have, or if counts don't match, force full reload
+            const needsReset = (lastKnownSpinId !== null && latestS.id < lastKnownSpinId) || 
+                              (history.length > 0 && Math.abs(history.length - spins.length) > 2);
+
+            if (needsReset || lastKnownSpinId === null) {
                 history.length = 0;
-                iaSignalsHistory.forEach(h => h.length = 0);
                 lastKnownSpinId = null;
             }
 
             if (latestS.id !== lastKnownSpinId) {
-                // Sync loop
+                history.length = 0; // Clear and refill from spins for 100% alignment
+                iaSignalsHistory.forEach(h => h.length = 0);
+
+                const radii = [9, 3, 9, 9, 9];
                 for (let i = 0; i < spins.length; i++) {
                     const s = spins[i];
-                    if (s.id > (lastKnownSpinId || -1)) {
-                        const n = parseInt(s.number);
-                        if (!isNaN(n)) {
-                            history.push(n);
-                            lastKnownSpinId = s.id;
-                            
-                            // W-L sync: Try server results first, fallback to client-side eval
-                            if (s.results) {
-                                const resMap = [s.results.agent1_result, s.results.agent2_result, s.results.agent3_result, s.results.agent4_result, s.results.agent5_result];
-                                resMap.forEach((res, idx) => {
-                                    if (res === 'Direct' || res === 'Neighbor') iaSignalsHistory[idx].push('win');
-                                    else if (res === 'Loss') iaSignalsHistory[idx].push('loss');
-                                });
-                            } else {
-                                // Fallback: Evaluate previous spin's predictions against THIS number
-                                const prevS = (i > 0) ? spins[i-1] : null;
-                                if (prevS && prevS.predictions) {
-                                    const preds = [
-                                        prevS.predictions.agent1_top,
-                                        prevS.predictions.agent2_top,
-                                        prevS.predictions.agent3_top,
-                                        prevS.predictions.agent4_top,
-                                        prevS.predictions.agent5_top
-                                    ];
-                                    const radii = [9, 3, 9, 9, 9]; // Standard radii
-                                    preds.forEach((pTop, idx) => {
-                                        if (pTop !== undefined && pTop !== null) {
-                                            const outcome = typeof evaluatePrediction === 'function' ? evaluatePrediction(n, pTop, radii[idx]) : null;
-                                            if (outcome === 'Direct' || outcome === 'Neighbor') iaSignalsHistory[idx].push('win');
-                                            else if (outcome === 'Loss') iaSignalsHistory[idx].push('loss');
-                                        }
-                                    });
+                    const n = parseInt(s.number);
+                    if (!isNaN(n)) {
+                        history.push(n);
+                        
+                        // Performance Evaluation (Total Scan)
+                        const nextS = spins[i+1];
+                        if (nextS && s.predictions) {
+                            const preds = [
+                                s.predictions.agent1_top, s.predictions.agent2_top,
+                                s.predictions.agent3_top, s.predictions.agent4_top,
+                                s.predictions.agent5_top
+                            ];
+                            preds.forEach((p, idx) => {
+                                if (p !== null && p !== undefined && typeof evaluatePrediction === 'function') {
+                                    const out = evaluatePrediction(nextS.number, p, radii[idx]);
+                                    if (out === 'Direct' || out === 'Neighbor') iaSignalsHistory[idx].push('win');
+                                    else if (out === 'Loss') iaSignalsHistory[idx].push('loss');
                                 }
-                            }
+                            });
                         }
                     }
                 }
+                lastKnownSpinId = latestS.id;
                 
-                // Refresh Logic
+                // Refresh Current Predictions
                 try {
                    const sig  = computeDealerSignature(history);
                    const prox = projectNextRound(history, {});
                    const master = getIAMasterSignals(prox, sig, history);
                    if (master && master.length > 0) lastIaSignals = master;
-                } catch(aiErr) { console.error("AI Update crash:", aiErr); }
+                } catch(aiErr) { console.error("AI Sync Logic Error:", aiErr); }
                 
                 renderSignalsPanel(lastIaSignals);
                 renderTravelPanel();
@@ -417,43 +370,36 @@ async function syncData() {
 window.setActiveIaTab = (idx) => {
     activeIaTab = idx;
     renderSignalsPanel(lastIaSignals);
+    renderTravelPanel();
 };
 
 // ─── WIPE DATA ────────────────────────────────────────────
 window.wipeAllData = async () => {
-    if (!confirm('⚠️ WIPE ALL DATA?\nEsto borrará TODOS los registros de la base de datos.\n¿Estás seguro?')) return;
+    if (!confirm('⚠️ WIPE ALL DATA?\n¿Estás seguro?')) return;
     try {
         const r = await fetch('/api/wipe-all', { method: 'DELETE' });
         const data = await r.json();
         if (data.success) {
-            // Reset local state too
             history.length = 0;
             lastKnownSpinId = null;
             iaSignalsHistory.forEach(h => h.length = 0);
             renderSignalsPanel(lastIaSignals);
             renderTravelPanel();
-            alert(`✅ Wipe completado. Se borraron ${data.deleted} registros.\nEl bot puede comenzar a registrar datos frescos.`);
-        } else {
-            alert('Error: ' + (data.error || 'Wipe fallido'));
+            alert(`✅ Wipe completado.`);
         }
-    } catch(e) {
-        alert('Error al hacer wipe: ' + e.message);
-    }
+    } catch(e) { alert('Error: ' + e.message); }
 };
 
 // ─── INIT ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-    // Clock
     setInterval(() => {
         const el = document.getElementById('live-clock');
         if (el) el.innerText = new Date().toLocaleTimeString();
     }, 1000);
 
-    // Immediate render with placeholders
     renderSignalsPanel(lastIaSignals);
     renderTravelPanel();
 
-    // Load tables from API
     try {
         const r = await fetch('/api/tables');
         if (r.ok) {
@@ -472,8 +418,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 syncData();
             }
         }
-    } catch (e) { console.warn('API not reachable, offline mode.'); }
+    } catch (e) {}
 
-    // Poll for updates every 1s (Ultra-fast sync)
     setInterval(syncData, 1000);
 });
