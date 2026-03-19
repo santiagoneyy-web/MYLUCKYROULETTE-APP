@@ -201,80 +201,78 @@ function renderSignalsPanel(signals) {
 
 // ─── RENDER: TRAVEL TABLE ──────────────────────────────────
 function renderTravelPanel() {
-    const tbody   = document.getElementById('travel-tbody');
-    const patEl   = document.getElementById('travel-pattern');
-    const lastZEl = document.getElementById('travel-last-zone');
-    if (!tbody) return;
+    try {
+        const tbody   = document.getElementById('travel-tbody');
+        const patEl   = document.getElementById('travel-pattern');
+        const lastZEl = document.getElementById('travel-last-zone');
+        if (!tbody) return;
 
-    if (history.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="muted">Selecciona una mesa...</td></tr>';
-        return;
-    }
-    
-    // Clear initial "Select Table" if we have at least 1 spin
-    const domEl = document.getElementById('agent-dominance');
-    if (domEl && domEl.innerText.includes('SELECCIONA')) {
-        domEl.innerText = 'ANALIZANDO RITMO...';
-    }
+        if (history.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" class="muted">Selecciona una mesa...</td></tr>';
+            return;
+        }
 
-    // Unified Dominance & Trend (From IA Master Signals)
-    const activeSignal = lastIaSignals[activeIaTab] || lastIaSignals[0];
-    if (domEl) {
-        if (activeSignal && activeSignal.trend) {
-            domEl.innerHTML = `DOMINANCIA: ${activeSignal.dominance || '--'} | TENDENCIA: ${activeSignal.trend}`;
-        } else if (history.length > 0) {
+        // Clear initial "Select Table"
+        const domEl = document.getElementById('agent-dominance');
+        if (domEl && domEl.innerText.includes('SELECCIONA')) {
             domEl.innerText = 'ANALIZANDO RITMO...';
         }
-    }
 
-    // Status Badges (Stable / ZigZag etc)
-    if (patEl && activeSignal) {
-        let pat = 'ESTABLE', patClass = 'badge-stable';
-        
-        if (activeSignal.isDirZigZag) { 
-            pat = 'ZIG ZAG'; patClass = 'badge-zigzag'; 
-        } else if (activeSignal.isUnstable) { 
-            pat = 'INESTABLE'; patClass = 'badge-zigzag'; 
-        } else if (activeSignal.isWeakening) { 
-            pat = 'DEBILITADO'; patClass = 'badge-zone'; 
+        // Unified Dominance & Trend (From IA Master Signals)
+        const activeSignal = (lastIaSignals && lastIaSignals[activeIaTab]) || (lastIaSignals && lastIaSignals[0]);
+        if (domEl && activeSignal && activeSignal.trend) {
+            domEl.innerHTML = `DOMINANCIA: ${activeSignal.dominance || '--'} | TENDENCIA: ${activeSignal.trend}`;
         }
-        
-        patEl.textContent = pat;
-        patEl.className = `badge ${patClass}`;
+
+        // Status Badges (Stable / ZigZag etc)
+        if (patEl && activeSignal) {
+            let pat = 'ESTABLE', patClass = 'badge-stable';
+            if (activeSignal.isDirZigZag) { 
+                pat = 'ZIG ZAG'; patClass = 'badge-zigzag'; 
+            } else if (activeSignal.isUnstable) { 
+                pat = 'INESTABLE'; patClass = 'badge-zigzag'; 
+            } else if (activeSignal.isWeakening) { 
+                pat = 'DEBILITADO'; patClass = 'badge-zone'; 
+            }
+            patEl.textContent = pat;
+            patEl.className = `badge ${patClass}`;
+        }
+
+        // Last zone badge
+        const lastN = history[history.length - 1];
+        if (lastZEl && lastN !== undefined) {
+            if (lastN >= 1 && lastN <= 9)        { lastZEl.textContent = 'LAST: SMALL'; lastZEl.style.color = 'var(--green)'; }
+            else if (lastN >= 10 && lastN <= 19) { lastZEl.textContent = 'LAST: BIG';   lastZEl.style.color = 'var(--red)'; }
+            else                                 { lastZEl.textContent = `LAST: ${lastN}`; lastZEl.style.color = 'var(--muted)'; }
+        }
+
+        // Render Table (Max 100)
+        tbody.innerHTML = history.slice(-100).reverse().map((n, i) => {
+            const idxInHistory = history.length - 1 - i;
+            const prev = history[idxInHistory - 1];
+            const dist = (prev !== undefined) ? calcDist(prev, n) : 0;
+            const absDist = Math.abs(dist);
+            const dir  = dist > 0 ? 'DER.' : (dist < 0 ? 'IZQ.' : '--');
+            
+            const numClass = (n === 0) ? 'num-zero' : (RED_NUMS.has(n) ? 'num-red' : 'num-black');
+            const dirClass = dist >= 0 ? 'dir-der' : 'dir-izq';
+            
+            let phaseHtml = '';
+            if (absDist >= 1 && absDist <= 9)        phaseHtml = `<span class="phase-pill pill-small">SMALL</span>`;
+            else if (absDist >= 10 && absDist <= 19) phaseHtml = `<span class="phase-pill pill-big">BIG</span>`;
+
+            const isLast = (i === 0);
+            return `<tr>
+                <td class="row-n">${idxInHistory + 1}${isLast ? '<span style="font-size:8px;color:var(--accent)"> ★</span>' : ''}</td>
+                <td class="${numClass}">${n}</td>
+                <td style="color:var(--text2)">${absDist}p</td>
+                <td class="${dirClass}">${dir} <span style="font-size:9px;opacity:0.6">${dist >= 0 ? '↺' : '↻'}</span></td>
+                <td>${phaseHtml}</td>
+            </tr>`;
+        }).join('');
+    } catch(err) {
+        console.error('Render error:', err);
     }
-
-    // Last zone badge
-    const lastN = history[history.length - 1];
-    if (lastZEl) {
-        if (lastN >= 1 && lastN <= 9)        { lastZEl.textContent = 'LAST: SMALL'; lastZEl.style.color = 'var(--green)'; }
-        else if (lastN >= 10 && lastN <= 19) { lastZEl.textContent = 'LAST: BIG';   lastZEl.style.color = 'var(--red)'; }
-        else                                 { lastZEl.textContent = `LAST: ${lastN}`; lastZEl.style.color = 'var(--muted)'; }
-    }
-
-    // Render Table (Max 100)
-    tbody.innerHTML = history.slice(-100).reverse().map((n, i) => {
-        const idxInHistory = history.length - 1 - i;
-        const prev = history[idxInHistory - 1];
-        const dist = (prev !== undefined) ? calcDist(prev, n) : 0;
-        const absDist = Math.abs(dist);
-        const dir  = dist > 0 ? 'DER.' : (dist < 0 ? 'IZQ.' : '--');
-        
-        const numClass = (n === 0) ? 'num-zero' : (RED_NUMS.has(n) ? 'num-red' : 'num-black');
-        const dirClass = dist >= 0 ? 'dir-der' : 'dir-izq';
-        
-        let phaseHtml = '';
-        if (absDist >= 1 && absDist <= 9)        phaseHtml = `<span class="phase-pill pill-small">SMALL</span>`;
-        else if (absDist >= 10 && absDist <= 19) phaseHtml = `<span class="phase-pill pill-big">BIG</span>`;
-
-        const isLast = (i === 0);
-        return `<tr>
-            <td class="row-n">${idxInHistory + 1}${isLast ? '<span style="font-size:8px;color:var(--accent)"> ★</span>' : ''}</td>
-            <td class="${numClass}">${n}</td>
-            <td style="color:var(--text2)">${absDist}p</td>
-            <td class="${dirClass}">${dir} <span style="font-size:9px;opacity:0.6">${dist >= 0 ? '↺' : '↻'}</span></td>
-            <td>${phaseHtml}</td>
-        </tr>`;
-    }).join('');
 }
 
 // ─── SUBMIT NUMBER ─────────────────────────────────────────
