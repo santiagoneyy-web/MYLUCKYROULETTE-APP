@@ -287,7 +287,23 @@ function submitNumber(val) {
     }
 }
 
-// ─── SYNC FROM SERVER (OPTIMIZED 100 LIMIT) ───────────────────
+// ─── SYNC FROM SERVER (REAL-TIME W-L TRACKING) ───────────────────
+let pendingPredictions = null; // Snapshot of predictions awaiting evaluation
+
+function evaluateAndTrackWL(newNumber) {
+    if (!pendingPredictions) return;
+    const radii = [9, 3, 9, 9, 9];
+    pendingPredictions.forEach((sig, idx) => {
+        const pTop = sig ? (sig.top !== undefined ? sig.top : sig.number) : null;
+        if (pTop !== null && pTop !== undefined && typeof evaluatePrediction === 'function') {
+            const out = evaluatePrediction(newNumber, pTop, radii[idx]);
+            if (out === 'Direct' || out === 'Neighbor') iaSignalsHistory[idx].push('win');
+            else if (out === 'Loss') iaSignalsHistory[idx].push('loss');
+        }
+    });
+    pendingPredictions = null; // consumed
+}
+
 async function syncData() {
     if (!currentTableId || isSyncing) return;
     isSyncing = true;
@@ -301,59 +317,48 @@ async function syncData() {
                 history.length = 0;
                 iaSignalsHistory.forEach(h => h.length = 0);
                 lastKnownSpinId = null;
+                pendingPredictions = null;
                 renderSignalsPanel(lastIaSignals || []);
             }
         } else {
             const latestS = spins[spins.length - 1];
             
-            // 1. SYNC GAP DETECTION (Robustness FIX)
-            // If server has data we don't have, or if counts don't match, force full reload
-            const needsReset = (lastKnownSpinId !== null && latestS.id < lastKnownSpinId) || 
-                              (history.length > 0 && Math.abs(history.length - spins.length) > 2);
-
-            if (needsReset || lastKnownSpinId === null) {
+            // DB RESET DETECTION
+            if (lastKnownSpinId !== null && latestS.id < lastKnownSpinId) {
                 history.length = 0;
+                iaSignalsHistory.forEach(h => h.length = 0);
                 lastKnownSpinId = null;
+                pendingPredictions = null;
             }
 
             if (latestS.id !== lastKnownSpinId) {
-                history.length = 0; // Clear and refill from spins for 100% alignment
-                iaSignalsHistory.forEach(h => h.length = 0);
-
-                const radii = [9, 3, 9, 9, 9];
-                for (let i = 0; i < spins.length; i++) {
-                    const s = spins[i];
+                // Get only new spins (incremental, no full reload)
+                const newSpins = spins.filter(s => s.id > (lastKnownSpinId || -1));
+                
+                for (let i = 0; i < newSpins.length; i++) {
+                    const s = newSpins[i];
                     const n = parseInt(s.number);
                     if (!isNaN(n)) {
-                        history.push(n);
+                        // Evaluate the PREVIOUS predictions against this new number
+                        evaluateAndTrackWL(n);
                         
-                        // Performance Evaluation (Total Scan)
-                        const nextS = spins[i+1];
-                        if (nextS && s.predictions) {
-                            const preds = [
-                                s.predictions.agent1_top, s.predictions.agent2_top,
-                                s.predictions.agent3_top, s.predictions.agent4_top,
-                                s.predictions.agent5_top
-                            ];
-                            preds.forEach((p, idx) => {
-                                if (p !== null && p !== undefined && typeof evaluatePrediction === 'function') {
-                                    const out = evaluatePrediction(nextS.number, p, radii[idx]);
-                                    if (out === 'Direct' || out === 'Neighbor') iaSignalsHistory[idx].push('win');
-                                    else if (out === 'Loss') iaSignalsHistory[idx].push('loss');
+                        history.push(n);
+                        lastKnownSpinId = s.id;
+                        
+                        // Generate and snapshot NEW predictions for next spin
+                        try {
+                            if (history.length >= 3 && typeof computeDealerSignature === 'function') {
+                                const sig  = computeDealerSignature(history);
+                                const prox = projectNextRound(history, {});
+                                const master = getIAMasterSignals(prox, sig, history);
+                                if (master && master.length > 0) {
+                                    lastIaSignals = master;
+                                    pendingPredictions = master.map(m => ({ ...m }));
                                 }
-                            });
-                        }
+                            }
+                        } catch(aiErr) { console.error("AI Sync Error:", aiErr); }
                     }
                 }
-                lastKnownSpinId = latestS.id;
-                
-                // Refresh Current Predictions
-                try {
-                   const sig  = computeDealerSignature(history);
-                   const prox = projectNextRound(history, {});
-                   const master = getIAMasterSignals(prox, sig, history);
-                   if (master && master.length > 0) lastIaSignals = master;
-                } catch(aiErr) { console.error("AI Sync Logic Error:", aiErr); }
                 
                 renderSignalsPanel(lastIaSignals);
                 renderTravelPanel();
