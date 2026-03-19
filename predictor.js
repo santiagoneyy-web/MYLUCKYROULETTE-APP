@@ -296,10 +296,18 @@ function getIAMasterSignals(prox, sig, history) {
             mode17 = "HIBRIDO";
         }
     } else {
-        // Mode Support C1
-        target17 = sig.casilla1;
-        reason17 = "SOPORTE FISICO C1";
-        mode17 = "ESCUDO";
+        // Mode Support (Adaptive to Dominance & Direction)
+        if (isBigTrend) {
+            const idx17 = (lastNumIdx + (14 * globalTrendDir) + 37) % 37;
+            target17 = WHEEL_ORDER[idx17];
+            reason17 = `ATAQUE BIG ${globalTrendDir > 0 ? 'DER' : 'IZQ'} +14`;
+            mode17 = "BIG DIR";
+        } else {
+            const idx17 = (lastNumIdx + (5 * globalTrendDir) + 37) % 37;
+            target17 = WHEEL_ORDER[idx17];
+            reason17 = `ATAQUE SMALL ${globalTrendDir > 0 ? 'DER' : 'IZQ'} +5`;
+            mode17 = "SMALL DIR";
+        }
     }
     
     signals.push({
