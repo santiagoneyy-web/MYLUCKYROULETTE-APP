@@ -2,12 +2,14 @@
 // predictor.js — Advanced Pattern Recognition & Trend Analysis
 // ============================================================
 
-const WHEEL_ORDER = [
+var WHEEL_ORDER = typeof WHEEL_ORDER !== 'undefined' ? WHEEL_ORDER : [
     0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10,
     5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26
 ];
-const WHEEL_INDEX = {};
-WHEEL_ORDER.forEach((n, i) => { WHEEL_INDEX[n] = i; });
+var WHEEL_INDEX = typeof WHEEL_INDEX !== 'undefined' ? WHEEL_INDEX : {};
+if (Object.keys(WHEEL_INDEX).length === 0) {
+    WHEEL_ORDER.forEach((n, i) => { WHEEL_INDEX[n] = i; });
+}
 
 // User Terminal Correlation Chart
 const TERMINALS_MAP = {

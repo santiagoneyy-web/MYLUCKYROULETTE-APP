@@ -1,13 +1,15 @@
 // ============================================================
 // agent5.js — Autonomous AI Pattern Matching (Backend Node)
-// ============================================================
-const Spin = require('./models/Spin');
+let Spin = null;
+if (typeof require !== 'undefined') {
+    Spin = require('./models/Spin');
+}
 
-const WHEEL_ORDER = [
+var WHEEL_ORDER = [
     0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10,
     5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26
 ];
-const WHEEL_INDEX = {};
+var WHEEL_INDEX = {};
 WHEEL_ORDER.forEach((n, i) => { WHEEL_INDEX[n] = i; });
 
 function getSector(number) {
@@ -174,11 +176,13 @@ if (typeof window !== 'undefined') {
     window.WHEEL_INDEX = WHEEL_INDEX;
 }
 
-module.exports = {
-    getSector,
-    getPhysics,
-    predictAgent5,
-    evaluatePrediction,
-    WHEEL_ORDER,
-    WHEEL_INDEX
-};
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        getSector,
+        getPhysics,
+        predictAgent5,
+        evaluatePrediction,
+        WHEEL_ORDER,
+        WHEEL_INDEX
+    };
+}
