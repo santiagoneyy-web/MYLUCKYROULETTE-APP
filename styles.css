@@ -529,4 +529,24 @@ canvas#wheel-canvas { width: 130px; height: 130px; }
   font-weight: 900;
   animation: pulse 1s infinite alternate;
 }
+
+/* ── PERFORMANCE MARKERS ── */
+.performance-string {
+  display: flex;
+  gap: 3px;
+  margin-top: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.perf-w, .perf-l {
+  font-size: 9px;
+  font-weight: 900;
+  padding: 2px 4px;
+  border-radius: 2px;
+  min-width: 14px;
+  text-align: center;
+  font-family: var(--mono);
+}
+.perf-w { background: rgba(16,185,129,0.2); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+.perf-l { background: rgba(239,68,68,0.2); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
 @keyframes pulse { 0% { opacity: 0.5; } 100% { opacity: 1; } }

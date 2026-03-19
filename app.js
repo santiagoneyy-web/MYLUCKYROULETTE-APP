@@ -206,16 +206,25 @@ function renderTravelPanel() {
     const lastZEl = document.getElementById('travel-last-zone');
     if (!tbody) return;
 
-    if (history.length < 2) {
+    if (history.length === 0) {
         tbody.innerHTML = '<tr><td colspan="4" class="muted">Selecciona una mesa...</td></tr>';
         return;
+    }
+    
+    // Clear initial "Select Table" if we have at least 1 spin
+    const domEl = document.getElementById('agent-dominance');
+    if (domEl && domEl.innerText.includes('SELECCIONA')) {
+        domEl.innerText = 'ANALIZANDO RITMO...';
     }
 
     // Unified Dominance & Trend (From IA Master Signals)
     const activeSignal = lastIaSignals[activeIaTab] || lastIaSignals[0];
-    const domEl = document.getElementById('agent-dominance');
-    if (domEl && activeSignal && activeSignal.trend) {
-        domEl.innerHTML = `DOMINANCIA: ${activeSignal.dominance || '--'} | TENDENCIA: ${activeSignal.trend}`;
+    if (domEl) {
+        if (activeSignal && activeSignal.trend) {
+            domEl.innerHTML = `DOMINANCIA: ${activeSignal.dominance || '--'} | TENDENCIA: ${activeSignal.trend}`;
+        } else if (history.length > 0) {
+            domEl.innerText = 'ANALIZANDO RITMO...';
+        }
     }
 
     // V25 Pattern Sequence Rendering (Cleaned)
@@ -359,6 +368,22 @@ async function syncData() {
                     if (s.id > (lastKnownSpinId || -1)) {
                         submitNumber(s.number, true, true, true);
                         lastKnownSpinId = s.id;
+                        
+                        // Populate W-L history from server results (V25 Fix)
+                        if (s.results) {
+                            const resMap = [
+                                s.results.agent1_result, s.results.agent2_result,
+                                s.results.agent3_result, s.results.agent4_result,
+                                s.results.agent5_result
+                            ];
+                            resMap.forEach((res, idx) => {
+                                if (res === 'Direct' || res === 'Neighbor') {
+                                    iaSignalsHistory[idx].push('win');
+                                } else if (res === 'Loss') {
+                                    iaSignalsHistory[idx].push('loss');
+                                }
+                            });
+                        }
                     }
                 }
                 
