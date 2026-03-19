@@ -370,6 +370,28 @@ window.setActiveIaTab = (idx) => {
     renderSignalsPanel(lastIaSignals);
 };
 
+// ─── WIPE DATA ────────────────────────────────────────────
+window.wipeAllData = async () => {
+    if (!confirm('⚠️ WIPE ALL DATA?\nEsto borrará TODOS los registros de la base de datos.\n¿Estás seguro?')) return;
+    try {
+        const r = await fetch('/api/wipe-all', { method: 'DELETE' });
+        const data = await r.json();
+        if (data.success) {
+            // Reset local state too
+            history.length = 0;
+            lastKnownSpinId = null;
+            iaSignalsHistory.forEach(h => h.length = 0);
+            renderSignalsPanel(lastIaSignals);
+            renderTravelPanel();
+            alert(`✅ Wipe completado. Se borraron ${data.deleted} registros.\nEl bot puede comenzar a registrar datos frescos.`);
+        } else {
+            alert('Error: ' + (data.error || 'Wipe fallido'));
+        }
+    } catch(e) {
+        alert('Error al hacer wipe: ' + e.message);
+    }
+};
+
 // ─── INIT ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
     // Clock
@@ -393,6 +415,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 tableSelect.addEventListener('change', () => {
                     currentTableId = tableSelect.value;
                     history.length = 0;
+                    lastKnownSpinId = null;
                     iaSignalsHistory.forEach(h => h.length = 0);
                     syncData();
                 });
@@ -402,6 +425,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     } catch (e) { console.warn('API not reachable, offline mode.'); }
 
-    // Poll for updates every 5s
-    setInterval(syncData, 5000);
+    // Poll for updates every 3s (reduced from 5s for faster sync)
+    setInterval(syncData, 3000);
 });

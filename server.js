@@ -45,15 +45,29 @@ app.delete('/api/tables/:id', (req, res) => {
 });
 
 // ---- API: Spins / History ----
-app.get('/api/history/:tableId', (req, res) => {
+app.get('/api/history/:tableId', async (req, res) => {
     const tableId = req.params.tableId;
     const limit = req.query.limit ? parseInt(req.query.limit) : 1000;
-    console.log(`[GET] History for table ${tableId} (limit: ${limit})`);
-    db.getHistory(tableId, limit, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        console.log(`[DB] Found ${rows.length} rows for table ${tableId}`);
-        res.json(rows);
-    });
+    try {
+        const isMongo = db.getUseMongo();
+        if (isMongo) {
+            // CRITICAL: Query MongoDB directly, NOT the fallback db
+            const rows = await Spin.find({ table_id: tableId })
+                .sort({ id: 1 })
+                .limit(limit)
+                .lean();
+            console.log(`[MONGO] History for table ${tableId}: ${rows.length} rows`);
+            return res.json(rows);
+        } else {
+            db.getHistory(tableId, limit, (err, rows) => {
+                if (err) return res.status(500).json({ error: err.message });
+                res.json(rows);
+            });
+        }
+    } catch(e) {
+        console.error('[History Error]', e);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // ATOMIC COUNTER FOR SPIN IDs
@@ -261,11 +275,46 @@ app.post('/api/spin/batch', (req, res) => {
     });
 });
 
-app.delete('/api/history/:tableId', (req, res) => {
-    db.clearHistory(req.params.tableId, (err) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ success: true });
-    });
+app.delete('/api/history/:tableId', async (req, res) => {
+    try {
+        const isMongo = db.getUseMongo();
+        if (isMongo) {
+            await Spin.deleteMany({ table_id: req.params.tableId });
+            // Reset the counter after wipe
+            await Counter.findOneAndUpdate(
+                { id: 'spinId' },
+                { $set: { seq: 0 } },
+                { upsert: true }
+            );
+            console.log(`[WIPE] Deleted all spins for table ${req.params.tableId}`);
+            return res.json({ success: true, message: 'MongoDB data cleared' });
+        } else {
+            db.clearHistory(req.params.tableId, (err) => {
+                if (err) return res.status(500).json({ error: err.message });
+                res.json({ success: true });
+            });
+        }
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// WIPE ALL spins across all tables
+app.delete('/api/wipe-all', async (req, res) => {
+    try {
+        const isMongo = db.getUseMongo();
+        if (!isMongo) return res.status(400).json({ error: 'Only available in MongoDB mode' });
+        const result = await Spin.deleteMany({});
+        await Counter.findOneAndUpdate(
+            { id: 'spinId' },
+            { $set: { seq: 0 } },
+            { upsert: true }
+        );
+        console.log(`[WIPE ALL] Deleted ${result.deletedCount} spins.`);
+        return res.json({ success: true, deleted: result.deletedCount });
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Real-time prediction endpoint (called at page load)
