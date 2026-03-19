@@ -126,6 +126,16 @@ app.post('/api/spin', async (req, res) => {
                     console.log(`[DUPLICATE IGNORED] Table ${table_id}, Number ${number} (Source: ${source})`);
                     return res.json({ id: lastSpin.id, table_id, number, source, note: 'Duplicate by number match ignored' });
                 }
+            } else if (source === 'bot') {
+                // OCR Anti-Double-Read: Prevent same number within 30 seconds
+                const lastSpin = await Spin.findOne({ table_id }).sort({ id: -1 }).lean();
+                if (lastSpin && lastSpin.number === number) {
+                    const ageMs = lastSpin.timestamp ? (Date.now() - new Date(lastSpin.timestamp).getTime()) : 0;
+                    if (ageMs < 30000) { // 30 seconds
+                        console.log(`[DUPLICATE IGNORED] Table ${table_id}, Number ${number} (OCR too fast: ${ageMs}ms)`);
+                        return res.json({ id: lastSpin.id, table_id, number, source, note: 'Duplicate OCR read ignored' });
+                    }
+                }
             }
 
             // ATOMIC ID GENERATION
