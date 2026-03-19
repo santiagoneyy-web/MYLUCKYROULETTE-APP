@@ -47,7 +47,7 @@ app.delete('/api/tables/:id', (req, res) => {
 // ---- API: Spins / History ----
 app.get('/api/history/:tableId', (req, res) => {
     const tableId = req.params.tableId;
-    const limit = req.query.limit ? parseInt(req.query.limit) : null;
+    const limit = req.query.limit ? parseInt(req.query.limit) : 1000;
     console.log(`[GET] History for table ${tableId} (limit: ${limit})`);
     db.getHistory(tableId, limit, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -56,129 +56,189 @@ app.get('/api/history/:tableId', (req, res) => {
     });
 });
 
+// ATOMIC COUNTER FOR SPIN IDs
+const mongoose = require('mongoose');
+const counterSchema = new mongoose.Schema({
+    id: { type: String, required: true, unique: true },
+    seq: { type: Number, default: 0 }
+});
+let Counter;
+try { Counter = mongoose.model('Counter'); } catch (error) { Counter = mongoose.model('Counter', counterSchema); }
+
+async function syncCounter(retries = 3) {
+    try {
+        const isMongo = db.getUseMongo();
+        if (!isMongo) return;
+        const maxSpin = await Spin.findOne().sort({ id: -1 }).select('id').lean();
+        const seqVal = maxSpin ? maxSpin.id : 0;
+        await Counter.findOneAndUpdate(
+            { id: 'spinId' },
+            { $set: { seq: seqVal } },
+            { returnDocument: 'after', upsert: true }
+        );
+        console.log(`✅ [DB] Synced spinId counter to ${seqVal}`);
+    } catch (e) {
+        console.error('Counter Sync Error:', e);
+        if (retries > 0) {
+            console.log(`⏳ Retrying syncCounter in 3s... (${retries} retries left)`);
+            setTimeout(() => syncCounter(retries - 1), 3000);
+        }
+    }
+}
+setTimeout(syncCounter, 5000); // Wait for mongo connection
+
 app.post('/api/spin', async (req, res) => {
     // ── NODO 1: INGESTA ──
-    const { table_id, number, source, direction } = req.body;
+    const { table_id, number, source, direction, event_id } = req.body;
     if (table_id == null || number == null) return res.status(400).json({ error: 'table_id and number required' });
     if (number < 0 || number > 36) return res.status(400).json({ error: 'number must be 0-36' });
 
     try {
         const isMongo = db.getUseMongo();
-        let currentHistory = [];
+        let newSpinId = 1;
         
-        // Fetch history to drive the agents
+        // DE-DUPLICATION (by event_id or public scraper last number)
+        let earlyReturnId = null;
         if (isMongo) {
-            currentHistory = await Spin.find({ table_id }).sort({ id: 1 }).exec();
-        } else {
-            // Fallback JSON relies on db.getHistory callback
-            currentHistory = await new Promise((resolve, reject) => {
-                db.getHistory(table_id, null, (err, rows) => {
-                    if (err) reject(err); else resolve(rows);
-                });
-            });
-        }
-        
-        const numsOnly = currentHistory.map(s => s.number);
-        const lastNumber = numsOnly.length > 0 ? numsOnly[numsOnly.length - 1] : null;
-
-        // --- DUPLICATE GUARD ---
-        if (number === lastNumber && source === 'public_scraper') {
-            console.log(`[DUPLICATE IGNORED] Table ${table_id}, Number ${number} (Source: ${source})`);
-            return res.json({ id: 'ignored', table_id, number, source, note: 'Duplicate ignored' });
-        }
-
-        const prevSpin = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1] : null;
-        
-        // ── NODO 2: PROCESAMIENTO FÍSICO ──
-        const prevNumber = prevSpin ? prevSpin.number : null;
-        const physics = agent5.getPhysics(prevNumber, number);
-        const sector = agent5.getSector(number);
-
-        // ── NODO 4: EVALUACIÓN (Del tiro anterior contra el número actual) ──
-        if (isMongo && prevSpin && prevSpin.predictions) {
-            prevSpin.results = {
-                agent1_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent1_top),
-                agent2_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent2_top),
-                agent3_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent3_top),
-                agent4_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent4_top),
-                agent5_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent5_top)
-            };
-            await prevSpin.save(); // Sync eval back to db
-        }
-
-        // Add the new number to the local array to generate predictions for the NEXT round
-        numsOnly.push(number);
-
-        // ── NODO 3: IA & AGENTES (Predicciones para el FUTURO) ──
-        let newPredictions = {
-            agent1_top: null, agent2_top: null, agent3_top: null, agent4_top: null, agent5_top: null
-        };
-
-        if (numsOnly.length >= 3) {
-            // Run prediction algorithms
-            const stats = {};
-            // Simulate the analysis pipeline to build the stats
-            for (let i = 2; i < numsOnly.length; i++) {
-                predictor.analyzeSpin(numsOnly.slice(0, i + 1), stats);
+            if (event_id) {
+                const existing = await Spin.findOne({ event_id, table_id }).lean();
+                if (existing) {
+                    console.log(`[DUPLICATE IGNORED] Table ${table_id}, Event ${event_id} already exists (ID: ${existing.id})`);
+                    return res.json({ id: existing.id, table_id, number, source, note: 'Duplicate by event_id ignored', event_id });
+                }
+            } else if (source === 'public_scraper') {
+                const lastSpin = await Spin.findOne({ table_id }).sort({ id: -1 }).lean();
+                if (lastSpin && lastSpin.number === number) {
+                    console.log(`[DUPLICATE IGNORED] Table ${table_id}, Number ${number} (Source: ${source})`);
+                    return res.json({ id: lastSpin.id, table_id, number, source, note: 'Duplicate by number match ignored' });
+                }
             }
+
+            // ATOMIC ID GENERATION
+            const counter = await Counter.findOneAndUpdate(
+                { id: 'spinId' },
+                { $inc: { seq: 1 } },
+                { returnDocument: 'after', upsert: true }
+            );
+            newSpinId = counter.seq;
             
-            const nextRound = predictor.projectNextRound(numsOnly, stats);
-            const signature = predictor.computeDealerSignature(numsOnly);
-            const masterSignals = predictor.getIAMasterSignals(nextRound, signature, numsOnly);
-
-    if (masterSignals && masterSignals.length > 0) {
-        const ag1 = masterSignals.find(s => s.name === 'Android n17');
-        const ag2 = masterSignals.find(s => s.name === 'Android n16');
-        const ag3 = masterSignals.find(s => s.name === 'Android 1717');
-        const ag4 = masterSignals.find(s => s.name === 'N18');
-        
-        if (ag1) newPredictions.agent1_top = ag1.number;
-        if (ag2 && ag2.tp !== undefined) newPredictions.agent2_top = ag2.tp;
-        if (ag3) newPredictions.agent3_top = ag3.number;
-        if (ag4) newPredictions.agent4_top = ag4.number;
-    }
-
-    // Célula (Androide Célula) - DNA Absorption enabled
-    const ag5Result = await agent5.predictAgent5(table_id, numsOnly, masterSignals);
-    if (ag5Result) {
-        newPredictions.agent5_top = ag5Result.topNum;
-        newPredictions.agent5_dna = ag5Result.dnaMatch; 
-        console.log(`🤖 [Célula] Generated prediction: ${ag5Result.topNum} ${ag5Result.dnaMatch ? '(PERFECT DNA)' : ''}`);
-    } else if (numsOnly.length < 50) {
-        console.log(`⏳ [Célula] Learning mode: (${numsOnly.length}/50) spins.`);
-    }
-        }
-
-        // ── NODO 4: SINCRONIZACIÓN (Guardar la inyección enriquecida) ──
-        if (isMongo) {
-            const maxSpin = await Spin.findOne().sort('-id').exec();
-            const newId = maxSpin ? maxSpin.id + 1 : 1;
-
+            // QUICK SAVE AND EARLY RESPONSE ("FIRE AND FORGET")
             const newSpin = new Spin({
-                id: newId,
+                id: newSpinId,
                 table_id,
                 number,
                 source: source || 'bot',
-                distance: physics.distance,
-                direction: direction || physics.direction,
-                sector,
-                predictions: newPredictions
+                event_id,
+                distance: 0, // Placeholder
+                direction: direction || '--',
+                sector: '--',
+                predictions: {}
             });
             await newSpin.save();
-            res.json(newSpin);
+            res.json({ id: newSpinId, table_id, number, source, note: 'Spin logged instantly. Background enrichment started.' });
+
+            // BACKGROUND ENRICHMENT (Does not block the API response)
+            processSpinBackground(newSpin, table_id, number, source, direction).catch(err => {
+                console.error(`[BACKGROUND ENRICHMENT FAILED] Spin ${newSpinId}:`, err);
+            });
         } else {
-            // Fallback
+            // Fallback SQLite/JSON
             db.addSpin(table_id, number, source || 'bot', (err, id) => {
                 if (err) return res.status(500).json({ error: err.message });
-                res.json({ id, table_id, number, source, note: 'Saved to fallback JSON without rich predictions' });
+                res.json({ id, table_id, number, source, note: 'Saved to fallback DB' });
             });
         }
-
     } catch (e) {
+        if (e.code === 11000) {
+            console.warn(`[API] Ignored duplicate key error during rapid ingestion.`);
+            return res.status(200).json({ note: 'Duplicate safely ignored.' });
+        }
         console.error('Pipeline Error:', e);
-        res.status(500).json({ error: e.message });
+        if (!res.headersSent) res.status(500).json({ error: e.message });
     }
 });
+
+// NON-BLOCKING BACKGROUND TASK (Original Intelligence)
+async function processSpinBackground(newSpin, table_id, number, source, direction) {
+    // Fetch only last 100 spins for analysis (performance limit)
+    const HISTORY_LIMIT = 100;
+    let currentHistory = await Spin.find({ table_id, id: { $lt: newSpin.id } })
+        .sort({ id: -1 })
+        .limit(HISTORY_LIMIT)
+        .lean();
+    currentHistory = currentHistory.reverse(); // oldest first
+    
+    const numsOnly = currentHistory.map(s => s.number);
+    const prevSpin = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1] : null;
+    
+    // ── NODO 2: PROCESAMIENTO FÍSICO ──
+    const prevNumber = prevSpin ? prevSpin.number : null;
+    const physics = agent5.getPhysics(prevNumber, number);
+    const sector = agent5.getSector(number);
+
+    // EVALUATION (Of previous predictions against current number)
+    if (prevSpin && prevSpin.predictions) {
+        await Spin.updateOne({ _id: prevSpin._id }, {
+            $set: {
+                results: {
+                    agent1_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent1_top),
+                    agent2_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent2_top),
+                    agent3_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent3_top),
+                    agent4_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent4_top),
+                    agent5_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent5_top)
+                }
+            }
+        });
+    }
+
+    numsOnly.push(number);
+
+    // ── NODO 3: IA & AGENTES (Predicciones para el FUTURO) ──
+    let newPredictions = { agent1_top: null, agent2_top: null, agent3_top: null, agent4_top: null, agent5_top: null };
+
+    if (numsOnly.length >= 3) {
+        const stats = {};
+        // Only analyze last 50 spins in the loop to avoid timeout
+        const analysisWindow = numsOnly.slice(-50);
+        for (let i = 2; i < analysisWindow.length; i++) {
+            predictor.analyzeSpin(analysisWindow.slice(0, i + 1), stats);
+        }
+        
+        const nextRound = predictor.projectNextRound(numsOnly, stats);
+        const signature = predictor.computeDealerSignature(numsOnly);
+        const masterSignals = predictor.getIAMasterSignals(nextRound, signature, numsOnly);
+
+        if (masterSignals && masterSignals.length > 0) {
+            const ag1 = masterSignals.find(s => s.name === 'Android n17');
+            const ag2 = masterSignals.find(s => s.name === 'Android n16');
+            const ag3 = masterSignals.find(s => s.name === 'Android 1717');
+            const ag4 = masterSignals.find(s => s.name === 'N18');
+            
+            if (ag1) newPredictions.agent1_top = ag1.number;
+            if (ag2 && ag2.tp !== undefined) newPredictions.agent2_top = ag2.tp;
+            if (ag3) newPredictions.agent3_top = ag3.number;
+            if (ag4) newPredictions.agent4_top = ag4.number;
+        }
+
+        // ORIGINAL Célula (Androide Célula) Call - UNTOUCHED LOGIC
+        const ag5Result = await agent5.predictAgent5(table_id, numsOnly, masterSignals);
+        if (ag5Result) {
+            newPredictions.agent5_top = ag5Result.topNum;
+            newPredictions.agent5_dna = ag5Result.dnaMatch; 
+        }
+    }
+
+    await Spin.updateOne({ _id: newSpin._id }, {
+        $set: {
+            distance: physics.distance,
+            direction: direction || physics.direction,
+            sector: sector,
+            predictions: newPredictions
+        }
+    });
+
+    console.log(`✅ [BKG] Processed spin ${newSpin.id} | Result: ${number} | AI done.`);
+}
 
 // Batch import (for OCR auto-capture)
 app.post('/api/spin/batch', (req, res) => {

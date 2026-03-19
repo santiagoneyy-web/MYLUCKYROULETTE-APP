@@ -22,6 +22,7 @@ const RED_NUMS  = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
 const WHEEL_NUMS = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
 
 let currentTableId = null;
+let lastKnownSpinId = null;
 
 function calcDist(from, to) {
     const i1 = WHEEL_NUMS.indexOf(from);
@@ -199,24 +200,55 @@ function renderTravelPanel() {
         return;
     }
 
-    // Pattern badge
-    if (patEl) {
-        const last5 = history.slice(-5);
-        const bigCount   = last5.filter(n => n >= 10 && n <= 19).length;
-        const smallCount = last5.filter(n => n >= 1 && n <= 9).length;
-        const dirs = [];
-        for (let i = history.length - 4; i < history.length; i++) {
-            if (i > 0) dirs.push(calcDist(history[i-1], history[i]) > 0 ? 'D' : 'I');
+    // Pattern & Dominance badge calculation (Based on Distance)
+    if (history.length > 1) {
+        const evalCount = Math.min(20, history.length - 1);
+        let bigAcc = 0, smallAcc = 0, dirDer = 0, dirIzq = 0;
+        let recentBig = 0, recentSmall = 0;
+        let recentDirs = [];
+
+        for (let i = history.length - evalCount; i < history.length; i++) {
+            const dist = calcDist(history[i-1], history[i]);
+            const abs = Math.abs(dist);
+            
+            // Global 20 spins dominance
+            if (abs >= 10 && abs <= 19) bigAcc++;
+            else if (abs >= 1 && abs <= 9) smallAcc++;
+            if (dist >= 0) dirDer++; else dirIzq++;
+
+            // Last 5 spins pattern (for badge)
+            if (i >= history.length - 4) {
+                if (abs >= 10 && abs <= 19) recentBig++;
+                else if (abs >= 1 && abs <= 9) recentSmall++;
+                recentDirs.push(dist >= 0 ? 'D' : 'I');
+            }
         }
-        const isZigZagDir = dirs.length >= 2 && dirs[dirs.length-1] !== dirs[dirs.length-2];
+
+        // Global Dominance Update
+        let domType = 'NINGUNA', domCount = 0;
+        if (bigAcc > smallAcc) { domType = 'BIG'; domCount = bigAcc; }
+        else if (smallAcc > bigAcc) { domType = 'SMALL'; domCount = smallAcc; }
         
-        let pat = 'ESTABLE', patClass = 'badge-stable';
-        if (isZigZagDir) { pat = 'ZIG ZAG ↔'; patClass = 'badge-zigzag'; }
-        else if (bigCount >= 3) { pat = 'BIG TREND'; patClass = 'badge-zone'; }
-        else if (smallCount >= 3) { pat = 'SMALL TREND'; patClass = 'badge-stable'; }
+        let tendType = 'NINGUNA';
+        if (dirDer > dirIzq) tendType = 'Der';
+        else if (dirIzq > dirDer) tendType = 'Izq';
+
+        const domEl = document.getElementById('agent-dominance');
+        if (domEl) {
+            domEl.innerHTML = `MODO: HIBRIDO (10 CASILLAS)<br/>DOMINANCIA DETECTADA: ${domType} (${domCount} n4) | M.D: ${dirDer} n9 | M.I: ${dirIzq} n9 (TENDENCIA: ${tendType})`;
+        }
         
-        patEl.textContent = pat;
-        patEl.className = `badge ${patClass}`;
+        if (patEl) {
+            const isZigZagDir = recentDirs.length >= 2 && recentDirs[recentDirs.length-1] !== recentDirs[recentDirs.length-2];
+            let pat = 'ESTABLE', patClass = 'badge-stable';
+            
+            if (recentBig >= 3) { pat = 'BIG TREND'; patClass = 'badge-zone'; }
+            else if (recentSmall >= 3) { pat = 'SMALL TREND'; patClass = 'badge-stable'; }
+            else if (isZigZagDir) { pat = 'ZIG ZAG ↔'; patClass = 'badge-zigzag'; }
+            
+            patEl.textContent = pat;
+            patEl.className = `badge ${patClass}`;
+        }
     }
 
     // Last zone badge (based on number for the badge, but distance for the table)
@@ -316,10 +348,13 @@ function submitNumber(val, silent = false, batch = false) {
 async function syncData() {
     if (!currentTableId) return;
     try {
-        const r = await fetch(`/api/history/${currentTableId}`);
+        const r = await fetch(`/api/history/${currentTableId}?limit=1000&_=${Date.now()}`);
         if (!r.ok) return;
         const spins = await r.json();
-        if (spins.length !== history.length) {
+        
+        const latestId = spins.length > 0 ? spins[spins.length - 1].id : null;
+        if (spins.length !== history.length || latestId !== lastKnownSpinId) {
+            lastKnownSpinId = latestId;
             history.length = 0;
             iaSignalsHistory.forEach(h => h.length = 0);
             for (const s of spins) submitNumber(s.number, true, true);

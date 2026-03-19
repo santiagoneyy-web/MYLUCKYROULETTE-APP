@@ -38,4 +38,9 @@ const SpinSchema = new mongoose.Schema({
     timestamp: { type: Date, default: Date.now }
 });
 
+// Compound index for fast history queries per table
+SpinSchema.index({ table_id: 1, id: -1 });
+// Index for event_id deduplication
+SpinSchema.index({ event_id: 1, table_id: 1 }, { sparse: true });
+
 module.exports = mongoose.model('Spin', SpinSchema);
