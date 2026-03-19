@@ -4,10 +4,10 @@
 
 const history      = [];
 const iaSignalsHistory = [ [], [], [], [], [] ]; 
-let activeIaTab    = 0; 
+let activeIaTab    = 1; // Default to N17
 let lastIaSignals = [
+    { top: 16, rule: 'READY', radius:'N2/N3', smallSnipe: 5, bigSnipe: 14  }, // Hidden N16
     { top: 17, rule: 'READY', radius:'N9', smallSnipe: 5, bigSnipe: 14 },
-    { top: 16, rule: 'READY', radius:'N2/N3', smallSnipe: 5, bigSnipe: 14  },
     { top: 5,  rule: 'READY', radius:'N9', smallSnipe: 5, bigSnipe: 14  },
     { top: 22, rule: 'READY', radius:'N9', smallSnipe: 5, bigSnipe: 14  },
     { top: 10, rule: 'READY', radius:'N4', smallSnipe: 5, bigSnipe: 14  }
@@ -40,6 +40,7 @@ function renderTabs() {
     const strip = document.getElementById('strat-tabs');
     if (!strip) return;
     strip.innerHTML = AGENT_KEYS.map((key, idx) => {
+        if (idx === 0) return ''; // HIDDEN N16 (Six Strategie)
         const h = iaSignalsHistory[idx] || [];
         const wins = h.filter(x => x === 'win').length;
         const active = idx === activeIaTab;
@@ -333,7 +334,9 @@ async function syncData() {
                 iaSignalsHistory.forEach(h => h.length = 0);
                 lastKnownSpinId = null;
                 pendingPredictions = null;
+                renderWheelAndHistory();
                 renderSignalsPanel(lastIaSignals || []);
+                renderTravelPanel();
             }
         } else {
             const latestS = spins[spins.length - 1];
@@ -375,6 +378,7 @@ async function syncData() {
                     }
                 }
                 
+                renderWheelAndHistory();
                 renderSignalsPanel(lastIaSignals);
                 renderTravelPanel();
             }
