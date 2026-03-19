@@ -72,8 +72,8 @@ function renderAgentCard(signals) {
     if (nameEl)   nameEl.innerText   = (AGENT_NAMES[activeIaTab] || 'AGENT').toUpperCase();
     if (confEl)   confEl.innerText   = (s.confidence || '90%') + ' CONF.';
     if (statusMsg) statusMsg.innerText = (s.rule || AGENT_MODES[activeIaTab]) + ' ' + (s.radius || 'N9');
-    if (statusEl) statusEl.innerText = s.reason || 'ANALIZANDO PATRONES...';
-    if (syncEl)   syncEl.innerText   = s.mode ? `MODO: ${s.mode}` : 'SINCRONIZADO';
+    if (statusEl)  statusEl.innerText  = s.reason || '';
+    if (syncEl)    syncEl.innerText    = s.mode ? `MODO: ${s.mode}` : '';
     
     // Support either 'top' or 'number' from predictor.js
     const targetNum = s.top !== undefined ? s.top : (s.number !== undefined ? s.number : '--');
@@ -215,7 +215,7 @@ function renderTravelPanel() {
         // Clear initial "Select Table"
         const domEl = document.getElementById('agent-dominance');
         if (domEl && domEl.innerText.includes('SELECCIONA')) {
-            domEl.innerText = 'ANALIZANDO RITMO...';
+            domEl.innerText = '';
         }
 
         // Unified Dominance & Trend (From IA Master Signals)

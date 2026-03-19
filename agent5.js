@@ -153,17 +153,18 @@ async function predictAgent5(tableId, currentHistoryNumbers, otherAgentsDNA = []
     }
 }
 
-function evaluatePrediction(realNumber, predictedNumber) {
-    if (predictedNumber === null || realNumber === null) return null;
+function evaluatePrediction(realNumber, predictedNumber, radius = 9) {
+    if (predictedNumber === null || realNumber === null || predictedNumber === undefined) return null;
     if (realNumber === predictedNumber) return 'Direct';
     
     const iReal = WHEEL_INDEX[realNumber];
     const iPred = WHEEL_INDEX[predictedNumber];
+    if (iReal === undefined || iPred === undefined) return 'Loss';
     
     let dist = Math.abs(iReal - iPred);
     dist = Math.min(dist, 37 - dist);
     
-    if (dist <= 2) return 'Neighbor'; // N2
+    if (dist <= radius) return 'Neighbor';
     return 'Loss';
 }
 

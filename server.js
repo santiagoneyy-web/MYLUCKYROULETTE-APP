@@ -195,11 +195,11 @@ async function processSpinBackground(newSpin, table_id, number, source, directio
         await Spin.updateOne({ _id: prevSpin._id }, {
             $set: {
                 results: {
-                    agent1_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent1_top),
-                    agent2_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent2_top),
-                    agent3_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent3_top),
-                    agent4_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent4_top),
-                    agent5_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent5_top)
+                    agent1_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent1_top, 9),
+                    agent2_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent2_top, 3),
+                    agent3_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent3_top, 9),
+                    agent4_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent4_top, 9),
+                    agent5_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent5_top, 9)
                 }
             }
         });
