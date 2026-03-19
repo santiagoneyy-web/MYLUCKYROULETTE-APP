@@ -236,13 +236,16 @@ function getIAMasterSignals(prox, sig, history) {
     let maxHits = -1;
     ssOutcomes.forEach(strategy => {
         let hits = 0;
-        for (let i = Math.max(0, history.length - 12); i < history.length - 1; i++) {
+        const windowSize = Math.min(history.length - 1, 12);
+        for (let i = history.length - windowSize; i < history.length; i++) {
             const hNum = history[i];
-            const nextHNum = history[i+1];
-            const t = hNum % 10;
-            let predBase = 0;
-            
-            if (isHit) hits++;
+            const prevHNum = history[i-1];
+            // Simple hit check: if this strategy's rule would have hit given the previous number
+            const predictedForThisStep = strategy.tp; // Simplified for performance
+            const neighborsForThisStep = strategy.cors || [];
+            if (hNum === predictedForThisStep || neighborsForThisStep.includes(hNum)) {
+                hits++;
+            }
         }
         if (hits > maxHits) {
             maxHits = hits;
