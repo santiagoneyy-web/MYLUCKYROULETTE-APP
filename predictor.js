@@ -158,33 +158,47 @@ function getIAMasterSignals(prox, sig, history) {
     const lastNum = history[history.length - 1];
     const signals = [];
 
-    // Evaluate Patterns & Trends (Using Actual Absolute Distance)
-    const last5D = history.slice(-5).map((n, i, arr) => {
-        if (i===0) return 0;
-        return Math.abs(calcDist(arr[i-1], n));
-    }).slice(1);
+    // --- V24 Analysis (Window: 12 spins) ---
+    const WINDOW_SIZE = 12;
+    const history12 = history.slice(-WINDOW_SIZE);
     
-    let isBigTrend = last5D.filter(d => d >= 10 && d <= 19).length >= 2;
-    let isSmallTrend = last5D.filter(d => d >= 1 && d <= 9).length >= 2;
-    
-    // Determine Global Trend (Direction) for Hybrid Mode
-    let dirDer = 0, dirIzq = 0;
-    const limit = Math.min(20, history.length - 1);
-    for (let i = history.length - limit; i < history.length; i++) {
-        const dist = getDistance(history[i-1], history[i]);
-        if (dist > 0) dirDer++;
-        else if (dist < 0) dirIzq++;
+    // Evaluate Patterns (Using Actual Absolute Distance)
+    const distHistory = [];
+    for (let i = 1; i < history12.length; i++) {
+        distHistory.push(Math.abs(calcDist(history12[i-1], history12[i])));
     }
-    const globalTrend = (dirDer >= dirIzq) ? 1 : -1; // 1 = Der, -1 = Izq
     
-    // 10 Casillas away from Last Num in the global trend direction
-    const lastNumIdx = WHEEL_INDEX[lastNum] || 0;
-    const hibridoIndex = (lastNumIdx + (10 * globalTrend) + 37) % 37;
-    const hibridoTarget = WHEEL_ORDER[hibridoIndex];
+    // Dominancia (based on distance: 1-9 small, 10-19 big)
+    let isBigTrend = distHistory.filter(d => d >= 10 && d <= 19).length >= (distHistory.length * 0.6);
+    let isSmallTrend = distHistory.filter(d => d >= 1 && d <= 9).length >= (distHistory.length * 0.6);
+    
+    // Weakening Trend (last 4 spins vs main window)
+    const last4D = distHistory.slice(-4);
+    const weakeningBig = isBigTrend && last4D.filter(d => d < 10).length >= 3;
+    const weakeningSmall = isSmallTrend && last4D.filter(d => d >= 10).length >= 3;
+    
+    // Directional Trend (6-12 spins)
+    let dirDer = 0, dirIzq = 0;
+    for (let i = 1; i < history12.length; i++) {
+        const d = getDistance(history12[i-1], history12[i]);
+        if (d > 0) dirDer++; else if (d < 0) dirIzq++;
+    }
+    const globalTrendDir = (dirDer >= dirIzq) ? 1 : -1;
+    const isDirectionUnstable = Math.abs(dirDer - dirIzq) <= 1 && history12.length >= 6;
 
-    // Zig Zag Detectors
-    const isDirZigZag = history.length >= 3 && Math.sign(calcDist(history[history.length-2], history[history.length-1])) !== Math.sign(calcDist(history[history.length-3], history[history.length-2]));
-    const isZoneZigZag = history.length >= 3 && (history[history.length-1] >= 10 && history[history.length-1] <= 19) !== (history[history.length-2] >= 10 && history[history.length-2] <= 19);
+    // Zig Zag Detectors (Immediate rhythm)
+    const lastDist  = history.length >= 2 ? calcDist(history[history.length-2], history[history.length-1]) : 0;
+    const prevDist  = history.length >= 3 ? calcDist(history[history.length-3], history[history.length-2]) : 0;
+    const isDirZigZag  = history.length >= 3 && Math.sign(lastDist) !== Math.sign(prevDist);
+    
+    const lastDistAbs = Math.abs(lastDist);
+    const lastIsBig   = lastDistAbs >= 10 && lastDistAbs <= 19;
+    const prevDistAbs = Math.abs(prevDist);
+    const prevIsBig   = prevDistAbs >= 10 && prevDistAbs <= 19;
+    const isZoneZigZag = history.length >= 3 && lastIsBig !== prevIsBig;
+
+    const lastNumIdx = WHEEL_INDEX[lastNum] || 0;
+    const lastDirection = lastDist >= 0 ? 1 : -1;
 
     // 1. Android n16 (Six Strategie - The User's Core Logic)
     const ssOutcomes = getSixStrategieSignals(lastNum);
@@ -229,57 +243,111 @@ function getIAMasterSignals(prox, sig, history) {
         betZone: bestSS.betZone,
         number: bestSS.tp,
         confidence: "94%",
-        reason: `${bestSS.name} (Hits: ${maxHits}/10)`,
+        reason: `${bestSS.name} (Hits: ${maxHits}/12)`,
         rule: 'SIX STRATEGIE',
-        mode: 'ZONAS',
-        radius: "N2/N3"
+        mode: 'ZONAREAL',
+        radius: "N4/N9"
     });
 
-    // 2. Android n17 (SOPORTE + HIBRIDO)
-    let target17 = sig.casilla1;
-    let reason17 = "SOPORTE DE VELOCIDAD";
-    if (history.length > 5 && Math.abs(sig.avgTravel) < 5) {
-        target17 = hibridoTarget;
-        reason17 = "MODO HIBRIDO (10 CASILLAS)";
+    // Update n16 radius to N9 for consistency
+    signals[signals.length-1].betZone = getWheelNeighbors(bestSS.tp, 9);
+    bestSS.cors.forEach(c => {
+        const cN = getWheelNeighbors(c, 9);
+        signals[signals.length-1].betZone = [...new Set([...signals[signals.length-1].betZone, ...cN])];
+    });
+
+    // 2. Android n17 (SOPORTE + HIBRIDO V24)
+    // Hybrid Mode active if avgTravel < 5. All radios N9.
+    let target17, reason17, mode17;
+    const isHybridActive = history.length > 5 && Math.abs(sig.avgTravel) < 5;
+    
+    if (isHybridActive) {
+        if (isDirectionUnstable) {
+            // Unstable trend -> Inverse Hybrid (Opposite of global trend)
+            const inverseDir = -globalTrendDir;
+            const idx17 = (lastNumIdx + (10 * inverseDir) + 37) % 37;
+            target17 = WHEEL_ORDER[idx17];
+            reason17 = "HIBRIDO INVERSO (INESTABLE)";
+            mode17 = "ATAQUE";
+        } else {
+            // Stable trend -> Direct Hybrid (+10 in direction)
+            const idx17 = (lastNumIdx + (10 * globalTrendDir) + 37) % 37;
+            target17 = WHEEL_ORDER[idx17];
+            reason17 = `HIBRIDO ${globalTrendDir > 0 ? 'DER' : 'IZQ'} +10`;
+            mode17 = "HIBRIDO";
+        }
+    } else {
+        // Mode Support C1
+        target17 = sig.casilla1;
+        reason17 = "SOPORTE FISICO C1";
+        mode17 = "ESCUDO";
     }
+    
     signals.push({
         name: 'Android n17',
         number: target17,
         confidence: "88%",
         reason: reason17,
         rule: "FISICA/SOPORTE",
-        mode: "ESCUDO",
+        mode: mode17,
         betZone: getWheelNeighbors(target17, 9),
         radius: "N9"
     });
 
-    // 3. Android 1717 (SOPORTE + HIBRIDO + ZIG ZAG)
-    let target1717 = hibridoTarget; 
-    let reason1717 = "ATAQUE HIBRIDO (10 CASILLAS)";
-    if (isDirZigZag || isZoneZigZag) {
-        target1717 = WHEEL_ORDER[(lastNumIdx - (10 * globalTrend) + 37) % 37];
-        reason1717 = "ZIGZAG ↔ CONTRA-HIBRIDO";
+    // 3. Android 1717 (ATAQUE V24: Anticipacion ZigZag)
+    let target1717, reason1717, mode1717;
+    if (isDirZigZag) {
+        // Anticipate inversion: last was D -> play I-10
+        const anticipatedDir = -lastDirection;
+        const idx1717 = (lastNumIdx + (10 * anticipatedDir) + 37) % 37;
+        target1717 = WHEEL_ORDER[idx1717];
+        reason1717 = `ZIGZAG ANTICIPA ${anticipatedDir > 0 ? 'DER' : 'IZQ'}`;
+        mode1717 = "ZIGZAG";
+    } else if (isZoneZigZag) {
+        // Zone zigzag -> Support C19
+        target1717 = sig.casilla19;
+        reason1717 = "ZIGZAG ZONA -> SOPORTE C19";
+        mode1717 = "ZONA-DEF";
+    } else {
+        // Base Hybrid or confirmed trend
+        const idx1717 = (lastNumIdx + (10 * globalTrendDir) + 37) % 37;
+        target1717 = WHEEL_ORDER[idx1717];
+        reason1717 = "ATAQUE HIBRIDO CONFIRMADO";
+        mode1717 = "ATAQUE";
     }
+    
     signals.push({
         name: 'Android 1717',
         number: target1717,
         confidence: "90%",
         reason: reason1717,
         rule: "HIBRIDO/ZIGZAG",
-        mode: 'ATAQUE',
+        mode: mode1717,
         betZone: getWheelNeighbors(target1717, 9),
         radius: "N9"
     });
 
-    // 4. N18 (SOPORTE PURO)
-    let targetSoporte = isBigTrend ? sig.casilla19 : (isSmallTrend ? sig.casilla10 : sig.casilla1);
+    // 4. N18 (SOPORTE PURO: Dominancia V24)
+    // Only BIG or SMALL. Handles weakening.
+    let targetSoporte, reasonSoporte;
+    if (weakeningBig) {
+        targetSoporte = sig.casilla1;
+        reasonSoporte = "DEBILITAMIENTO BIG -> C1";
+    } else if (weakeningSmall) {
+        targetSoporte = sig.casilla19;
+        reasonSoporte = "DEBILITAMIENTO SMALL -> C19";
+    } else {
+        targetSoporte = isBigTrend ? sig.casilla19 : sig.casilla1;
+        reasonSoporte = isBigTrend ? "DOMINANCIA BIG -> C19" : "DOMINANCIA SMALL -> C1";
+    }
+    
     signals.push({
         name: 'N18',
         number: targetSoporte,
         confidence: "86%",
-        reason: isBigTrend ? "SOPORTE BIG" : (isSmallTrend ? "SOPORTE SMALL" : "SOPORTE NEUTRAL"),
+        reason: reasonSoporte,
         rule: "SOPORTE",
-        mode: 'SOPORTE',
+        mode: isBigTrend ? 'BIG' : 'SMALL',
         betZone: getWheelNeighbors(targetSoporte, 9),
         radius: "N9"
     });
