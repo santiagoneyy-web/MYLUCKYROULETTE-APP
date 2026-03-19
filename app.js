@@ -354,27 +354,41 @@ async function syncData() {
 
             if (latestS.id !== lastKnownSpinId) {
                 // Sync loop
-                for (const s of spins) {
+                for (let i = 0; i < spins.length; i++) {
+                    const s = spins[i];
                     if (s.id > (lastKnownSpinId || -1)) {
                         const n = parseInt(s.number);
                         if (!isNaN(n)) {
                             history.push(n);
                             lastKnownSpinId = s.id;
                             
-                            // W-L sync
+                            // W-L sync: Try server results first, fallback to client-side eval
                             if (s.results) {
-                                const resMap = [
-                                    s.results.agent1_result, s.results.agent2_result,
-                                    s.results.agent3_result, s.results.agent4_result,
-                                    s.results.agent5_result
-                                ];
+                                const resMap = [s.results.agent1_result, s.results.agent2_result, s.results.agent3_result, s.results.agent4_result, s.results.agent5_result];
                                 resMap.forEach((res, idx) => {
-                                    if (res === 'Direct' || res === 'Neighbor') {
-                                        iaSignalsHistory[idx].push('win');
-                                    } else if (res === 'Loss') {
-                                        iaSignalsHistory[idx].push('loss');
-                                    }
+                                    if (res === 'Direct' || res === 'Neighbor') iaSignalsHistory[idx].push('win');
+                                    else if (res === 'Loss') iaSignalsHistory[idx].push('loss');
                                 });
+                            } else {
+                                // Fallback: Evaluate previous spin's predictions against THIS number
+                                const prevS = (i > 0) ? spins[i-1] : null;
+                                if (prevS && prevS.predictions) {
+                                    const preds = [
+                                        prevS.predictions.agent1_top,
+                                        prevS.predictions.agent2_top,
+                                        prevS.predictions.agent3_top,
+                                        prevS.predictions.agent4_top,
+                                        prevS.predictions.agent5_top
+                                    ];
+                                    const radii = [9, 3, 9, 9, 9]; // Standard radii
+                                    preds.forEach((pTop, idx) => {
+                                        if (pTop !== undefined && pTop !== null) {
+                                            const outcome = typeof evaluatePrediction === 'function' ? evaluatePrediction(n, pTop, radii[idx]) : null;
+                                            if (outcome === 'Direct' || outcome === 'Neighbor') iaSignalsHistory[idx].push('win');
+                                            else if (outcome === 'Loss') iaSignalsHistory[idx].push('loss');
+                                        }
+                                    });
+                                }
                             }
                         }
                     }

@@ -168,6 +168,12 @@ function evaluatePrediction(realNumber, predictedNumber, radius = 9) {
     return 'Loss';
 }
 
+if (typeof window !== 'undefined') {
+    window.evaluatePrediction = evaluatePrediction;
+    window.WHEEL_ORDER = WHEEL_ORDER;
+    window.WHEEL_INDEX = WHEEL_INDEX;
+}
+
 module.exports = {
     getSector,
     getPhysics,
