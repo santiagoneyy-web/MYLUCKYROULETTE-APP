@@ -334,15 +334,26 @@ async function syncData() {
     isSyncing = true;
     try {
         const r = await fetch(`/api/history/${currentTableId}?limit=100&_=${Date.now()}`);
-        if (!r.ok) { isSyncing = false; return; }
+        if (!r.ok) return; 
         const spins = await r.json();
         
         if (spins.length === 0) {
-            history.length = 0;
-            lastKnownSpinId = null;
+            if (history.length > 0) {
+                history.length = 0;
+                iaSignalsHistory.forEach(h => h.length = 0);
+                lastKnownSpinId = null;
+                renderSignalsPanel(lastIaSignals);
+            }
         } else {
             const latestS = spins[spins.length - 1];
             if (latestS.id !== lastKnownSpinId) {
+                // DB RESET DETECTION: If server ID is smaller, reset local state
+                if (lastKnownSpinId !== null && latestS.id < lastKnownSpinId) {
+                    history.length = 0;
+                    iaSignalsHistory.forEach(h => h.length = 0);
+                    lastKnownSpinId = null;
+                }
+                
                 // Only process new spins since lastKnownSpinId
                 for (const s of spins) {
                     if (s.id > (lastKnownSpinId || -1)) {
@@ -351,8 +362,7 @@ async function syncData() {
                     }
                 }
                 
-                // Finally update UI with the latest server-computed signals if available
-                // or compute them locally for the absolute latest state
+                // Final update UI
                 const sig  = computeDealerSignature(history);
                 const prox = projectNextRound(history, {});
                 lastIaSignals = getIAMasterSignals(prox, sig, history);
@@ -361,8 +371,11 @@ async function syncData() {
                 renderTravelPanel();
             }
         }
-    } catch(e) {}
-    isSyncing = false;
+    } catch(e) {
+        console.error('Sync error:', e);
+    } finally {
+        isSyncing = false;
+    }
 }
 
 // ─── TAB SWITCH ───────────────────────────────────────────
