@@ -227,22 +227,6 @@ function renderTravelPanel() {
         }
     }
 
-    // V25 Pattern Sequence Rendering (Cleaned)
-    const seqEl = document.getElementById('pattern-sequence-v25');
-    if (seqEl && activeSignal && activeSignal.patternCode) {
-        const pCode = activeSignal.patternCode;
-        const sCount = activeSignal.streakCount;
-        const isW = activeSignal.isWeakening;
-        
-        let html = pCode.split('').map(c => 
-            `<div class="pat-${c.toLowerCase()}">${c}</div>`
-        ).join('');
-        
-        html += `<div class="streak-indicator">${sCount}${pCode[pCode.length-1]}</div>`;
-        if (isW) html += `<div class="weakening-label">DEBILITADO</div>`;
-        seqEl.innerHTML = html;
-    }
-
     // Status Badges (Stable / ZigZag etc)
     if (patEl && activeSignal) {
         let pat = 'ESTABLE', patClass = 'badge-stable';
