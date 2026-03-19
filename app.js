@@ -13,10 +13,10 @@ let lastIaSignals = [
     { top: 10, rule: 'READY', radius:'N4', smallSnipe: 5, bigSnipe: 14  }
 ]; 
 
-// Agent names as per user request
-const AGENT_NAMES   = ['Android N17', 'Android N16', 'Android 1717', 'Android N18', 'CÉLULA'];
-const AGENT_KEYS    = ['N17', 'N16', 'N17PLUS', 'N18', 'CELULA'];
-const AGENT_MODES   = ['SOPORTE/HIBRIDO', 'SIX STRATEGIE', 'HIBRIDO/ZIGZAG', 'SOPORTE PURO', 'SNIPER'];
+// Agent names aligned with predictor.js index 0=N16, 1=N17
+const AGENT_NAMES   = ['Android N16', 'Android N17', 'Android 1717', 'Android N18', 'CÉLULA'];
+const AGENT_KEYS    = ['N16', 'N17', 'N17PLUS', 'N18', 'CELULA'];
+const AGENT_MODES   = ['SIX STRATEGIE', 'SOPORTE/HIBRIDO', 'HIBRIDO/ZIGZAG', 'SOPORTE PURO', 'SNIPER'];
 
 const RED_NUMS  = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
 const WHEEL_NUMS = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
@@ -290,13 +290,28 @@ function submitNumber(val) {
 // ─── SYNC FROM SERVER (REAL-TIME W-L TRACKING) ───────────────────
 let pendingPredictions = null; // Snapshot of predictions awaiting evaluation
 
+function evaluatePredictionLocal(realNumber, predictedNumber, radius = 9) {
+    if (predictedNumber === null || realNumber === null || predictedNumber === undefined) return null;
+    if (realNumber === predictedNumber) return 'Direct';
+    
+    const iReal = WHEEL_NUMS.indexOf(realNumber);
+    const iPred = WHEEL_NUMS.indexOf(predictedNumber);
+    if (iReal === -1 || iPred === -1) return 'Loss';
+    
+    let dist = Math.abs(iReal - iPred);
+    dist = Math.min(dist, 37 - dist);
+    
+    if (dist <= radius) return 'Neighbor';
+    return 'Loss';
+}
+
 function evaluateAndTrackWL(newNumber) {
     if (!pendingPredictions) return;
     const radii = [9, 3, 9, 9, 9];
     pendingPredictions.forEach((sig, idx) => {
         const pTop = sig ? (sig.top !== undefined ? sig.top : sig.number) : null;
-        if (pTop !== null && pTop !== undefined && typeof evaluatePrediction === 'function') {
-            const out = evaluatePrediction(newNumber, pTop, radii[idx]);
+        if (pTop !== null && pTop !== undefined) {
+            const out = evaluatePredictionLocal(newNumber, pTop, radii[idx]);
             if (out === 'Direct' || out === 'Neighbor') iaSignalsHistory[idx].push('win');
             else if (out === 'Loss') iaSignalsHistory[idx].push('loss');
         }
