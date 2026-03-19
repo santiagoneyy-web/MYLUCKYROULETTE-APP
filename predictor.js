@@ -371,6 +371,9 @@ function getIAMasterSignals(prox, sig, history) {
         s.isWeakening = isWeakening || isShrinking;
         s.trend = globalTrendDir > 0 ? 'DER' : 'IZQ';
         s.dominance = isBigTrend ? 'BIG' : 'SMALL';
+        s.isDirZigZag = isDirZigZag;
+        s.isZoneZigZag = isZoneZigZag;
+        s.isUnstable = isDirectionUnstable;
     });
 
     // 5. CELULA (COMBINADO TOTAL - SNIPER HYBRID)

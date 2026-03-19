@@ -230,8 +230,15 @@ function renderTravelPanel() {
     // Status Badges (Stable / ZigZag etc)
     if (patEl && activeSignal) {
         let pat = 'ESTABLE', patClass = 'badge-stable';
-        if (activeSignal.isWeakening) { pat = 'DEBILITADO'; patClass = 'badge-zone'; }
-        // Simple logic for the badge
+        
+        if (activeSignal.isDirZigZag) { 
+            pat = 'ZIG ZAG'; patClass = 'badge-zigzag'; 
+        } else if (activeSignal.isUnstable) { 
+            pat = 'INESTABLE'; patClass = 'badge-zigzag'; 
+        } else if (activeSignal.isWeakening) { 
+            pat = 'DEBILITADO'; patClass = 'badge-zone'; 
+        }
+        
         patEl.textContent = pat;
         patEl.className = `badge ${patClass}`;
     }
