@@ -344,49 +344,56 @@ async function syncData() {
             }
         } else {
             const latestS = spins[spins.length - 1];
+            
+            // DB RESET DETECTION
+            if (lastKnownSpinId !== null && latestS.id < lastKnownSpinId) {
+                history.length = 0;
+                iaSignalsHistory.forEach(h => h.length = 0);
+                lastKnownSpinId = null;
+            }
+
             if (latestS.id !== lastKnownSpinId) {
-                // DB RESET DETECTION: If server ID is smaller, reset local state
-                if (lastKnownSpinId !== null && latestS.id < lastKnownSpinId) {
-                    history.length = 0;
-                    iaSignalsHistory.forEach(h => h.length = 0);
-                    lastKnownSpinId = null;
-                }
-                
-                // Only process new spins since lastKnownSpinId
+                // Sync loop
                 for (const s of spins) {
                     if (s.id > (lastKnownSpinId || -1)) {
-                        submitNumber(s.number, true, true, true);
-                        lastKnownSpinId = s.id;
-                        
-                        // Populate W-L history from server results (V25 Fix)
-                        if (s.results) {
-                            const resMap = [
-                                s.results.agent1_result, s.results.agent2_result,
-                                s.results.agent3_result, s.results.agent4_result,
-                                s.results.agent5_result
-                            ];
-                            resMap.forEach((res, idx) => {
-                                if (res === 'Direct' || res === 'Neighbor') {
-                                    iaSignalsHistory[idx].push('win');
-                                } else if (res === 'Loss') {
-                                    iaSignalsHistory[idx].push('loss');
-                                }
-                            });
+                        const n = parseInt(s.number);
+                        if (!isNaN(n)) {
+                            history.push(n);
+                            lastKnownSpinId = s.id;
+                            
+                            // W-L sync
+                            if (s.results) {
+                                const resMap = [
+                                    s.results.agent1_result, s.results.agent2_result,
+                                    s.results.agent3_result, s.results.agent4_result,
+                                    s.results.agent5_result
+                                ];
+                                resMap.forEach((res, idx) => {
+                                    if (res === 'Direct' || res === 'Neighbor') {
+                                        iaSignalsHistory[idx].push('win');
+                                    } else if (res === 'Loss') {
+                                        iaSignalsHistory[idx].push('loss');
+                                    }
+                                });
+                            }
                         }
                     }
                 }
                 
-                // Final update UI
-                const sig  = computeDealerSignature(history);
-                const prox = projectNextRound(history, {});
-                lastIaSignals = getIAMasterSignals(prox, sig, history);
+                // Refresh Logic
+                try {
+                   const sig  = computeDealerSignature(history);
+                   const prox = projectNextRound(history, {});
+                   const master = getIAMasterSignals(prox, sig, history);
+                   if (master && master.length > 0) lastIaSignals = master;
+                } catch(aiErr) { console.error("AI Update crash:", aiErr); }
                 
                 renderSignalsPanel(lastIaSignals);
                 renderTravelPanel();
             }
         }
     } catch(e) {
-        console.error('Sync error:', e);
+        console.error('Global Sync error:', e);
     } finally {
         isSyncing = false;
     }
