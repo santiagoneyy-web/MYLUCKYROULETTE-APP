@@ -105,6 +105,16 @@ function renderAgentCard(signals) {
             `<span class="${r === 'win' ? 'perf-w' : 'perf-l'}">${r === 'win' ? 'W' : 'L'}</span>`
         ).join('');
     }
+
+    // Unified Dominance & Trend (V25 Fix)
+    const domEl = document.getElementById('agent-dominance');
+    if (domEl && s.dominance && s.trend) {
+        domEl.innerHTML = `DOMINANCIA: ${s.dominance} | TENDENCIA: ${s.trend}`;
+    }
+
+    if (tendEl && s.trend) {
+        tendEl.innerText = `TENDENCIA: ${s.trend === 'DER' ? 'Der.' : 'Izq.'} ${s.trend === 'DER' ? '↺' : '↻'}`;
+    }
 }
 
 // ─── RENDER: WHEEL ──────────────────────────────────────────
@@ -201,74 +211,39 @@ function renderTravelPanel() {
         return;
     }
 
-    // Pattern & Dominance badge calculation (Based on Distance)
-    if (history.length > 1) {
-        const evalCount = Math.min(20, history.length - 1);
-        let bigAcc = 0, smallAcc = 0, dirDer = 0, dirIzq = 0;
-        let recentBig = 0, recentSmall = 0;
-        let recentDirs = [];
-
-        for (let i = history.length - evalCount; i < history.length; i++) {
-            const dist = calcDist(history[i-1], history[i]);
-            const abs = Math.abs(dist);
-            
-            // Global 20 spins dominance
-            if (abs >= 10 && abs <= 19) bigAcc++;
-            else if (abs >= 1 && abs <= 9) smallAcc++;
-            if (dist >= 0) dirDer++; else dirIzq++;
-
-            // Last 5 spins pattern (for badge)
-            if (i >= history.length - 4) {
-                if (abs >= 10 && abs <= 19) recentBig++;
-                else if (abs >= 1 && abs <= 9) recentSmall++;
-                recentDirs.push(dist >= 0 ? 'D' : 'I');
-            }
-        }
-
-        // Global Dominance Update
-        let domType = 'NINGUNA', domCount = 0;
-        if (bigAcc > smallAcc) { domType = 'BIG'; domCount = bigAcc; }
-        else if (smallAcc > bigAcc) { domType = 'SMALL'; domCount = smallAcc; }
-        
-        let tendType = 'NINGUNA';
-        if (dirDer > dirIzq) tendType = 'Der';
-        else if (dirIzq > dirDer) tendType = 'Izq';
-
-        const domEl = document.getElementById('agent-dominance');
-        if (domEl) {
-            // Simplified: only essential trend data
-            domEl.innerHTML = `DOMINANCIA: ${domType} | TENDENCIA: ${tendType}`;
-        }
-        
-        if (patEl) {
-            const isZigZagDir = recentDirs.length >= 2 && recentDirs[recentDirs.length-1] !== recentDirs[recentDirs.length-2];
-            let pat = 'ESTABLE', patClass = 'badge-stable';
-            
-            if (isZigZagDir) { pat = 'ZIG ZAG'; patClass = 'badge-zigzag'; }
-            else if (recentBig >= 3) { pat = 'BIG'; patClass = 'badge-zone'; }
-            else if (recentSmall >= 3) { pat = 'SMALL'; patClass = 'badge-stable'; }
-            
-            patEl.textContent = pat;
-            patEl.className = `badge ${patClass}`;
-        }
-        
-        // V25 Pattern Sequence Rendering
-        const seqEl = document.getElementById('pattern-sequence-v25');
-        if (seqEl && lastIaSignals[0] && lastIaSignals[0].patternCode) {
-            const pCode = lastIaSignals[0].patternCode;
-            const sCount = lastIaSignals[0].streakCount;
-            const isW = lastIaSignals[0].isWeakening;
-            
-            let html = pCode.split('').map(c => 
-                `<div class="pat-${c.toLowerCase()}">${c}</div>`
-            ).join('');
-            
-            html += `<div class="streak-indicator">${sCount}${pCode[pCode.length-1]}</div>`;
-            if (isW) html += `<div class="weakening-label">DEBILITADO</div>`;
-            seqEl.innerHTML = html;
-        }
+    // Unified Dominance & Trend (From IA Master Signals)
+    const activeSignal = lastIaSignals[activeIaTab] || lastIaSignals[0];
+    const domEl = document.getElementById('agent-dominance');
+    if (domEl && activeSignal && activeSignal.trend) {
+        domEl.innerHTML = `DOMINANCIA: ${activeSignal.dominance || '--'} | TENDENCIA: ${activeSignal.trend}`;
     }
-    // Last zone badge (based on number for the badge, but distance for the table)
+
+    // V25 Pattern Sequence Rendering (Cleaned)
+    const seqEl = document.getElementById('pattern-sequence-v25');
+    if (seqEl && activeSignal && activeSignal.patternCode) {
+        const pCode = activeSignal.patternCode;
+        const sCount = activeSignal.streakCount;
+        const isW = activeSignal.isWeakening;
+        
+        let html = pCode.split('').map(c => 
+            `<div class="pat-${c.toLowerCase()}">${c}</div>`
+        ).join('');
+        
+        html += `<div class="streak-indicator">${sCount}${pCode[pCode.length-1]}</div>`;
+        if (isW) html += `<div class="weakening-label">DEBILITADO</div>`;
+        seqEl.innerHTML = html;
+    }
+
+    // Status Badges (Stable / ZigZag etc)
+    if (patEl && activeSignal) {
+        let pat = 'ESTABLE', patClass = 'badge-stable';
+        if (activeSignal.isWeakening) { pat = 'DEBILITADO'; patClass = 'badge-zone'; }
+        // Simple logic for the badge
+        patEl.textContent = pat;
+        patEl.className = `badge ${patClass}`;
+    }
+
+    // Last zone badge
     const lastN = history[history.length - 1];
     if (lastZEl) {
         if (lastN >= 1 && lastN <= 9)        { lastZEl.textContent = 'LAST: SMALL'; lastZEl.style.color = 'var(--green)'; }
@@ -276,6 +251,7 @@ function renderTravelPanel() {
         else                                 { lastZEl.textContent = `LAST: ${lastN}`; lastZEl.style.color = 'var(--muted)'; }
     }
 
+    // Render Table (Max 100)
     tbody.innerHTML = history.slice(-100).reverse().map((n, i) => {
         const idxInHistory = history.length - 1 - i;
         const prev = history[idxInHistory - 1];
@@ -286,7 +262,6 @@ function renderTravelPanel() {
         const numClass = (n === 0) ? 'num-zero' : (RED_NUMS.has(n) ? 'num-red' : 'num-black');
         const dirClass = dist >= 0 ? 'dir-der' : 'dir-izq';
         
-        // Correct classification based on DISTANCE (Phase 31 Fix)
         let phaseHtml = '';
         if (absDist >= 1 && absDist <= 9)        phaseHtml = `<span class="phase-pill pill-small">SMALL</span>`;
         else if (absDist >= 10 && absDist <= 19) phaseHtml = `<span class="phase-pill pill-big">BIG</span>`;

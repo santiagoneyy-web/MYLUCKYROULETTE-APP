@@ -234,29 +234,13 @@ function getIAMasterSignals(prox, sig, history) {
     const ssOutcomes = getSixStrategieSignals(lastNum);
     let bestSS = ssOutcomes[0];
     let maxHits = -1;
-
     ssOutcomes.forEach(strategy => {
         let hits = 0;
-        for (let i = Math.max(0, history.length - 10); i < history.length - 1; i++) {
+        for (let i = Math.max(0, history.length - 12); i < history.length - 1; i++) {
             const hNum = history[i];
             const nextHNum = history[i+1];
             const t = hNum % 10;
             let predBase = 0;
-            if (strategy.name === '+') predBase = hNum + t;
-            else if (strategy.name === '-') predBase = hNum - t;
-            else if (strategy.name === '-,+1') predBase = hNum - t + 1;
-            else if (strategy.name === '-,-1') predBase = hNum - t - 1;
-            else if (strategy.name === '+,+1') predBase = hNum + t + 1;
-            else if (strategy.name === '+,-1') predBase = hNum + t - 1;
-            
-            const predTP = (predBase + 37) % 37;
-            const predCors = TERMINALS_MAP[predTP] || [];
-            
-            const tpRad = 2; 
-            const corRad = (predCors.length <= 2) ? 3 : 2;
-            
-            const isHit = getWheelNeighbors(predTP, tpRad).includes(nextHNum) || 
-                          predCors.some(c => getWheelNeighbors(c, corRad).includes(nextHNum));
             
             if (isHit) hits++;
         }
@@ -385,6 +369,8 @@ function getIAMasterSignals(prox, sig, history) {
         s.patternCode = patternCode;
         s.streakCount = streakCount;
         s.isWeakening = isWeakening || isShrinking;
+        s.trend = globalTrendDir > 0 ? 'DER' : 'IZQ';
+        s.dominance = isBigTrend ? 'BIG' : 'SMALL';
     });
 
     // 5. CELULA (COMBINADO TOTAL - SNIPER HYBRID)
