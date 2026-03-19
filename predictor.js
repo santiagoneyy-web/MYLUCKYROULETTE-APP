@@ -158,47 +158,77 @@ function getIAMasterSignals(prox, sig, history) {
     const lastNum = history[history.length - 1];
     const signals = [];
 
-    // --- V24 Analysis (Window: 12 spins) ---
+    // --- V25 Analysis (Window: 12-24 spins for deeper patterns) ---
     const WINDOW_SIZE = 12;
     const history12 = history.slice(-WINDOW_SIZE);
     
-    // Evaluate Patterns (Using Actual Absolute Distance)
+    // Evaluate Distance-based Patterns (B: 10-18, S: 1-9)
     const distHistory = [];
-    for (let i = 1; i < history12.length; i++) {
-        distHistory.push(Math.abs(calcDist(history12[i-1], history12[i])));
+    for (let i = 1; i < history.length; i++) {
+        const d = Math.abs(calcDist(history[i-1], history[i]));
+        if (d >= 1 && d <= 19) distHistory.push(d);
     }
     
-    // Dominancia (based on distance: 1-9 small, 10-19 big)
-    let isBigTrend = distHistory.filter(d => d >= 10 && d <= 19).length >= (distHistory.length * 0.6);
-    let isSmallTrend = distHistory.filter(d => d >= 1 && d <= 9).length >= (distHistory.length * 0.6);
+    const last12Dist = distHistory.slice(-12);
+    const patternCode = last12Dist.map(d => (d >= 10 && d <= 19) ? 'B' : 'S').join('');
     
-    // Weakening Trend (last 4 spins vs main window)
-    const last4D = distHistory.slice(-4);
-    const weakeningBig = isBigTrend && last4D.filter(d => d < 10).length >= 3;
-    const weakeningSmall = isSmallTrend && last4D.filter(d => d >= 10).length >= 3;
+    // Streak Detection
+    let currentStreakType = patternCode[patternCode.length - 1];
+    let streakCount = 0;
+    for (let i = patternCode.length - 1; i >= 0; i--) {
+        if (patternCode[i] === currentStreakType) streakCount++;
+        else break;
+    }
+
+    // Pattern Weakening (V25 Improved)
+    // Compare current streak length with the previous streak of the same type
+    let previousStreakCount = 0;
+    let foundPrev = false;
+    let tempCount = 0;
+    let streakIdx = patternCode.length - streakCount - 1;
+    while (streakIdx >= 0) {
+        if (patternCode[streakIdx] !== currentStreakType) {
+            if (foundPrev) break;
+            tempCount = 0; // reset
+        } else {
+            foundPrev = true;
+            previousStreakCount++;
+        }
+        streakIdx--;
+    }
     
-    // Directional Trend (6-12 spins)
+    // Weakening: Current streak is shorter than the previous one by at least 2
+    // Or it's reaching the "usual" limit observed in this window
+    const isWeakening = previousStreakCount > 0 && streakCount >= previousStreakCount;
+    const isShrinking  = previousStreakCount > 0 && streakCount < previousStreakCount && streakCount >= 1;
+
+    // Dominancia Global
+    let isBigTrend = last12Dist.filter(d => d >= 10).length >= 7;
+    let isSmallTrend = last12Dist.filter(d => d < 10 && d > 0).length >= 7;
+    
+    // Directional Trend
     let dirDer = 0, dirIzq = 0;
-    for (let i = 1; i < history12.length; i++) {
-        const d = getDistance(history12[i-1], history12[i]);
+    const dirLimit = Math.min(12, history.length - 1);
+    for (let i = history.length - dirLimit; i < history.length; i++) {
+        const d = getDistance(history[i-1], history[i]);
         if (d > 0) dirDer++; else if (d < 0) dirIzq++;
     }
     const globalTrendDir = (dirDer >= dirIzq) ? 1 : -1;
-    const isDirectionUnstable = Math.abs(dirDer - dirIzq) <= 1 && history12.length >= 6;
+    const isDirectionUnstable = Math.abs(dirDer - dirIzq) <= 1 && history.length >= 6;
 
-    // Zig Zag Detectors (Immediate rhythm)
+    // Zig Zag Detectors
     const lastDist  = history.length >= 2 ? calcDist(history[history.length-2], history[history.length-1]) : 0;
     const prevDist  = history.length >= 3 ? calcDist(history[history.length-3], history[history.length-2]) : 0;
     const isDirZigZag  = history.length >= 3 && Math.sign(lastDist) !== Math.sign(prevDist);
-    
-    const lastDistAbs = Math.abs(lastDist);
-    const lastIsBig   = lastDistAbs >= 10 && lastDistAbs <= 19;
-    const prevDistAbs = Math.abs(prevDist);
-    const prevIsBig   = prevDistAbs >= 10 && prevDistAbs <= 19;
+    const lastIsBig   = Math.abs(lastDist) >= 10;
+    const prevIsBig   = Math.abs(prevDist) >= 10;
     const isZoneZigZag = history.length >= 3 && lastIsBig !== prevIsBig;
 
     const lastNumIdx = WHEEL_INDEX[lastNum] || 0;
     const lastDirection = lastDist >= 0 ? 1 : -1;
+
+    // Output metadata for DB storage
+    const patternMetadata = { patternCode, streakCount, isWeakening, isShrinking };
 
     // 1. Android n16 (Six Strategie - The User's Core Logic)
     const ssOutcomes = getSixStrategieSignals(lastNum);
@@ -327,15 +357,13 @@ function getIAMasterSignals(prox, sig, history) {
         radius: "N9"
     });
 
-    // 4. N18 (SOPORTE PURO: Dominancia V24)
-    // Only BIG or SMALL. Handles weakening.
+    // 4. N18 (SOPORTE PURO: Dominancia V25)
     let targetSoporte, reasonSoporte;
-    if (weakeningBig) {
-        targetSoporte = sig.casilla1;
-        reasonSoporte = "DEBILITAMIENTO BIG -> C1";
-    } else if (weakeningSmall) {
-        targetSoporte = sig.casilla19;
-        reasonSoporte = "DEBILITAMIENTO SMALL -> C19";
+    // In V25, if shrinking/weakening, we anticipte the CHOP (change of zone)
+    if (isWeakening || isShrinking) {
+        // Anticipate the opposite of current streak
+        targetSoporte = currentStreakType === 'B' ? sig.casilla1 : sig.casilla19;
+        reasonSoporte = `ANTICIPACION CHOP (DEB: ${currentStreakType})`;
     } else {
         targetSoporte = isBigTrend ? sig.casilla19 : sig.casilla1;
         reasonSoporte = isBigTrend ? "DOMINANCIA BIG -> C19" : "DOMINANCIA SMALL -> C1";
@@ -350,6 +378,13 @@ function getIAMasterSignals(prox, sig, history) {
         mode: isBigTrend ? 'BIG' : 'SMALL',
         betZone: getWheelNeighbors(targetSoporte, 9),
         radius: "N9"
+    });
+
+    // Add metadata to all signals for DB storage
+    signals.forEach(s => {
+        s.patternCode = patternCode;
+        s.streakCount = streakCount;
+        s.isWeakening = isWeakening || isShrinking;
     });
 
     // 5. CELULA (COMBINADO TOTAL - SNIPER HYBRID)

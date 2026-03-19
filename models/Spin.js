@@ -35,6 +35,10 @@ const SpinSchema = new mongoose.Schema({
         agent5_result: { type: String, enum: ['Direct', 'Neighbor', 'Loss', null], default: null }
     },
 
+    // Pattern & Rhythm Tracking (V25)
+    pattern_code: { type: String, default: null }, // e.g., "BBSSB"
+    streak_count: { type: Number, default: 0 },    // Current streak length
+
     timestamp: { type: Date, default: Date.now }
 });
 

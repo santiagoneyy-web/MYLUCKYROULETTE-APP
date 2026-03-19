@@ -247,7 +247,9 @@ async function processSpinBackground(newSpin, table_id, number, source, directio
             distance: physics.distance,
             direction: direction || physics.direction,
             sector: sector,
-            predictions: newPredictions
+            predictions: newPredictions,
+            pattern_code: (masterSignals && masterSignals[0]) ? masterSignals[0].patternCode : null,
+            streak_count: (masterSignals && masterSignals[0]) ? masterSignals[0].streakCount : 0
         }
     });
 

@@ -249,8 +249,23 @@ function renderTravelPanel() {
             patEl.textContent = pat;
             patEl.className = `badge ${patClass}`;
         }
+        
+        // V25 Pattern Sequence Rendering
+        const seqEl = document.getElementById('pattern-sequence-v25');
+        if (seqEl && lastIaSignals[0] && lastIaSignals[0].patternCode) {
+            const pCode = lastIaSignals[0].patternCode;
+            const sCount = lastIaSignals[0].streakCount;
+            const isW = lastIaSignals[0].isWeakening;
+            
+            let html = pCode.split('').map(c => 
+                `<div class="pat-${c.toLowerCase()}">${c}</div>`
+            ).join('');
+            
+            html += `<div class="streak-indicator">${sCount}${pCode[pCode.length-1]}</div>`;
+            if (isW) html += `<div class="weakening-label">DEBILITADO</div>`;
+            seqEl.innerHTML = html;
+        }
     }
-
     // Last zone badge (based on number for the badge, but distance for the table)
     const lastN = history[history.length - 1];
     if (lastZEl) {
