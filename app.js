@@ -424,6 +424,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderSignalsPanel(lastIaSignals);
     renderTravelPanel();
 
+    // Diagnostic overlay to read internal JS states from user screenshots
+    const dbg = document.createElement('div');
+    dbg.id = 'js-diagnostic';
+    dbg.style.cssText = 'position:fixed;top:5px;left:5px;z-index:9999;color:lime;font-size:10px;font-family:monospace;pointer-events:none;background:black;padding:2px;';
+    document.body.appendChild(dbg);
+    setInterval(() => {
+        const d = document.getElementById('js-diagnostic');
+        if (d) d.innerText = `H:${history.length} WL:${iaSignalsHistory.map(a=>a.length).join(',')} P:${pendingPredictions?'YES':'NO'}`;
+    }, 1000);
+
     try {
         const r = await fetch('/api/tables');
         if (r.ok) {
