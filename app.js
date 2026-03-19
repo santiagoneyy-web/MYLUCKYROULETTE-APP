@@ -23,6 +23,7 @@ const WHEEL_NUMS = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,
 
 let currentTableId = null;
 let lastKnownSpinId = null;
+let isSyncing = false;
 
 function calcDist(from, to) {
     const i1 = WHEEL_NUMS.indexOf(from);
@@ -301,25 +302,17 @@ function renderTravelPanel() {
 }
 
 // ─── SUBMIT NUMBER ─────────────────────────────────────────
-function submitNumber(val, silent = false, batch = false) {
+function submitNumber(val, silent = false, batch = false, skipSignals = false) {
     const inputEl = document.getElementById('spin-number');
     const raw = val !== undefined ? val : (inputEl ? inputEl.value : '');
     const n = parseInt(raw);
     
     if (!isNaN(n) && n >= 0 && n <= 36) {
-        // Evaluate previous predictions
-        lastIaSignals.forEach((s, idx) => {
-            if (!s || s.top === undefined || s.top === null) return;
-            const radius = s.radius === 'N4' ? 4 : 9;
-            const win = Math.abs(calcDist(n, s.top)) <= radius;
-            iaSignalsHistory[idx].push(win ? 'win' : 'loss');
-        });
-        
         history.push(n);
         if (inputEl && !batch) inputEl.value = '';
 
-        // Compute new predictions
-        if (typeof computeDealerSignature === 'function' && history.length >= 3) {
+        // Compute new predictions (Only for manual input or newly synced data)
+        if (!skipSignals && typeof computeDealerSignature === 'function' && history.length >= 3) {
             try {
                 const sig  = computeDealerSignature(history);
                 const prox = projectNextRound(history, {});
@@ -359,24 +352,47 @@ function submitNumber(val, silent = false, batch = false) {
     }
 }
 
-// ─── SYNC FROM SERVER ──────────────────────────────────────
+// ─── SYNC FROM SERVER (OPTIMIZED V25) ────────────────────────
 async function syncData() {
-    if (!currentTableId) return;
+    if (!currentTableId || isSyncing) return;
+    isSyncing = true;
     try {
         const r = await fetch(`/api/history/${currentTableId}?limit=1000&_=${Date.now()}`);
-        if (!r.ok) return;
+        if (!r.ok) { isSyncing = false; return; }
         const spins = await r.json();
         
-        const latestId = spins.length > 0 ? spins[spins.length - 1].id : null;
-        if (spins.length !== history.length || latestId !== lastKnownSpinId) {
-            lastKnownSpinId = latestId;
+        if (spins.length === 0) {
             history.length = 0;
-            iaSignalsHistory.forEach(h => h.length = 0);
-            for (const s of spins) submitNumber(s.number, true, true);
-            renderSignalsPanel(lastIaSignals);
-            renderTravelPanel();
+            lastKnownSpinId = null;
+        } else {
+            const latestS = spins[spins.length - 1];
+            // Only update if there are new IDs not in our locally known list
+            if (latestS.id !== lastKnownSpinId) {
+                // If the IDs don't match sequentially, rebuild the history once
+                if (spins.length < history.length) {
+                   history.length = 0;
+                }
+                
+                // Only process new spins since lastKnownSpinId
+                for (const s of spins) {
+                    if (s.id > (lastKnownSpinId || -1)) {
+                        submitNumber(s.number, true, true, true);
+                        lastKnownSpinId = s.id;
+                    }
+                }
+                
+                // Finally update UI with the latest server-computed signals if available
+                // or compute them locally for the absolute latest state
+                const sig  = computeDealerSignature(history);
+                const prox = projectNextRound(history, {});
+                lastIaSignals = getIAMasterSignals(prox, sig, history);
+                
+                renderSignalsPanel(lastIaSignals);
+                renderTravelPanel();
+            }
         }
     } catch(e) {}
+    isSyncing = false;
 }
 
 // ─── TAB SWITCH ───────────────────────────────────────────
@@ -440,6 +456,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     } catch (e) { console.warn('API not reachable, offline mode.'); }
 
-    // Poll for updates every 3s (reduced from 5s for faster sync)
-    setInterval(syncData, 3000);
+    // Poll for updates every 1s (Ultra-fast sync)
+    setInterval(syncData, 1000);
 });
