@@ -236,16 +236,17 @@ function renderTravelPanel() {
 
         const domEl = document.getElementById('agent-dominance');
         if (domEl) {
-            domEl.innerHTML = `MODO: HIBRIDO (10 CASILLAS)<br/>DOMINANCIA DETECTADA: ${domType} (${domCount} n4) | M.D: ${dirDer} n9 | M.I: ${dirIzq} n9 (TENDENCIA: ${tendType})`;
+            // Simplified: only essential trend data
+            domEl.innerHTML = `DOMINANCIA: ${domType} | TENDENCIA: ${tendType}`;
         }
         
         if (patEl) {
             const isZigZagDir = recentDirs.length >= 2 && recentDirs[recentDirs.length-1] !== recentDirs[recentDirs.length-2];
             let pat = 'ESTABLE', patClass = 'badge-stable';
             
-            if (recentBig >= 3) { pat = 'BIG TREND'; patClass = 'badge-zone'; }
-            else if (recentSmall >= 3) { pat = 'SMALL TREND'; patClass = 'badge-stable'; }
-            else if (isZigZagDir) { pat = 'ZIG ZAG ↔'; patClass = 'badge-zigzag'; }
+            if (isZigZagDir) { pat = 'ZIG ZAG'; patClass = 'badge-zigzag'; }
+            else if (recentBig >= 3) { pat = 'BIG'; patClass = 'badge-zone'; }
+            else if (recentSmall >= 3) { pat = 'SMALL'; patClass = 'badge-stable'; }
             
             patEl.textContent = pat;
             patEl.className = `badge ${patClass}`;
@@ -275,7 +276,7 @@ function renderTravelPanel() {
         else                                 { lastZEl.textContent = `LAST: ${lastN}`; lastZEl.style.color = 'var(--muted)'; }
     }
 
-    tbody.innerHTML = history.slice(-50).reverse().map((n, i) => {
+    tbody.innerHTML = history.slice(-100).reverse().map((n, i) => {
         const idxInHistory = history.length - 1 - i;
         const prev = history[idxInHistory - 1];
         const dist = (prev !== undefined) ? calcDist(prev, n) : 0;
@@ -352,12 +353,12 @@ function submitNumber(val, silent = false, batch = false, skipSignals = false) {
     }
 }
 
-// ─── SYNC FROM SERVER (OPTIMIZED V25) ────────────────────────
+// ─── SYNC FROM SERVER (OPTIMIZED 100 LIMIT) ───────────────────
 async function syncData() {
     if (!currentTableId || isSyncing) return;
     isSyncing = true;
     try {
-        const r = await fetch(`/api/history/${currentTableId}?limit=1000&_=${Date.now()}`);
+        const r = await fetch(`/api/history/${currentTableId}?limit=100&_=${Date.now()}`);
         if (!r.ok) { isSyncing = false; return; }
         const spins = await r.json();
         
@@ -366,13 +367,7 @@ async function syncData() {
             lastKnownSpinId = null;
         } else {
             const latestS = spins[spins.length - 1];
-            // Only update if there are new IDs not in our locally known list
             if (latestS.id !== lastKnownSpinId) {
-                // If the IDs don't match sequentially, rebuild the history once
-                if (spins.length < history.length) {
-                   history.length = 0;
-                }
-                
                 // Only process new spins since lastKnownSpinId
                 for (const s of spins) {
                     if (s.id > (lastKnownSpinId || -1)) {
