@@ -271,8 +271,8 @@ function getIAMasterSignals(prox, sig, history) {
     const globalTrendDir = (dirDer >= dirIzq) ? 1 : -1;
     const isDirectionUnstable = Math.abs(dirDer - dirIzq) <= 1 && history.length >= 6;
     
-    const lastDist = history.length >= 2 ? calcDist(history[history.length-2], history[history.length-1]) : 0;
-    const prevDist = history.length >= 3 ? calcDist(history[history.length-3], history[history.length-2]) : 0;
+    const lastDist = history.length >= 2 ? getDistance(history[history.length-2], history[history.length-1]) : 0;
+    const prevDist = history.length >= 3 ? getDistance(history[history.length-3], history[history.length-2]) : 0;
     const isDirZigZag = history.length >= 3 && Math.sign(lastDist) !== Math.sign(prevDist);
     const lastIsBig = Math.abs(lastDist) >= 10;
     const prevIsBig = Math.abs(prevDist) >= 10;
