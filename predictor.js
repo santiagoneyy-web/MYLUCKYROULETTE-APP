@@ -169,7 +169,7 @@ function getSector(number) {
 function extractHistoricalPatterns(history) {
     if (history.length < 5) return { nextDir: 'D', nextDom: 'B', nextZone: 'Voisins', matchesDom: 0 };
     
-    // 1. DYNAMIC N-GRAM MATCHING (Weighted Search: Length 5 down to 2)
+    // 1. DYNAMIC N-GRAM MATCHING (Weighted Search: Length 10 down to 2)
     const dirs = []; const doms = []; const zones = [];
     for (let i = 1; i < history.length; i++) {
         const d = getDistance(history[i-1], history[i]);
@@ -182,10 +182,10 @@ function extractHistoricalPatterns(history) {
         const scores = {};
         possibleValues.forEach(v => scores[v] = 0);
         
-        // Exact matches of longer sequences give exponentially more points
-        const weights = { 5: 15, 4: 5, 3: 2, 2: 1 }; 
+        // Exact matches of massive sequences give exponentially more points
+        const weights = { 10: 1000, 9: 500, 8: 200, 7: 100, 6: 40, 5: 15, 4: 5, 3: 2, 2: 1 }; 
         
-        for (let w = 5; w >= 2; w--) {
+        for (let w = 10; w >= 2; w--) {
             if (arr.length <= w) continue;
             const seq = arr.slice(-w);
             for (let i = 0; i <= arr.length - w - 1; i++) {
@@ -206,15 +206,16 @@ function extractHistoricalPatterns(history) {
     const domScores = getWeightedScores(doms, ['B', 'S']);
     const zoneScores = getWeightedScores(zones, ['Voisins', 'Tiers', 'Orphelins', 'Zero']);
 
-    // 2. MEDIUM-TERM CONTEXT (Window: Last 20 spins)
-    // Add base points based on current active table trends to smooth out wild historical anomalies
+    // 2. LECTURA DE DIRECCIÓN Y ZONAS RECIENTES (Window: Últimos 12-20 giros)
+    // Añade el peso de la temperatura actual de la mesa (Momentum) 
     const recentWindow = 20;
     const limit = Math.min(dirs.length, recentWindow);
     const recentDirs = dirs.slice(-limit);
     const recentDoms = doms.slice(-limit);
     const recentZones = zones.slice(-limit);
     
-    recentDirs.forEach(v => { dirScores[v] += 0.5; });
+    // Si la mesa entera está tirando DERECHA masivamente hoy, esto otorga victoria absoluta en Dirección local.
+    recentDirs.forEach(v => { dirScores[v] += 1.5; }); // Lectura de Dirección local incrementada (Stronger Trend Weight)
     recentDoms.forEach(v => { domScores[v] += 0.5; });
     recentZones.forEach(v => { if(zoneScores[v] !== undefined) zoneScores[v] += 0.5; });
 
