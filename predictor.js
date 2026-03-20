@@ -252,20 +252,37 @@ function getIAMasterSignals(prox, sig, history) {
     const lastNumIdx = WHEEL_INDEX[lastNum] || 0;
     const signals = [];
 
-    // --- DEEP HISTORICAL PATTERN MINING ---
+    // --- 1. MEMORIA HISTÓRICA PROFUNDA (EXTRACCIÓN GENERAL) ---
     const patterns = extractHistoricalPatterns(history);
     
-    // Status metrics for UI
-    const isBigTrend = patterns.nextDom === 'B';
-    const globalTrendDir = patterns.nextDir === 'D' ? 1 : -1;
-    const isDirectionUnstable = false; // Overridden by Deep Learning
-    const isDirZigZag = false; // Overridden by Deep Learning
-    const isZoneZigZag = false; // Overridden by Deep Learning
-    const patternCode = patterns.nextDom; // Info
-    const streakCount = patterns.matchesDom;
-    const isWeakening = false;
+    // --- 2. LECTURA DE TRAVEL Y MOMENTUM A CORTO PLAZO (FÍSICA ACTUAL DE LA MESA) ---
+    const shortWindow = Math.min(12, history.length - 1);
+    let recentTravelSum = 0, recentTravels = [];
+    let dirDer = 0, dirIzq = 0;
+    
+    for (let i = history.length - shortWindow; i < history.length; i++) {
+        const d = getDistance(history[i-1], history[i]);
+        recentTravels.push(d);
+        recentTravelSum += Math.abs(d);
+        if (d > 0) dirDer++; else if (d < 0) dirIzq++;
+    }
+    
+    const avgTravel = recentTravels.length > 0 ? (recentTravelSum / recentTravels.length) : 14;
+    const globalTrendDir = (dirDer >= dirIzq) ? 1 : -1;
+    const isDirectionUnstable = Math.abs(dirDer - dirIzq) <= 1 && history.length >= 6;
+    
+    const lastDist = history.length >= 2 ? calcDist(history[history.length-2], history[history.length-1]) : 0;
+    const prevDist = history.length >= 3 ? calcDist(history[history.length-3], history[history.length-2]) : 0;
+    const isDirZigZag = history.length >= 3 && Math.sign(lastDist) !== Math.sign(prevDist);
+    const lastIsBig = Math.abs(lastDist) >= 10;
+    const prevIsBig = Math.abs(prevDist) >= 10;
+    const isZoneZigZag = history.length >= 3 && lastIsBig !== prevIsBig;
 
-    // 1. Android n16 (Hidden in UI but still logged for metrics)
+    // FUSIÓN: Dirección Sincronizada (Si la mesa es caótica hoy, confía en la Base de Datos; sino, sigue el Momentum)
+    const dbDirSign = patterns.nextDir === 'D' ? 1 : -1;
+    const synDirSign = isDirectionUnstable ? dbDirSign : globalTrendDir; 
+
+    // --- 3. AGENTE 1: Android n16 (Hidden in UI but still logged for metrics) ---
     const ssOutcomes = getSixStrategieSignals(lastNum);
     let bestSS = ssOutcomes[0];
     let maxHits = -1;
@@ -294,19 +311,22 @@ function getIAMasterSignals(prox, sig, history) {
         radius: "N9"
     });
 
-    // 2. Android n17 (PATRÓN DE DIRECCIONES)
+    // --- 4. AGENTE 2: Android N17 (FUSIÓN DE TRAVEL Y DISTANCIA BD) ---
     let target17, reason17, mode17;
-    const dirSign = patterns.nextDir === 'D' ? 1 : -1;
-    if (patterns.nextDom === 'B') {
-        const id17 = (lastNumIdx + (14 * dirSign) + 37) % 37;
+    // Evalúa la pura velocidad actual (avgTravel) y ataca con la Distancia histórica o Fuerza histórica (Dominancia).
+    if (avgTravel < 6) { 
+        // Momentum denso/cerrado. Falla a la Distancia Exacta de la BD para cazar rebote preciso.
+        const id17 = (lastNumIdx + (patterns.nextDist * synDirSign) + 37) % 37;
         target17 = WHEEL_ORDER[id17];
-        reason17 = `DIR MEMORY: ${patterns.nextDir} (BIG)`;
-        mode17 = "DIR+BIG";
+        reason17 = `TRAVEL LENTO + DB DIST (${patterns.nextDist})`;
+        mode17 = "HÍBRIDO SMALL";
     } else {
-        const id17 = (lastNumIdx + (5 * dirSign) + 37) % 37;
+        // Momentum violento/largo. Se apoya en la Dominancia Matemática de la BD (Big/Small).
+        const jump = patterns.nextDom === 'B' ? 14 : 5;
+        const id17 = (lastNumIdx + (jump * synDirSign) + 37) % 37;
         target17 = WHEEL_ORDER[id17];
-        reason17 = `DIR MEMORY: ${patterns.nextDir} (SMALL)`;
-        mode17 = "DIR+SMALL";
+        reason17 = `TRAVEL RÁPIDO + DB DOM (${patterns.nextDom})`;
+        mode17 = "HÍBRIDO BIG";
     }
     
     signals.push({
@@ -314,46 +334,96 @@ function getIAMasterSignals(prox, sig, history) {
         number: target17,
         confidence: "88%",
         reason: reason17,
-        rule: "DB DIRECTION",
+        rule: "FUSION TRAVEL+DB",
         mode: mode17,
         betZone: getWheelNeighbors(target17, 9),
         radius: "N9"
     });
 
-    // 3. Android 1717 / N17PLUS (PATRÓN DE ZONAS)
+    // --- 5. AGENTE 3: Android 1717 / N17PLUS (FUSIÓN DE ZIGZAGS Y ZONAS BD) ---
     let target1717, reason1717, mode1717;
-    if (patterns.nextZone === 'Voisins') { target1717 = 22; reason1717 = "MEMORIA ZONA: VOISINS"; }
-    else if (patterns.nextZone === 'Tiers') { target1717 = 8; reason1717 = "MEMORIA ZONA: TIERS"; }
-    else if (patterns.nextZone === 'Orphelins') { target1717 = 17; reason1717 = "MEMORIA ZONA: ORPHELINS"; }
-    else { target1717 = 0; reason1717 = "MEMORIA ZONA: ZERO"; }
+    // Si la lectura en vivo detecta engaños direccionales (ZigZag), abandona trayectorias y ataca Zonas estáticas de BD.
+    if (isDirZigZag || isZoneZigZag) {
+        target1717 = patterns.nextZone === 'Voisins' ? 22 : (patterns.nextZone === 'Tiers' ? 8 : (patterns.nextZone === 'Orphelins' ? 17 : 0));
+        reason1717 = `ENGAÑO MOMENTUM -> ZONA BD (${patterns.nextZone})`;
+        mode1717 = "ZONA-DEFENSIVA";
+    } else {
+        // Momentum sumamente estable. Confía en el cruce de Direcciones (DB Dir + Mesa Dir)
+        const id1717 = (lastNumIdx + (10 * synDirSign) + 37) % 37;
+        target1717 = WHEEL_ORDER[id1717];
+        reason1717 = `MOMENTUM ESTABLE + DIR SYNCRONIZADA`;
+        mode1717 = "ATAQUE-DIR";
+    }
     
     signals.push({
         name: 'Android 1717',
         number: target1717,
         confidence: "90%",
         reason: reason1717,
-        rule: "DB ZONES",
-        mode: "ZONA",
+        rule: "FUSION ZIGZAG+DB",
+        mode: mode1717,
         betZone: getWheelNeighbors(target1717, 9),
         radius: "N9"
     });
 
-    // 4. N18 (PATRÓN DE DISTANCIAS EXACTAS)
+    // --- 6. AGENTE 4: N18 (SOPORTE PURO Y CONTRAPESOS) ---
     let targetSoporte, reasonSoporte, mode18;
-    const exactDist = patterns.nextDist;
-    const id18 = (lastNumIdx + (exactDist * dirSign) + 37) % 37;
-    targetSoporte = WHEEL_ORDER[id18];
-    reasonSoporte = `MEMORIA DISTANCIA: EXACTAMENTE ${exactDist}`;
-    mode18 = exactDist >= 10 ? "DIST EXACTA BIG" : "DIST EXACTA SMALL";
+    // Mide puramente los saltos físicos crudos. Consenso estricto entre Momentum (lastIsBig) y la BD (nextDom).
+    if (lastIsBig && patterns.nextDom === 'B') {
+        const id18 = (lastNumIdx + (19 * synDirSign) + 37) % 37;
+        targetSoporte = WHEEL_ORDER[id18];
+        reasonSoporte = "CONSENSO BIG JUMP (+19)";
+        mode18 = "CONSENSO BIG";
+    } else if (!lastIsBig && patterns.nextDom === 'S') {
+        const id18 = (lastNumIdx + (2 * synDirSign) + 37) % 37;
+        targetSoporte = WHEEL_ORDER[id18];
+        reasonSoporte = "CONSENSO SMALL JUMP (+2)";
+        mode18 = "CONSENSO SMALL";
+    } else {
+        // Contradicción Táctica: El Momentum dice Grande, la BD dice Chico (o viceversa). 
+        // Desempata utilizando la brutalidad matemática absoluta: La Distancia Exacta de la BD.
+        const id18 = (lastNumIdx + (patterns.nextDist * synDirSign) + 37) % 37;
+        targetSoporte = WHEEL_ORDER[id18];
+        reasonSoporte = `CHOQUE DE ROTOR -> DIST EXACTA BD (${patterns.nextDist})`;
+        mode18 = "DESEMPATE DIST";
+    }
 
     signals.push({
         name: 'N18',
         number: targetSoporte,
         confidence: "86%",
         reason: reasonSoporte,
-        rule: "DB EXACT DISTANCE",
+        rule: "DB CONSENSUS",
         mode: mode18,
         betZone: getWheelNeighbors(targetSoporte, 9),
+        radius: "N9"
+    });
+
+    // --- 7. AGENTE 5: CÉLULA (SNIPER DE FUSIÓN ABSOLUTA) ---
+    let targetCelula, reasonCelula, modeCelula;
+    // Mide la sincronía celestial entre el Promedio Lento Actual del crupier y la Cifra Exacta Histórica.
+    if (Math.abs(avgTravel - patterns.nextDist) <= 3) {
+        const idSnipe = (lastNumIdx + (patterns.nextDist * synDirSign) + 37) % 37;
+        targetCelula = WHEEL_ORDER[idSnipe];
+        reasonCelula = "SINC PERFECTA TRAVEL+DIST BD";
+        modeCelula = "SNIPE CONFIRMADO";
+    } else {
+        // En ruido de velocidades estándar, la Célula apoya ciegamente a la Dominancia de BD cruzada con Dirección.
+        const targetJump = patterns.nextDom === 'B' ? 14 : 5;
+        const idSnipe = (lastNumIdx + (targetJump * synDirSign) + 37) % 37;
+        targetCelula = WHEEL_ORDER[idSnipe];
+        reasonCelula = `SNIPE BASE: BD DOM (${patterns.nextDom})`;
+        modeCelula = "SNIPE BASE";
+    }
+    
+    signals.push({
+        name: 'CELULA',
+        number: targetCelula,
+        confidence: "95%",
+        reason: reasonCelula,
+        rule: "FUSION ABSOLUTA",
+        mode: modeCelula,
+        betZone: getWheelNeighbors(targetCelula, 9),
         radius: "N9"
     });
 
