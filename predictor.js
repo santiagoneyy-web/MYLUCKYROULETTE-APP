@@ -305,7 +305,7 @@ function getIAMasterSignals(prox, sig, history) {
         betZone: bestSS.betZone,
         number: bestSS.tp,
         confidence: "94%",
-        reason: `${bestSS.name} (Hits: ${maxHits}/12)`,
+        reason: `${bestSS.strategy} (Hits: ${maxHits}/12)`,
         rule: 'SIX STRATEGIE',
         mode: 'ZONAREAL',
         radius: "N9"
@@ -429,38 +429,14 @@ function getIAMasterSignals(prox, sig, history) {
 
     // Add metadata to all signals for DB storage
     signals.forEach(s => {
-        s.patternCode = patternCode;
-        s.streakCount = streakCount;
-        s.isWeakening = isWeakening || isShrinking;
+        s.patternCode = patterns.nextDom; // Use DB Dominance as patternCode
+        s.streakCount = patterns.matchesDom;
+        s.isWeakening = false; // Deprecated concept in new DB paradigm
         s.trend = globalTrendDir > 0 ? 'DER' : 'IZQ';
-        s.dominance = isBigTrend ? 'BIG' : 'SMALL';
+        s.dominance = patterns.nextDom === 'B' ? 'BIG' : 'SMALL';
         s.isDirZigZag = isDirZigZag;
         s.isZoneZigZag = isZoneZigZag;
         s.isUnstable = isDirectionUnstable;
-    });
-
-    // --- 5. CELULA (COMBINADO TOTAL - SNIPER HYBRID) ---
-    // Primary: n9 target based on physics, Secondary: n4 snipes on small/big
-    let targetSnipe = isBigTrend ? sig.casilla14 : sig.casilla5;
-    if (isZoneZigZag) {
-        const lastVal = (history && history.length > 0) ? history[history.length-1] : 0;
-        targetSnipe = (lastVal >= 10 && lastVal <= 19) ? sig.casilla5 : sig.casilla14;
-    }
-    
-    if (targetSnipe === undefined) targetSnipe = (history && history.length > 0) ? history[history.length-1] : 17;
-
-    signals.push({
-        name: 'CELULA',
-        number: targetSnipe,
-        top: targetSnipe,
-        confidence: "92%",
-        reason: "SNIPE COMBINADO",
-        rule: "SNIPER",
-        mode: 'GANANCIA',
-        betZone: getWheelNeighbors(targetSnipe, 9), 
-        radius: "N9",
-        smallSnipe: sig.casilla5 !== undefined ? sig.casilla5 : '--',
-        bigSnipe: sig.casilla14 !== undefined ? sig.casilla14 : '--'
     });
 
     // Populate secondary snipes for all agents to fill the 3-column UI
