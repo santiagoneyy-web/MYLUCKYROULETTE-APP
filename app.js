@@ -324,7 +324,7 @@ async function syncData() {
     if (!currentTableId || isSyncing) return;
     isSyncing = true;
     try {
-        const r = await fetch(`/api/history/${currentTableId}?limit=100&_=${Date.now()}`);
+        const r = await fetch(`/api/history/${currentTableId}?limit=1000&_=${Date.now()}`);
         if (!r.ok) return; 
         const spins = await r.json();
         

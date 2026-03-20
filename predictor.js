@@ -155,84 +155,82 @@ function getSixStrategieSignals(lastNum) {
     });
 }
 
+function getSector(number) {
+    if (number === 0) return 'Zero';
+    const voisins = [22,18,29,7,28,12,35,3,26,0,32,15,19,4,21,2,25];
+    const tiers = [27,13,36,11,30,8,23,10,5,24,16,33];
+    const orphelins = [1,20,14,31,9,17,34,6];
+    if (voisins.includes(number)) return 'Voisins';
+    if (tiers.includes(number)) return 'Tiers';
+    if (orphelins.includes(number)) return 'Orphelins';
+    return 'Unknown';
+}
+
+function extractHistoricalPatterns(history) {
+    if (history.length < 4) return { nextDir: 'D', nextDom: 'B', nextZone: 'Voisins', matches: 0 };
+    
+    const dirs = []; const doms = []; const zones = [];
+    for (let i = 1; i < history.length; i++) {
+        const d = getDistance(history[i-1], history[i]);
+        dirs.push(d >= 0 ? 'D' : 'I');
+        doms.push(Math.abs(d) >= 10 ? 'B' : 'S');
+        zones.push(getSector(history[i]));
+    }
+    
+    const seqDir = dirs.slice(-3);
+    const seqDom = doms.slice(-3);
+    const seqZon = zones.slice(-3);
+    
+    let cD=0, cI=0;
+    for (let i=0; i<dirs.length-3; i++) {
+        if (dirs[i]===seqDir[0] && dirs[i+1]===seqDir[1] && dirs[i+2]===seqDir[2]) {
+            if (dirs[i+3]==='D') cD++; else cI++;
+        }
+    }
+    const nextDir = cD >= cI ? 'D' : 'I';
+
+    let cB=0, cS=0;
+    for (let i=0; i<doms.length-3; i++) {
+        if (doms[i]===seqDom[0] && doms[i+1]===seqDom[1] && doms[i+2]===seqDom[2]) {
+            if (doms[i+3]==='B') cB++; else cS++;
+        }
+    }
+    const nextDom = cB >= cS ? 'B' : 'S';
+
+    const zCounts = { 'Voisins':0, 'Tiers':0, 'Orphelins':0, 'Zero':0 };
+    for (let i=0; i<zones.length-3; i++) {
+        if (zones[i]===seqZon[0] && zones[i+1]===seqZon[1] && zones[i+2]===seqZon[2]) {
+            zCounts[zones[i+3]] = (zCounts[zones[i+3]] || 0) + 1;
+        }
+    }
+    let nextZone = 'Voisins', maxZ = -1;
+    for (const [z, c] of Object.entries(zCounts)) {
+        if (c > maxZ) { maxZ = c; nextZone = z; }
+    }
+    
+    return { nextDir, nextDom, nextZone, matchesDir: cD+cI, matchesDom: cB+cS };
+}
+
 function getIAMasterSignals(prox, sig, history) {
     if (!sig || history.length === 0) return [];
     const lastNum = history[history.length - 1];
+    const lastNumIdx = WHEEL_INDEX[lastNum] || 0;
     const signals = [];
 
-    // --- V25 Analysis (Window: 12-24 spins for deeper patterns) ---
-    const WINDOW_SIZE = 12;
-    const history12 = history.slice(-WINDOW_SIZE);
+    // --- DEEP HISTORICAL PATTERN MINING ---
+    const patterns = extractHistoricalPatterns(history);
     
-    // Evaluate Distance-based Patterns (B: 10-18, S: 1-9)
-    const distHistory = [];
-    for (let i = 1; i < history.length; i++) {
-        const d = Math.abs(calcDist(history[i-1], history[i]));
-        if (d >= 1 && d <= 19) distHistory.push(d);
-    }
-    
-    const last12Dist = distHistory.slice(-12);
-    const patternCode = last12Dist.map(d => (d >= 10 && d <= 19) ? 'B' : 'S').join('');
-    
-    // Streak Detection
-    let currentStreakType = patternCode[patternCode.length - 1];
-    let streakCount = 0;
-    for (let i = patternCode.length - 1; i >= 0; i--) {
-        if (patternCode[i] === currentStreakType) streakCount++;
-        else break;
-    }
+    // Status metrics for UI
+    const isBigTrend = patterns.nextDom === 'B';
+    const globalTrendDir = patterns.nextDir === 'D' ? 1 : -1;
+    const isDirectionUnstable = false; // Overridden by Deep Learning
+    const isDirZigZag = false; // Overridden by Deep Learning
+    const isZoneZigZag = false; // Overridden by Deep Learning
+    const patternCode = patterns.nextDom; // Info
+    const streakCount = patterns.matchesDom;
+    const isWeakening = false;
 
-    // Pattern Weakening (V25 Improved)
-    // Compare current streak length with the previous streak of the same type
-    let previousStreakCount = 0;
-    let foundPrev = false;
-    let tempCount = 0;
-    let streakIdx = patternCode.length - streakCount - 1;
-    while (streakIdx >= 0) {
-        if (patternCode[streakIdx] !== currentStreakType) {
-            if (foundPrev) break;
-            tempCount = 0; // reset
-        } else {
-            foundPrev = true;
-            previousStreakCount++;
-        }
-        streakIdx--;
-    }
-    
-    // Weakening: Current streak is shorter than the previous one by at least 2
-    // Or it's reaching the "usual" limit observed in this window
-    const isWeakening = previousStreakCount > 0 && streakCount >= previousStreakCount;
-    const isShrinking  = previousStreakCount > 0 && streakCount < previousStreakCount && streakCount >= 1;
-
-    // Dominancia Global
-    let isBigTrend = last12Dist.filter(d => d >= 10).length >= 7;
-    let isSmallTrend = last12Dist.filter(d => d < 10 && d > 0).length >= 7;
-    
-    // Directional Trend
-    let dirDer = 0, dirIzq = 0;
-    const dirLimit = Math.min(12, history.length - 1);
-    for (let i = history.length - dirLimit; i < history.length; i++) {
-        const d = getDistance(history[i-1], history[i]);
-        if (d > 0) dirDer++; else if (d < 0) dirIzq++;
-    }
-    const globalTrendDir = (dirDer >= dirIzq) ? 1 : -1;
-    const isDirectionUnstable = Math.abs(dirDer - dirIzq) <= 1 && history.length >= 6;
-
-    // Zig Zag Detectors
-    const lastDist  = history.length >= 2 ? calcDist(history[history.length-2], history[history.length-1]) : 0;
-    const prevDist  = history.length >= 3 ? calcDist(history[history.length-3], history[history.length-2]) : 0;
-    const isDirZigZag  = history.length >= 3 && Math.sign(lastDist) !== Math.sign(prevDist);
-    const lastIsBig   = Math.abs(lastDist) >= 10;
-    const prevIsBig   = Math.abs(prevDist) >= 10;
-    const isZoneZigZag = history.length >= 3 && lastIsBig !== prevIsBig;
-
-    const lastNumIdx = WHEEL_INDEX[lastNum] || 0;
-    const lastDirection = lastDist >= 0 ? 1 : -1;
-
-    // Output metadata for DB storage
-    const patternMetadata = { patternCode, streakCount, isWeakening, isShrinking };
-
-    // 1. Android n16 (Six Strategie - The User's Core Logic)
+    // 1. Android n16 (Hidden in UI but still logged for metrics)
     const ssOutcomes = getSixStrategieSignals(lastNum);
     let bestSS = ssOutcomes[0];
     let maxHits = -1;
@@ -241,18 +239,11 @@ function getIAMasterSignals(prox, sig, history) {
         const windowSize = Math.min(history.length - 1, 12);
         for (let i = history.length - windowSize; i < history.length; i++) {
             const hNum = history[i];
-            const prevHNum = history[i-1];
-            // Simple hit check: if this strategy's rule would have hit given the previous number
-            const predictedForThisStep = strategy.tp; // Simplified for performance
+            const predictedForThisStep = strategy.tp;
             const neighborsForThisStep = strategy.cors || [];
-            if (hNum === predictedForThisStep || neighborsForThisStep.includes(hNum)) {
-                hits++;
-            }
+            if (hNum === predictedForThisStep || neighborsForThisStep.includes(hNum)) hits++;
         }
-        if (hits > maxHits) {
-            maxHits = hits;
-            bestSS = strategy;
-        }
+        if (hits > maxHits) { maxHits = hits; bestSS = strategy; }
     });
 
     signals.push({
@@ -265,49 +256,22 @@ function getIAMasterSignals(prox, sig, history) {
         reason: `${bestSS.name} (Hits: ${maxHits}/12)`,
         rule: 'SIX STRATEGIE',
         mode: 'ZONAREAL',
-        radius: "N4/N9"
+        radius: "N9"
     });
 
-    // Update n16 radius to N9 for consistency
-    signals[signals.length-1].betZone = getWheelNeighbors(bestSS.tp, 9);
-    bestSS.cors.forEach(c => {
-        const cN = getWheelNeighbors(c, 9);
-        signals[signals.length-1].betZone = [...new Set([...signals[signals.length-1].betZone, ...cN])];
-    });
-
-    // 2. Android n17 (SOPORTE + HIBRIDO V24)
-    // Hybrid Mode active if avgTravel < 5. All radios N9.
+    // 2. Android n17 (PATRÓN DE DIRECCIONES)
     let target17, reason17, mode17;
-    const isHybridActive = history.length > 5 && Math.abs(sig.avgTravel) < 5;
-    
-    if (isHybridActive) {
-        if (isDirectionUnstable) {
-            // Unstable trend -> Inverse Hybrid (Opposite of global trend)
-            const inverseDir = -globalTrendDir;
-            const idx17 = (lastNumIdx + (10 * inverseDir) + 37) % 37;
-            target17 = WHEEL_ORDER[idx17];
-            reason17 = "HIBRIDO INVERSO (INESTABLE)";
-            mode17 = "ATAQUE";
-        } else {
-            // Stable trend -> Direct Hybrid (+10 in direction)
-            const idx17 = (lastNumIdx + (10 * globalTrendDir) + 37) % 37;
-            target17 = WHEEL_ORDER[idx17];
-            reason17 = `HIBRIDO ${globalTrendDir > 0 ? 'DER' : 'IZQ'} +10`;
-            mode17 = "HIBRIDO";
-        }
+    const dirSign = patterns.nextDir === 'D' ? 1 : -1;
+    if (patterns.nextDom === 'B') {
+        const id17 = (lastNumIdx + (14 * dirSign) + 37) % 37;
+        target17 = WHEEL_ORDER[id17];
+        reason17 = `DIR MEMORY: ${patterns.nextDir} (BIG)`;
+        mode17 = "DIR+BIG";
     } else {
-        // Mode Support (Adaptive to Dominance & Direction)
-        if (isBigTrend) {
-            const idx17 = (lastNumIdx + (14 * globalTrendDir) + 37) % 37;
-            target17 = WHEEL_ORDER[idx17];
-            reason17 = `ATAQUE BIG ${globalTrendDir > 0 ? 'DER' : 'IZQ'} +14`;
-            mode17 = "BIG DIR";
-        } else {
-            const idx17 = (lastNumIdx + (5 * globalTrendDir) + 37) % 37;
-            target17 = WHEEL_ORDER[idx17];
-            reason17 = `ATAQUE SMALL ${globalTrendDir > 0 ? 'DER' : 'IZQ'} +5`;
-            mode17 = "SMALL DIR";
-        }
+        const id17 = (lastNumIdx + (5 * dirSign) + 37) % 37;
+        target17 = WHEEL_ORDER[id17];
+        reason17 = `DIR MEMORY: ${patterns.nextDir} (SMALL)`;
+        mode17 = "DIR+SMALL";
     }
     
     signals.push({
@@ -315,55 +279,40 @@ function getIAMasterSignals(prox, sig, history) {
         number: target17,
         confidence: "88%",
         reason: reason17,
-        rule: "FISICA/SOPORTE",
+        rule: "DB DIRECTION",
         mode: mode17,
         betZone: getWheelNeighbors(target17, 9),
         radius: "N9"
     });
 
-    // 3. Android 1717 (ATAQUE V24: Anticipacion ZigZag)
+    // 3. Android 1717 / N17PLUS (PATRÓN DE ZONAS)
     let target1717, reason1717, mode1717;
-    if (isDirZigZag) {
-        // Anticipate inversion: last was D -> play I-10
-        const anticipatedDir = -lastDirection;
-        const idx1717 = (lastNumIdx + (10 * anticipatedDir) + 37) % 37;
-        target1717 = WHEEL_ORDER[idx1717];
-        reason1717 = `ZIGZAG ANTICIPA ${anticipatedDir > 0 ? 'DER' : 'IZQ'}`;
-        mode1717 = "ZIGZAG";
-    } else if (isZoneZigZag) {
-        // Zone zigzag -> Support C19
-        target1717 = sig.casilla19;
-        reason1717 = "ZIGZAG ZONA -> SOPORTE C19";
-        mode1717 = "ZONA-DEF";
-    } else {
-        // Base Hybrid or confirmed trend
-        const idx1717 = (lastNumIdx + (10 * globalTrendDir) + 37) % 37;
-        target1717 = WHEEL_ORDER[idx1717];
-        reason1717 = "ATAQUE HIBRIDO CONFIRMADO";
-        mode1717 = "ATAQUE";
-    }
+    if (patterns.nextZone === 'Voisins') { target1717 = 22; reason1717 = "MEMORIA ZONA: VOISINS"; }
+    else if (patterns.nextZone === 'Tiers') { target1717 = 8; reason1717 = "MEMORIA ZONA: TIERS"; }
+    else if (patterns.nextZone === 'Orphelins') { target1717 = 17; reason1717 = "MEMORIA ZONA: ORPHELINS"; }
+    else { target1717 = 0; reason1717 = "MEMORIA ZONA: ZERO"; }
     
     signals.push({
         name: 'Android 1717',
         number: target1717,
         confidence: "90%",
         reason: reason1717,
-        rule: "HIBRIDO/ZIGZAG",
-        mode: mode1717,
+        rule: "DB ZONES",
+        mode: "ZONA",
         betZone: getWheelNeighbors(target1717, 9),
         radius: "N9"
     });
 
-    // 4. N18 (SOPORTE PURO: Dominancia V25)
+    // 4. N18 (PATRÓN DE DOMINANCIA: BIG/SMALL)
     let targetSoporte, reasonSoporte;
-    // In V25, if shrinking/weakening, we anticipte the CHOP (change of zone)
-    if (isWeakening || isShrinking) {
-        // Anticipate the opposite of current streak
-        targetSoporte = currentStreakType === 'B' ? sig.casilla1 : sig.casilla19;
-        reasonSoporte = `ANTICIPACION CHOP (DEB: ${currentStreakType})`;
+    if (patterns.nextDom === 'B') {
+        const id18 = (lastNumIdx + 19) % 37; // BIG jump (+19 is exactly opposite)
+        targetSoporte = WHEEL_ORDER[id18];
+        reasonSoporte = "MEMORIA DOM: BIG JUMP";
     } else {
-        targetSoporte = isBigTrend ? sig.casilla19 : sig.casilla1;
-        reasonSoporte = isBigTrend ? "DOMINANCIA BIG -> C19" : "DOMINANCIA SMALL -> C1";
+        const id18 = (lastNumIdx + 2) % 37; // SMALL jump (+2)
+        targetSoporte = WHEEL_ORDER[id18];
+        reasonSoporte = "MEMORIA DOM: SMALL JUMP";
     }
     
     signals.push({
@@ -371,8 +320,8 @@ function getIAMasterSignals(prox, sig, history) {
         number: targetSoporte,
         confidence: "86%",
         reason: reasonSoporte,
-        rule: "SOPORTE",
-        mode: isBigTrend ? 'BIG' : 'SMALL',
+        rule: "DB DOMINANCE",
+        mode: patterns.nextDom === 'B' ? 'BIG' : 'SMALL',
         betZone: getWheelNeighbors(targetSoporte, 9),
         radius: "N9"
     });

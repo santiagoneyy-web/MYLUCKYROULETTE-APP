@@ -184,8 +184,8 @@ app.post('/api/spin', async (req, res) => {
 
 // NON-BLOCKING BACKGROUND TASK (Original Intelligence)
 async function processSpinBackground(newSpin, table_id, number, source, direction) {
-    // Fetch only last 100 spins for analysis (performance limit)
-    const HISTORY_LIMIT = 100;
+    // Fetch up to 5000 historical spins to enable Deep Pattern Matching for ALL agents
+    const HISTORY_LIMIT = 5000;
     let currentHistory = await Spin.find({ table_id, id: { $lt: newSpin.id } })
         .sort({ id: -1 })
         .limit(HISTORY_LIMIT)
