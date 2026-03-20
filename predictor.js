@@ -167,8 +167,9 @@ function getSector(number) {
 }
 
 function extractHistoricalPatterns(history) {
-    if (history.length < 4) return { nextDir: 'D', nextDom: 'B', nextZone: 'Voisins', matches: 0 };
+    if (history.length < 5) return { nextDir: 'D', nextDom: 'B', nextZone: 'Voisins', matchesDom: 0 };
     
+    // 1. DYNAMIC N-GRAM MATCHING (Weighted Search: Length 5 down to 2)
     const dirs = []; const doms = []; const zones = [];
     for (let i = 1; i < history.length; i++) {
         const d = getDistance(history[i-1], history[i]);
@@ -177,38 +178,61 @@ function extractHistoricalPatterns(history) {
         zones.push(getSector(history[i]));
     }
     
-    const seqDir = dirs.slice(-3);
-    const seqDom = doms.slice(-3);
-    const seqZon = zones.slice(-3);
+    function getWeightedScores(arr, possibleValues) {
+        const scores = {};
+        possibleValues.forEach(v => scores[v] = 0);
+        
+        // Exact matches of longer sequences give exponentially more points
+        const weights = { 5: 15, 4: 5, 3: 2, 2: 1 }; 
+        
+        for (let w = 5; w >= 2; w--) {
+            if (arr.length <= w) continue;
+            const seq = arr.slice(-w);
+            for (let i = 0; i <= arr.length - w - 1; i++) {
+                let match = true;
+                for (let j = 0; j < w; j++) {
+                    if (arr[i+j] !== seq[j]) { match = false; break; }
+                }
+                if (match) {
+                    const nextVal = arr[i+w];
+                    if (scores[nextVal] !== undefined) scores[nextVal] += weights[w];
+                }
+            }
+        }
+        return scores;
+    }
+
+    const dirScores = getWeightedScores(dirs, ['D', 'I']);
+    const domScores = getWeightedScores(doms, ['B', 'S']);
+    const zoneScores = getWeightedScores(zones, ['Voisins', 'Tiers', 'Orphelins', 'Zero']);
+
+    // 2. MEDIUM-TERM CONTEXT (Window: Last 20 spins)
+    // Add base points based on current active table trends to smooth out wild historical anomalies
+    const recentWindow = 20;
+    const limit = Math.min(dirs.length, recentWindow);
+    const recentDirs = dirs.slice(-limit);
+    const recentDoms = doms.slice(-limit);
+    const recentZones = zones.slice(-limit);
     
-    let cD=0, cI=0;
-    for (let i=0; i<dirs.length-3; i++) {
-        if (dirs[i]===seqDir[0] && dirs[i+1]===seqDir[1] && dirs[i+2]===seqDir[2]) {
-            if (dirs[i+3]==='D') cD++; else cI++;
-        }
-    }
-    const nextDir = cD >= cI ? 'D' : 'I';
+    recentDirs.forEach(v => { dirScores[v] += 0.5; });
+    recentDoms.forEach(v => { domScores[v] += 0.5; });
+    recentZones.forEach(v => { if(zoneScores[v] !== undefined) zoneScores[v] += 0.5; });
 
-    let cB=0, cS=0;
-    for (let i=0; i<doms.length-3; i++) {
-        if (doms[i]===seqDom[0] && doms[i+1]===seqDom[1] && doms[i+2]===seqDom[2]) {
-            if (doms[i+3]==='B') cB++; else cS++;
-        }
-    }
-    const nextDom = cB >= cS ? 'B' : 'S';
-
-    const zCounts = { 'Voisins':0, 'Tiers':0, 'Orphelins':0, 'Zero':0 };
-    for (let i=0; i<zones.length-3; i++) {
-        if (zones[i]===seqZon[0] && zones[i+1]===seqZon[1] && zones[i+2]===seqZon[2]) {
-            zCounts[zones[i+3]] = (zCounts[zones[i+3]] || 0) + 1;
-        }
-    }
+    // 3. DETERMINE FINAL PROBABILITIES
+    const nextDir = dirScores['D'] >= dirScores['I'] ? 'D' : 'I';
+    const nextDom = dirScores['D'] === dirScores['I'] ? (doms[doms.length-1] === 'B' ? 'B' : 'S') : (domScores['B'] >= domScores['S'] ? 'B' : 'S');
+    
     let nextZone = 'Voisins', maxZ = -1;
-    for (const [z, c] of Object.entries(zCounts)) {
-        if (c > maxZ) { maxZ = c; nextZone = z; }
+    for (const [z, score] of Object.entries(zoneScores)) {
+        if (score > maxZ) { maxZ = score; nextZone = z; }
     }
     
-    return { nextDir, nextDom, nextZone, matchesDir: cD+cI, matchesDom: cB+cS };
+    return { 
+        nextDir, 
+        nextDom, 
+        nextZone, 
+        matchesDom: domScores['B'] + domScores['S'] 
+    };
 }
 
 function getIAMasterSignals(prox, sig, history) {
