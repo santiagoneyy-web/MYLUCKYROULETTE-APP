@@ -167,13 +167,14 @@ function getSector(number) {
 }
 
 function extractHistoricalPatterns(history) {
-    if (history.length < 5) return { nextDir: 'D', nextDom: 'B', nextZone: 'Voisins', matchesDom: 0 };
+    if (history.length < 5) return { nextDir: 'D', nextDom: 'B', nextZone: 'Voisins', nextDist: 14, matchesDom: 0 };
     
     // 1. DYNAMIC N-GRAM MATCHING (Weighted Search: Length 10 down to 2)
-    const dirs = []; const doms = []; const zones = [];
+    const dirs = []; const doms = []; const zones = []; const dists = [];
     for (let i = 1; i < history.length; i++) {
         const d = getDistance(history[i-1], history[i]);
         dirs.push(d >= 0 ? 'D' : 'I');
+        dists.push(Math.abs(d)); // LECTURA DE DISTANCIAS EXACTAS (Ej: 7, 14, 8)
         doms.push(Math.abs(d) >= 10 ? 'B' : 'S');
         zones.push(getSector(history[i]));
     }
@@ -205,19 +206,22 @@ function extractHistoricalPatterns(history) {
     const dirScores = getWeightedScores(dirs, ['D', 'I']);
     const domScores = getWeightedScores(doms, ['B', 'S']);
     const zoneScores = getWeightedScores(zones, ['Voisins', 'Tiers', 'Orphelins', 'Zero']);
+    const distScores = getWeightedScores(dists, Array.from({length:19}, (_,i)=>i)); // 0 a 18 espacios
 
-    // 2. LECTURA DE DIRECCIÓN Y ZONAS RECIENTES (Window: Últimos 12-20 giros)
+    // 2. LECTURA DE DIRECCIÓN, ZONAS Y DISTANCIAS RECIENTES (Window: Últimos 12-20 giros)
     // Añade el peso de la temperatura actual de la mesa (Momentum) 
     const recentWindow = 20;
     const limit = Math.min(dirs.length, recentWindow);
     const recentDirs = dirs.slice(-limit);
     const recentDoms = doms.slice(-limit);
     const recentZones = zones.slice(-limit);
+    const recentDists = dists.slice(-limit);
     
     // Si la mesa entera está tirando DERECHA masivamente hoy, esto otorga victoria absoluta en Dirección local.
     recentDirs.forEach(v => { dirScores[v] += 1.5; }); // Lectura de Dirección local incrementada (Stronger Trend Weight)
     recentDoms.forEach(v => { domScores[v] += 0.5; });
     recentZones.forEach(v => { if(zoneScores[v] !== undefined) zoneScores[v] += 0.5; });
+    recentDists.forEach(v => { if(distScores[v] !== undefined) distScores[v] += 0.5; }); // Suavizado de Distancias
 
     // 3. DETERMINE FINAL PROBABILITIES
     const nextDir = dirScores['D'] >= dirScores['I'] ? 'D' : 'I';
@@ -227,11 +231,17 @@ function extractHistoricalPatterns(history) {
     for (const [z, score] of Object.entries(zoneScores)) {
         if (score > maxZ) { maxZ = score; nextZone = z; }
     }
+
+    let nextDist = 14, maxD = -1;
+    for (const [d, score] of Object.entries(distScores)) {
+        if (score > maxD) { maxD = score; nextDist = parseInt(d); }
+    }
     
     return { 
         nextDir, 
         nextDom, 
         nextZone, 
+        nextDist,
         matchesDom: domScores['B'] + domScores['S'] 
     };
 }
@@ -328,25 +338,21 @@ function getIAMasterSignals(prox, sig, history) {
         radius: "N9"
     });
 
-    // 4. N18 (PATRÓN DE DOMINANCIA: BIG/SMALL)
-    let targetSoporte, reasonSoporte;
-    if (patterns.nextDom === 'B') {
-        const id18 = (lastNumIdx + 19) % 37; // BIG jump (+19 is exactly opposite)
-        targetSoporte = WHEEL_ORDER[id18];
-        reasonSoporte = "MEMORIA DOM: BIG JUMP";
-    } else {
-        const id18 = (lastNumIdx + 2) % 37; // SMALL jump (+2)
-        targetSoporte = WHEEL_ORDER[id18];
-        reasonSoporte = "MEMORIA DOM: SMALL JUMP";
-    }
-    
+    // 4. N18 (PATRÓN DE DISTANCIAS EXACTAS)
+    let targetSoporte, reasonSoporte, mode18;
+    const exactDist = patterns.nextDist;
+    const id18 = (lastNumIdx + (exactDist * dirSign) + 37) % 37;
+    targetSoporte = WHEEL_ORDER[id18];
+    reasonSoporte = `MEMORIA DISTANCIA: EXACTAMENTE ${exactDist}`;
+    mode18 = exactDist >= 10 ? "DIST EXACTA BIG" : "DIST EXACTA SMALL";
+
     signals.push({
         name: 'N18',
         number: targetSoporte,
         confidence: "86%",
         reason: reasonSoporte,
-        rule: "DB DOMINANCE",
-        mode: patterns.nextDom === 'B' ? 'BIG' : 'SMALL',
+        rule: "DB EXACT DISTANCE",
+        mode: mode18,
         betZone: getWheelNeighbors(targetSoporte, 9),
         radius: "N9"
     });
