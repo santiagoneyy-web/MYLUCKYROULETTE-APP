@@ -412,9 +412,27 @@ document.addEventListener('DOMContentLoaded', () => {
     if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendTrackerChat(); });
 });
 
-function syncTrackerFromLive() {
-    if (typeof history === 'undefined' || !Array.isArray(history)) return;
-    const liveNumbers = history.slice();
+async function syncTrackerFromLive() {
+    let liveNumbers = null;
+    try {
+        const tableId = typeof currentTableId !== 'undefined' && currentTableId ? currentTableId : 1;
+        const response = await fetch(`/api/history/${encodeURIComponent(tableId)}?limit=400`);
+        if (response.ok) {
+            const spins = await response.json();
+            if (Array.isArray(spins)) {
+                liveNumbers = spins
+                    .filter(spin => spin && (spin.source === 'casino_org_live' || spin.source === 'public_scraper'))
+                    .map(spin => Number(spin.number))
+                    .filter(number => Number.isInteger(number) && number >= 0 && number <= 36);
+            }
+        }
+    } catch (error) {
+        console.warn('[Tracker] No se pudo leer historial Live de la API; usando historial local.', error);
+    }
+    if (liveNumbers === null) {
+        if (typeof history === 'undefined' || !Array.isArray(history)) return;
+        liveNumbers = history.slice();
+    }
     const changed = liveNumbers.length !== trackerLiveHistory.length ||
         liveNumbers.some((number, index) => number !== trackerLiveHistory[index]);
     if (changed) {
