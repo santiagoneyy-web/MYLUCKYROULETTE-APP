@@ -1,16 +1,70 @@
 // ============================================================
-// server.js — Express API server for Roulette Predictor
-// Run: node server.js
+// server.js — Roulette Predictor API (Neural V5)
+// Optimización: Build sin Chromium para Render (10/04/2026)
 // ============================================================
 const express = require('express');
 const cors    = require('cors');
 const path    = require('path');
+const fs      = require('fs');
 const db      = require('./database');
 const Spin    = require('./models/Spin'); // MongoDB Model
-const agent5  = require('./agent5');      // Autonomous AI & Physics
-const predictor = require('./predictor'); // Agents 1-4
+const predictor = require('./src/engine/predictor'); // Agents 1-4
+const agent5  = require('./src/engine/agent5');      // Autonomous AI & Physics
+const axios   = require('axios');
+const strategyStore = require('./src/engine/strategy_store');
+const { evaluatePredictionContexts } = require('./src/engine/evaluation_engine');
+const {
+    buildMetricSnapshot,
+    buildTableStateSnapshot,
+    chooseDominancePrediction,
+    evaluatePredictionHit
+} = require('./src/engine/analytics_snapshot');
 
-const app  = express();
+const forest = require('./src/engine/forest_engine');
+
+const spinMethod = require('./src/engine/spin_method');
+const brain = require('./src/engine/brain');
+
+const NTFY_TOPIC = process.env.NTFY_TOPIC || 'ofi_santi_alerts';
+const ntfyCooldowns = {}; // { tableId: remaining_spins_before_next_alert }
+const OLLAMA_BASE_URL = String(process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:0.5b';
+const AUTO_AI_REMOTE_ANALYSIS = String(process.env.AUTO_AI_REMOTE_ANALYSIS ?? 'true').toLowerCase() !== 'false';
+const GROQ_MODEL = process.env.GROQ_MODEL || process.env.AUTO_AI_GROQ_MODEL || 'openai/gpt-oss-120b';
+
+const GROQ_MODELS = {
+    'llama-3.1-8b-instant': { label: 'Llama 3.1 8B (Rapido)', reasoning: 'bajo', speed: 'muy rapido', tokens: 131072 },
+    'openai/gpt-oss-120b': { label: 'GPT OSS 120B (Razonamiento)', reasoning: 'maximo', speed: 'rapido', tokens: 128000 },
+    'openai/gpt-oss-20b': { label: 'GPT OSS 20B (Rapido)', reasoning: 'medio', speed: 'muy rapido', tokens: 128000 },
+    'qwen/qwen3.6-27b': { label: 'Qwen 3.6 27B (Balance)', reasoning: 'alto', speed: 'rapido', tokens: 128000 },
+    'meta-llama/llama-4-maverick-17b-128e-instruct': { label: 'Llama 4 Maverick 17B (Rapido)', reasoning: 'medio', speed: 'muy rapido', tokens: 131072 },
+    'moonshotai/kimi-k2-instruct-0905': { label: 'Kimi K2 (Contexto)', reasoning: 'alto', speed: 'moderado', tokens: 131072 }
+};
+
+function getGroqModels() {
+    return Object.entries(GROQ_MODELS).map(([id, info]) => ({
+        id,
+        label: info.label,
+        reasoning: info.reasoning,
+        speed: info.speed,
+        selected: id === GROQ_MODEL
+    }));
+}
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+let llmRateLimitedUntil = 0;
+let lastLlmRateLimit = null;
+const llmUsage = {
+    total: { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    minute: { key: '', requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    day: { key: '', requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    last: null,
+    limits: {}
+};
+
+const app = express();
+
+// START
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
@@ -18,13 +72,28 @@ app.use(express.json());
 // Serve static frontend from the same folder
 app.use(express.static(path.join(__dirname)));
 
-db.initDB();
+const databaseReady = db.initDB();
+strategyStore.ensureStore();
 
 // ---- API: Tables ----
 app.get('/api/tables', (req, res) => {
-    db.getTables((err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
+    db.getTables((err, tables) => {
+        if (err || !tables || tables.length === 0) {
+            // Hard fallback in case database.js logic fails
+            return res.json([
+                {
+                    schema_version: 2,
+                    id: 1,
+                    code: 'AUTO',
+                    name: 'Auto Roulette',
+                    provider: 'Evolution',
+                    url: 'https://www.casino.org/casinoscores/es/auto-roulette/',
+                    source_type: 'casino_org',
+                    status: 'active'
+                }
+            ]);
+        }
+        res.json(tables);
     });
 });
 
@@ -45,286 +114,1942 @@ app.delete('/api/tables/:id', (req, res) => {
 });
 
 // ---- API: Spins / History ----
-app.get('/api/history/:tableId', async (req, res) => {
+app.get('/api/history/:tableId', (req, res) => {
     const tableId = req.params.tableId;
-    const limit = req.query.limit ? parseInt(req.query.limit) : 1000;
+    const limit = req.query.limit ? parseInt(req.query.limit) : 400; // Updated limit to 400 to match OFI
+    console.log(`[GET] History for table ${tableId} (limit: ${limit})`);
+    db.getHistory(tableId, limit, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        console.log(`[DB] Found ${rows.length} rows for table ${tableId}`);
+        res.json(rows);
+    });
+});
+
+app.get('/api/metrics/:tableId', (req, res) => {
+    const tableId = req.params.tableId;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+    db.getMetricSnapshots(tableId, limit, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows || []);
+    });
+});
+
+app.get('/api/table-state/:tableId', (req, res) => {
+    const tableId = req.params.tableId;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+    db.getTableStateSnapshots(tableId, limit, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows || []);
+    });
+});
+
+app.get('/api/ai/predictions/:tableId', (req, res) => {
+    const tableId = req.params.tableId;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+    const mode = req.query.mode ? String(req.query.mode).toUpperCase() : null;
+    const basis = req.query.basis ? String(req.query.basis) : null;
+    db.getAiPredictions(tableId, limit, { mode, basis }, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows || []);
+    });
+});
+
+app.get('/api/ai/status', (req, res) => {
+    res.json({
+        provider: getPreferredLlmProvider(),
+        deepseekConfigured: Boolean(DEEPSEEK_API_KEY),
+        deepseekModel: DEEPSEEK_MODEL,
+        ollamaConfigured: hasOllamaConfigured(),
+        ollamaBaseUrl: OLLAMA_BASE_URL,
+        ollamaModel: OLLAMA_MODEL,
+        groqConfigured: Boolean(process.env.GROQ_API_KEY),
+        autoAiRemoteAnalysis: AUTO_AI_REMOTE_ANALYSIS,
+        ...getLlmUsageStatus()
+    });
+});
+
+app.get('/api/ai/summary/:tableId', (req, res) => {
+    db.getAiLearningSummary(req.params.tableId, (err, summary) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(summary || {});
+    });
+});
+
+app.get('/api/evaluation/:tableId', (req, res) => {
+    const tableId = req.params.tableId;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 500;
+
+    db.getAiPredictions(tableId, limit, (predErr, predictions) => {
+        if (predErr) return res.status(500).json({ error: predErr.message });
+
+        db.getTableStateSnapshots(tableId, limit, (stateErr, states) => {
+            if (stateErr) return res.status(500).json({ error: stateErr.message });
+
+            const evaluation = evaluatePredictionContexts(predictions || [], states || []);
+            res.json(evaluation);
+        });
+    });
+});
+
+app.post('/api/evaluation/:tableId/promote-candidates', (req, res) => {
+    const tableId = req.params.tableId;
+    const limit = req.body?.limit ? parseInt(req.body.limit, 10) : 500;
+
+    db.getAiPredictions(tableId, limit, (predErr, predictions) => {
+        if (predErr) return res.status(500).json({ error: predErr.message });
+
+        db.getTableStateSnapshots(tableId, limit, (stateErr, states) => {
+            if (stateErr) return res.status(500).json({ error: stateErr.message });
+
+            const evaluation = evaluatePredictionContexts(predictions || [], states || []);
+            const saved = [];
+            const failed = [];
+
+            const candidates = evaluation.candidates || [];
+            if (!candidates.length) {
+                return res.json({ saved: 0, failed: 0, strategies: [] });
+            }
+
+            let pending = candidates.length;
+            candidates.forEach(candidate => {
+                db.saveStrategyRecord({
+                    ...candidate,
+                    table_id: String(tableId),
+                    table_code: 'AUTO'
+                }, (err, record) => {
+                    if (err) failed.push({ name: candidate.name, error: err.message });
+                    else saved.push(record);
+                    pending--;
+                    if (pending === 0) {
+                        res.json({
+                            saved: saved.length,
+                            failed: failed.length,
+                            strategies: saved,
+                            errors: failed
+                        });
+                    }
+                });
+            });
+        });
+    });
+});
+
+// ── SSE: broadcast to all clients listening per table ──────
+const sseClients = {}; // { tableId: [res, res, ...] }
+
+// SSE Heartbeat para evitar desconexiones de Render por inactividad (>60s)
+setInterval(() => {
+    Object.keys(sseClients).forEach(tableId => {
+        sseClients[tableId].forEach(client => {
+            try { client.write('data: {"type":"ping"}\n\n'); } catch (e) {}
+        });
+    });
+}, 25000);
+
+app.get('/api/events/:tableId', (req, res) => {
+    const tableId = req.params.tableId;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable Nginx buffering on Render
+    res.flushHeaders();
+    // Keep connection alive
+    res.write('data: {"type":"connected"}\n\n');
+    if (!sseClients[tableId]) sseClients[tableId] = [];
+    sseClients[tableId].push(res);
+    req.on('close', () => {
+        sseClients[tableId] = (sseClients[tableId] || []).filter(c => c !== res);
+    });
+});
+
+app.get('/api/patterns/:tableId', async (req, res) => {
+    const { tableId } = req.params;
+    const { seq_mag, seq_dir } = req.query; // 'BSBS', 'CWCCWCW'
+    
     try {
         const isMongo = db.getUseMongo();
-        if (isMongo) {
-            // CRITICAL: Query MongoDB directly, NOT the fallback db
-            const rows = await Spin.find({ table_id: tableId })
-                .sort({ id: 1 })
-                .limit(limit)
-                .lean();
-            console.log(`[MONGO] History for table ${tableId}: ${rows.length} rows`);
-            return res.json(rows);
-        } else {
-            db.getHistory(tableId, limit, (err, rows) => {
-                if (err) return res.status(500).json({ error: err.message });
-                res.json(rows);
-            });
+        if (!isMongo) return res.json({ error: 'MongoDB not enabled', mag: {}, dir: {} });
+        
+        let magStats = [];
+        let dirStats = [];
+
+        if (seq_mag) {
+            magStats = await Pattern.aggregate([
+                { $match: { table_id: String(tableId), sequence_mag: seq_mag } },
+                { $group: { _id: "$next_mag", count: { $sum: 1 } } }
+            ]);
         }
+        
+        if (seq_dir) {
+            dirStats = await Pattern.aggregate([
+                { $match: { table_id: String(tableId), sequence_dir: seq_dir } },
+                { $group: { _id: "$next_dir", count: { $sum: 1 } } }
+            ]);
+        }
+        
+        res.json({
+            mag: magStats.reduce((acc, curr) => ({ ...acc, [curr._id]: curr.count }), {}),
+            dir: dirStats.reduce((acc, curr) => ({ ...acc, [curr._id]: curr.count }), {})
+        });
     } catch(e) {
-        console.error('[History Error]', e);
-        res.status(500).json({ error: e.message });
+        res.status(500).json({ error: e.message, mag: {}, dir: {} });
     }
 });
 
-// ATOMIC COUNTER FOR SPIN IDs
-const mongoose = require('mongoose');
-const counterSchema = new mongoose.Schema({
-    id: { type: String, required: true, unique: true },
-    seq: { type: Number, default: 0 }
-});
-let Counter;
-try { Counter = mongoose.model('Counter'); } catch (error) { Counter = mongoose.model('Counter', counterSchema); }
-
-async function syncCounter(retries = 3) {
+// ── Meta-Pattern Endpoints ──
+app.post('/api/meta-patterns/:tableId', async (req, res) => {
+    const { tableId } = req.params;
+    const data = req.body;
+    
     try {
-        const isMongo = db.getUseMongo();
-        if (!isMongo) return;
-        const maxSpin = await Spin.findOne().sort({ id: -1 }).select('id').lean();
-        const seqVal = maxSpin ? maxSpin.id : 0;
-        await Counter.findOneAndUpdate(
-            { id: 'spinId' },
-            { $set: { seq: seqVal } },
-            { returnDocument: 'after', upsert: true }
-        );
-        console.log(`✅ [DB] Synced spinId counter to ${seqVal}`);
-    } catch (e) {
-        console.error('Counter Sync Error:', e);
-        if (retries > 0) {
-            console.log(`⏳ Retrying syncCounter in 3s... (${retries} retries left)`);
-            setTimeout(() => syncCounter(retries - 1), 3000);
+        const result = await db.saveMetaPattern(tableId, data);
+        res.json({ success: true, id: result?._id || null });
+    } catch(e) {
+        res.status(500).json({ error: e.message, success: false });
+    }
+});
+
+app.patch('/api/meta-patterns/:patternId/result', async (req, res) => {
+    const { patternId } = req.params;
+    const { result, accurate } = req.body;
+    
+    try {
+        await db.updateMetaPatternResult(patternId, result, accurate);
+        res.json({ success: true });
+    } catch(e) {
+        res.status(500).json({ error: e.message, success: false });
+    }
+});
+
+app.get('/api/meta-patterns/:tableId/stats', async (req, res) => {
+    const { tableId } = req.params;
+    const { type, limit } = req.query;
+    
+    try {
+        const stats = await db.getMetaPatternStats(tableId, type, parseInt(limit) || 100);
+        res.json(stats);
+    } catch(e) {
+        res.status(500).json({ error: e.message, total: 0, accurate: 0, accuracy: 0, patterns: [] });
+    }
+});
+
+app.get('/api/meta-patterns/:tableId/unresolved', async (req, res) => {
+    const { tableId } = req.params;
+    
+    try {
+        const patterns = await db.getUnresolvedMetaPatterns(tableId);
+        res.json(patterns);
+    } catch(e) {
+        res.status(500).json({ error: e.message, patterns: [] });
+    }
+});
+
+// ── Direction Patterns (Patrones de direcciones R/L) ──
+app.post('/api/direction-patterns/:tableId', async (req, res) => {
+    const { tableId } = req.params;
+    const data = req.body;
+    
+    try {
+        const result = await db.saveDirectionPattern(tableId, data);
+        res.json({ success: true, id: result?._id || null });
+    } catch(e) {
+        res.status(500).json({ error: e.message, success: false });
+    }
+});
+
+app.get('/api/direction-patterns/:tableId/find', async (req, res) => {
+    const { tableId } = req.params;
+    const { sequence } = req.query;
+    
+    try {
+        const patterns = await db.findDirectionPatterns(tableId, sequence);
+        res.json(patterns);
+    } catch(e) {
+        res.status(500).json({ error: e.message, patterns: [] });
+    }
+});
+
+app.get('/api/direction-patterns/:tableId/stats', async (req, res) => {
+    const { tableId } = req.params;
+    const { sequence } = req.query;
+    
+    try {
+        const stats = await db.getDirectionPatternStats(tableId, sequence);
+        res.json(stats);
+    } catch(e) {
+        res.status(500).json({ error: e.message, total: 0, next_r: 0, next_l: 0, next_b: 0, next_s: 0 });
+    }
+});
+
+// ── Memoria local para el chat del usuario (Temporal por reinicio)
+const aiMemory = {};
+
+function cleanAutoNumber(value) {
+    return String(value ?? '').replace(/[^0-9]/g, '');
+}
+
+function formatAutoReply(n9, n4) {
+    return `N9: ${n9} | N4: ${n4}`;
+}
+
+function hasOllamaConfigured() {
+    return Boolean(process.env.OLLAMA_BASE_URL || process.env.OLLAMA_MODEL || process.env.OLLAMA_ENABLED === 'true');
+}
+
+function getPreferredLlmProvider() {
+    const explicit = String(process.env.LLM_PROVIDER || '').toLowerCase();
+    if (explicit === 'deepseek' && DEEPSEEK_API_KEY) return 'deepseek';
+    if (explicit === 'groq' && process.env.GROQ_API_KEY) return 'groq';
+    if (explicit === 'ollama' && hasOllamaConfigured()) return 'ollama';
+    if (DEEPSEEK_API_KEY) return 'deepseek';
+    if (process.env.GROQ_API_KEY) return 'groq';
+    if (hasOllamaConfigured()) return 'ollama';
+    return 'none';
+}
+
+function isLlmRateLimited() {
+    return Date.now() < llmRateLimitedUntil;
+}
+
+function markLlmRateLimit(error) {
+    const status = error?.response?.status;
+    if (status !== 429) return false;
+    const retryAfter = Number(error?.response?.headers?.['retry-after']);
+    const cooldownMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : 5 * 60 * 1000;
+    llmRateLimitedUntil = Date.now() + cooldownMs;
+    lastLlmRateLimit = {
+        at: new Date().toISOString(),
+        status,
+        retryAfterSeconds: Number.isFinite(retryAfter) ? retryAfter : null,
+        until: new Date(llmRateLimitedUntil).toISOString(),
+        provider: getPreferredLlmProvider()
+    };
+    return true;
+}
+
+function emptyUsageBucket(key) {
+    return { key, requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+function addUsageToBucket(bucket, usage) {
+    bucket.requests += 1;
+    bucket.promptTokens += usage.promptTokens;
+    bucket.completionTokens += usage.completionTokens;
+    bucket.totalTokens += usage.totalTokens;
+}
+
+function extractRateLimitHeaders(headers = {}) {
+    const pick = (name) => headers[name] || headers[name.toLowerCase()] || null;
+    return {
+        limitRequests: pick('x-ratelimit-limit-requests'),
+        remainingRequests: pick('x-ratelimit-remaining-requests'),
+        resetRequests: pick('x-ratelimit-reset-requests'),
+        limitTokens: pick('x-ratelimit-limit-tokens'),
+        remainingTokens: pick('x-ratelimit-remaining-tokens'),
+        resetTokens: pick('x-ratelimit-reset-tokens')
+    };
+}
+
+function recordLlmUsage(provider, usage = {}, headers = {}) {
+    const normalized = {
+        promptTokens: Number(usage.prompt_tokens || usage.promptTokens || 0),
+        completionTokens: Number(usage.completion_tokens || usage.completionTokens || 0),
+        totalTokens: Number(usage.total_tokens || usage.totalTokens || 0)
+    };
+    if (!normalized.totalTokens) {
+        normalized.totalTokens = normalized.promptTokens + normalized.completionTokens;
+    }
+
+    const now = new Date();
+    const minuteKey = now.toISOString().slice(0, 16);
+    const dayKey = now.toISOString().slice(0, 10);
+    if (llmUsage.minute.key !== minuteKey) llmUsage.minute = emptyUsageBucket(minuteKey);
+    if (llmUsage.day.key !== dayKey) llmUsage.day = emptyUsageBucket(dayKey);
+
+    addUsageToBucket(llmUsage.total, normalized);
+    addUsageToBucket(llmUsage.minute, normalized);
+    addUsageToBucket(llmUsage.day, normalized);
+    llmUsage.limits = extractRateLimitHeaders(headers);
+    llmUsage.last = {
+        at: now.toISOString(),
+        provider,
+        ...normalized,
+        model: GROQ_MODEL
+    };
+}
+
+function getLlmUsageStatus() {
+    return {
+        usage: llmUsage,
+        rateLimited: isLlmRateLimited(),
+        rateLimitedUntil: isLlmRateLimited() ? new Date(llmRateLimitedUntil).toISOString() : null,
+        lastRateLimit: lastLlmRateLimit
+    };
+}
+
+async function callGroqChat({ systemPrompt, userPrompt, temperature = 0.3, maxTokens = 180, jsonMode = false }) {
+    const groqKey = process.env.GROQ_API_KEY;
+    if (!groqKey) throw new Error('GROQ_API_KEY missing');
+
+    const model = process.env.GROQ_MODEL || GROQ_MODEL;
+    const isReasoningModel = model.includes('gpt-oss') || model.includes('deepseek-r1');
+    const requestBody = {
+        model,
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ],
+        temperature,
+        max_tokens: maxTokens
+    };
+    if (isReasoningModel) requestBody.reasoning_effort = 'medium';
+
+    // Note: json_object response_format only supported by some Groq models (not 8b-instant).
+    // JSON output is enforced via system prompt instead.
+
+    const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', requestBody, {
+        timeout: isReasoningModel ? 45000 : 20000,
+        headers: { Authorization: `Bearer ${groqKey}`, 'Content-Type': 'application/json' }
+    });
+
+    const msg = response.data?.choices?.[0]?.message || {};
+    return {
+        content: String(msg.content || '').trim(),
+        reasoning: msg.reasoning ? String(msg.reasoning).trim() : null,
+        usage: response.data?.usage || {},
+        headers: response.headers || {}
+    };
+}
+
+async function callDeepSeekChat({ systemPrompt, userPrompt, temperature = 0.3, maxTokens = 180, jsonMode = false }) {
+    if (!DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY missing');
+
+    const requestBody = {
+        model: DEEPSEEK_MODEL,
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ],
+        temperature,
+        max_tokens: maxTokens
+    };
+
+    if (jsonMode) {
+        requestBody.response_format = { type: 'json_object' };
+    }
+
+    const response = await axios.post('https://api.deepseek.com/v1/chat/completions', requestBody, {
+        timeout: 30000,
+        headers: {
+            Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+            'Content-Type': 'application/json'
         }
+    });
+
+    return {
+        content: String(response.data?.choices?.[0]?.message?.content || '').trim(),
+        usage: response.data?.usage || {},
+        headers: response.headers || {}
+    };
+}
+
+async function callOllamaChat({ systemPrompt, userPrompt, temperature = 0.3, maxTokens = 180, jsonMode = false }) {
+    const payload = {
+        model: OLLAMA_MODEL,
+        stream: false,
+        format: jsonMode ? 'json' : undefined,
+        options: {
+            temperature,
+            num_predict: maxTokens
+        },
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ]
+    };
+
+    const response = await axios.post(`${OLLAMA_BASE_URL}/api/chat`, payload, {
+        timeout: 30000,
+        headers: { 'Content-Type': 'application/json' }
+    });
+
+    return {
+        content: String(response.data?.message?.content || '').trim(),
+        usage: {
+            promptTokens: response.data?.prompt_eval_count || 0,
+            completionTokens: response.data?.eval_count || 0,
+            totalTokens: (response.data?.prompt_eval_count || 0) + (response.data?.eval_count || 0)
+        },
+        headers: response.headers || {}
+    };
+}
+
+async function callPreferredLlm(options) {
+    const provider = getPreferredLlmProvider();
+    if (provider === 'deepseek') {
+        try {
+            const result = await callDeepSeekChat(options);
+            recordLlmUsage(provider, result.usage, result.headers);
+            return { provider, content: result.content, usage: result.usage };
+        } catch (error) {
+            if (process.env.GROQ_API_KEY) {
+                const result = await callGroqChat(options);
+                recordLlmUsage('groq-fallback', result.usage, result.headers);
+                return { provider: 'groq-fallback', content: result.content, usage: result.usage };
+            }
+            throw error;
+        }
+    }
+    if (provider === 'ollama') {
+        try {
+            const result = await callOllamaChat(options);
+            recordLlmUsage(provider, result.usage, result.headers);
+            return { provider, content: result.content, usage: result.usage };
+        } catch (error) {
+            if (!process.env.GROQ_API_KEY) throw error;
+            const result = await callGroqChat(options);
+            recordLlmUsage('groq-fallback', result.usage, result.headers);
+            return { provider: 'groq-fallback', content: result.content, usage: result.usage };
+        }
+    }
+    if (provider === 'groq') {
+        const result = await callGroqChat(options);
+        recordLlmUsage(provider, result.usage, result.headers);
+        return { provider, content: result.content, usage: result.usage };
+    }
+    throw new Error('No LLM provider configured');
+}
+
+function detectWlPattern(sequence) {
+    const s = String(sequence || '').replace(/[^WL]/g, '');
+    if (!s) return 'sin historial';
+    if (/WLWL$/.test(s) || /LWLW$/.test(s)) return 'zigzag/rodillo';
+    if (/WWLL$/.test(s) || /LLWW$/.test(s)) return 'ola 2-2';
+    if (/WWWLL$/.test(s) || /LLWWW$/.test(s)) return 'bambu/bloque';
+    if (/WLLWLL$/.test(s) || /LLWLL$/.test(s)) return 'trampa';
+    if (/WWL$/.test(s)) return 'doble victoria';
+    if (/WWWL$/.test(s)) return 'racha 3W antes de L';
+    if (/WWWWL$/.test(s)) return 'pico';
+    if (/WWW$/.test(s) || /LLLL$/.test(s)) return 'racha/bloque';
+    return 'patron mixto';
+}
+
+function summarizePatternContext(context, routeKey) {
+    const perf = context.performance8 || {};
+    const n9Seq = routeKey === 'cw' ? perf.cwN9 : perf.ccwN9;
+    const n4Seq = routeKey === 'cw' ? perf.cwN4 : perf.ccwN4;
+    return `Patron ${detectWlPattern(n9Seq)} en N9 y ${detectWlPattern(n4Seq)} en N4`;
+}
+
+function extractAutoPatternName(rawAnalysis, context, routeKey) {
+    const source = `${rawAnalysis || ''} ${summarizePatternContext(context, routeKey)}`.toLowerCase();
+    if (source.includes('rodillo') || source.includes('zigzag')) return 'rodillo';
+    if (source.includes('ola')) return 'ola';
+    if (source.includes('bambu')) return 'bambu';
+    if (source.includes('trampa')) return 'trampa';
+    if (source.includes('pico')) return 'pico';
+    if (source.includes('farol')) return 'farol';
+    if (source.includes('turbulencia')) return 'turbulencia';
+    if (source.includes('bloque') || String(context?.stabilityLevel || '').toLowerCase() === 'green') return 'bloques';
+    if (source.includes('racha')) return 'racha';
+    if (source.includes('mixto')) return 'mixto';
+    return 'flujo mixto';
+}
+
+function buildHumanAutoAiAnalysis(context, decision = {}, rawAnalysis = '') {
+    if (!context || !context.routes || !context.routes.cw || !context.routes.ccw) {
+        return 'Sin contexto suficiente para explicar la jugada.';
+    }
+
+    const route = String(decision.route || '').toUpperCase();
+    const zone = String(decision.zone || '').toUpperCase();
+    const mode = String(context.mode || 'SAFE').toUpperCase();
+    const stability = String(context.stabilityLevel || 'red').toLowerCase();
+    const dom8 = context.dominance8 || {};
+    const mom15 = context.momentum15 || {};
+    const cw = context.routes.cw || {};
+    const ccw = context.routes.ccw || {};
+    const scoreCW = (Number(cw.hitRate) || 0) + ((Number(mom15.cw) || 0) * 4) + ((Number(dom8.cw) || 0) * 2);
+    const scoreCCW = (Number(ccw.hitRate) || 0) + ((Number(mom15.ccw) || 0) * 4) + ((Number(dom8.ccw) || 0) * 2);
+    const zoneBigScore = ((Number(mom15.big) || 0) * 4) + ((Number(dom8.big) || 0) * 2);
+    const zoneSmallScore = ((Number(mom15.small) || 0) * 4) + ((Number(dom8.small) || 0) * 2);
+    const routeGap = Math.abs(scoreCW - scoreCCW);
+    const zoneGap = Math.abs(zoneBigScore - zoneSmallScore);
+    const routeKey = route === 'CCW' ? 'ccw' : 'cw';
+    const patternName = extractAutoPatternName(rawAnalysis, context, routeKey);
+    const routeText = route === 'CCW' ? 'ruta izquierda (CCW)' : 'ruta derecha (CW)';
+    const zoneText = zone === 'BIG' ? 'zona amplia (10-18)' : 'zona corta (1-9)';
+    const stabilityText = {
+        green: 'mesa estable por bloques',
+        yellow: 'mesa en transicion',
+        red: 'mesa sensible o trabada'
+    }[stability] || 'mesa en lectura';
+    const routeEdgeText = routeGap >= 12 ? 'ventaja clara en ruta' : routeGap >= 6 ? 'ventaja moderada en ruta' : 'ventaja corta en ruta';
+    const zoneEdgeText = zoneGap >= 10 ? 'zona bien definida' : zoneGap >= 5 ? 'zona algo definida' : 'zona todavia mezclada';
+
+    if (decision.n9 === 'ESPERAR' || decision.n4 === 'ESPERAR' || route === 'ESPERAR' || zone === 'ESPERAR') {
+        return `${mode} no entra: ${stabilityText}. El patron actual parece ${patternName} y la ventaja entre CW/CCW o BIG/SMALL todavia no alcanza para disparar.`;
+    }
+
+    return `${mode} entra por ${routeText} y ${zoneText}. Ve patron ${patternName}, ${stabilityText}, ${routeEdgeText} y ${zoneEdgeText}.`;
+}
+
+function isLiveDuplicateSpin(currentHistory, payload) {
+    const history = Array.isArray(currentHistory) ? currentHistory : [];
+    if (history.length === 0) return false;
+
+    const eventId = String(payload?.event_id || '').trim();
+    const roundKey = String(payload?.round_key || '').trim();
+    const source = String(payload?.source || '').trim();
+    const number = Number(payload?.number);
+    const lastSpin = history[history.length - 1];
+
+    if (eventId && history.some(spin => String(spin.event_id || '') === eventId)) return true;
+    if (roundKey && history.some(spin => String(spin.round_key || '') === roundKey)) return true;
+    if (['public_scraper', 'casino_org_live'].includes(source) && Number.isInteger(number) && lastSpin && Number(lastSpin.number) === number) {
+        return true;
+    }
+
+    return false;
+}
+
+function buildStrategyDigest(tableId) {
+    return strategyStore.buildPromptDigest({ tableId: tableId || 'global', limit: 12 });
+}
+
+function compactDigest(text, maxChars = 500) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    return clean.length > maxChars ? clean.slice(0, maxChars) + '...' : clean;
+}
+
+function estimateTokens(text) {
+    return Math.ceil(String(text || '').length / 4);
+}
+
+function getLearningSummaryAsync(tableId) {
+    return new Promise(resolve => {
+        db.getAiLearningSummary(tableId || 0, (err, summary) => {
+            if (err) {
+                console.error('[AI Learning] Summary error:', err.message);
+                return resolve(null);
+            }
+            resolve(summary || null);
+        });
+    });
+}
+
+function buildLearningDigest(summary, mode = 'FULL') {
+    if (!summary || !summary.aiPredictions) {
+        return 'Memoria RL: sin muestra suficiente todavia.';
+    }
+
+    const all = summary.aiPredictions || {};
+    const byMode = summary.aiPredictionsByMode || {};
+    const scoped = byMode[String(mode || 'FULL').toUpperCase()] || null;
+    const source = scoped && Number(scoped.total || 0) > 0 ? scoped : all;
+    const total = Number(source.total || 0);
+    const wins = Number(source.wins || 0);
+    const losses = Number(source.losses || 0);
+    const skips = Number(source.skips || 0);
+    const pending = Number(source.pending || 0);
+    const reward = Number(source.reward || 0);
+    const n9Rate = Number((scoped && scoped.n9Rate) || 0);
+    const n4Rate = Number((scoped && scoped.n4Rate) || 0);
+
+    if (!total) return 'Memoria RL: sin predicciones resueltas para este modo.';
+
+    return [
+        `Memoria RL ${String(mode || 'FULL').toUpperCase()}: total=${total}, W=${wins}, L=${losses}, skip=${skips}, pending=${pending}.`,
+        `Reward acumulado=${reward}. N9 hit=${n9Rate}%, N4 hit=${n4Rate}%.`,
+        'Premios/castigos: N4 +100, N9 +30, esperar +15, fallo total -200.'
+    ].join(' ');
+}
+
+function buildAutoAiContextSnapshot(context, strategyDigest, learningDigest) {
+    if (!context) return {};
+    return {
+        mode: String(context.mode || 'SAFE').toUpperCase(),
+        stabilityLevel: context.stabilityLevel || '',
+        patternLabel: context.patternLabel || '',
+        dominance8: context.dominance8 || {},
+        momentum15: context.momentum15 || {},
+        sequence15: context.sequence15 || {},
+        performance8: context.performance8 || {},
+        routes: context.routes || {},
+        recentNumbers: Array.isArray(context.recentNumbers) ? context.recentNumbers.slice(-15) : [],
+        strategyDigest: String(strategyDigest || '').slice(0, 2000),
+        learningDigest: String(learningDigest || '').slice(0, 1000)
+    };
+}
+
+function wheelDistance(from, to) {
+    const i1 = predictor.WHEEL_INDEX[Number(from)];
+    const i2 = predictor.WHEEL_INDEX[Number(to)];
+    if (i1 === undefined || i2 === undefined) return 0;
+    let d = i2 - i1;
+    if (d > 18) d -= 37;
+    if (d < -18) d += 37;
+    return d;
+}
+
+function buildSequenceContext(history) {
+    const dir = [];
+    const zone = [];
+    const sample = Array.isArray(history) ? history.slice(-16) : [];
+    for (let i = 1; i < sample.length; i++) {
+        const d = wheelDistance(sample[i - 1], sample[i]);
+        dir.push(d >= 0 ? 'DER' : 'IZQ');
+        zone.push(Math.abs(d) >= 10 ? 'BIG' : 'SMALL');
+    }
+    return { dir: dir.join(' '), zone: zone.join(' ') };
+}
+
+function snapshotToAutoAiContext(snapshot, mode, clientContext = null) {
+    if (!snapshot || !snapshot.routes || !snapshot.routes.cw || !snapshot.routes.ccw) return clientContext;
+    const recentNumbers = Array.isArray(snapshot.recent_numbers) ? snapshot.recent_numbers : [];
+    const hasClientMetrics = clientContext && clientContext.dominance8 && clientContext.routes && clientContext.routes.cw;
+    return {
+        ...(clientContext || {}),
+        mode: String(mode || clientContext?.mode || 'SAFE').toUpperCase(),
+        tableCode: snapshot.table_code || 'AUTO',
+        spinId: snapshot.spin_id ?? clientContext?.spinId ?? null,
+        windowSize: snapshot.window_size || Math.max(0, recentNumbers.length - 1),
+        stabilityLevel: hasClientMetrics ? (clientContext.stabilityLevel || snapshot.stability_level || 'red') : (snapshot.stability_level || clientContext?.stabilityLevel || 'red'),
+        patternLabel: hasClientMetrics ? (clientContext.patternLabel || snapshot.pattern_label || 'Estandar') : (snapshot.pattern_label || clientContext?.patternLabel || 'Estandar'),
+        dominantAxis: hasClientMetrics ? (clientContext.dominantAxis || snapshot.dominant_axis || 'none') : (snapshot.dominant_axis || clientContext?.dominantAxis || 'none'),
+        dominantSignal: hasClientMetrics ? (clientContext.dominantSignal || snapshot.dominant_signal || '') : (snapshot.dominant_signal || clientContext?.dominantSignal || ''),
+        dominanceScore: Number(hasClientMetrics ? (clientContext.dominanceScore || snapshot.dominance_score || 0) : (snapshot.dominance_score || clientContext?.dominanceScore || 0)),
+        dominance8: hasClientMetrics ? (clientContext.dominance8 || snapshot.dominance8 || {}) : (snapshot.dominance8 || clientContext?.dominance8 || {}),
+        momentum15: hasClientMetrics ? (clientContext.momentum15 || snapshot.momentum15 || {}) : (snapshot.momentum15 || clientContext?.momentum15 || {}),
+        sequence15: hasClientMetrics && clientContext.sequence15?.dir ? clientContext.sequence15 : buildSequenceContext(recentNumbers),
+        performance8: hasClientMetrics ? (clientContext.performance8 || snapshot.performance8 || {}) : (snapshot.performance8 || clientContext?.performance8 || {}),
+        routes: hasClientMetrics && clientContext.routes?.cw?.n9 != null ? clientContext.routes : snapshot.routes,
+        recentNumbers: hasClientMetrics ? (clientContext.recentNumbers || recentNumbers) : recentNumbers,
+        context: {
+            source: 'server_mongo_context',
+            notes: hasClientMetrics ? 'Client metrics preserved (frontend calculation)' : 'Auto AI context rebuilt from saved spins/metric snapshot before prediction.'
+        }
+    };
+}
+
+async function buildServerAutoAiContext(tableId, clientContext = null) {
+    const mode = String(clientContext?.mode || 'SAFE').toUpperCase();
+    const rows = await new Promise(resolve => {
+        db.getHistory(tableId || 0, 100, (err, historyRows) => {
+            if (err || !Array.isArray(historyRows)) return resolve([]);
+            resolve(historyRows);
+        });
+    });
+    const history = rows
+        .map(row => Number(row.number))
+        .filter(n => Number.isInteger(n) && n >= 0 && n <= 36);
+
+    if (history.length < 2) return clientContext;
+    const latestSpin = rows[rows.length - 1] || {};
+    const snapshot = buildMetricSnapshot({
+        tableId,
+        tableCode: 'AUTO',
+        spinId: latestSpin.id ?? clientContext?.spinId ?? null,
+        history,
+        mode: 'AUTO_AI_SERVER_CONTEXT'
+    });
+    return snapshotToAutoAiContext(snapshot, mode, clientContext);
+}
+
+function persistAutoAiStrategy(parsed, context, tableId) {
+    const name = String(parsed?.strategy_name || parsed?.strategyName || '').trim();
+    const note = String(parsed?.strategy_note || parsed?.strategyNote || '').trim();
+    if (!name || !note || !context) return null;
+
+    const route = String(parsed?.route || parsed?.direccion || '').toUpperCase();
+    const zone = String(parsed?.zone || parsed?.zona || '').toUpperCase();
+    const tags = [
+        'auto-ai',
+        String(context.mode || '').toLowerCase(),
+        String(context.stabilityLevel || '').toLowerCase(),
+        String(context.patternLabel || '').toLowerCase(),
+        route.toLowerCase(),
+        zone.toLowerCase()
+    ].filter(Boolean);
+
+    return strategyStore.saveStrategy({
+        source: 'ai',
+        origin: 'auto_ai',
+        tableId: tableId || 'global',
+        name,
+        summary: note,
+        pattern: context.patternLabel || '',
+        trigger: `stability=${context.stabilityLevel || 'na'} route=${route || 'na'} zone=${zone || 'na'}`,
+        action: `Aplicar sobre las 6 medidas activas usando ${route || 'ruta'} y ${zone || 'zona'}.`,
+        tags
+    });
+}
+
+function persistMetricSnapshot(context, tableId) {
+    if (!context) return;
+    db.addMetricSnapshot({
+        table_id: Number(tableId) || 0,
+        table_code: context.tableCode || 'AUTO',
+        spin_id: context.spinId ?? null,
+        window_size: context.windowSize || 15,
+        recent_numbers: Array.isArray(context.recentNumbers) ? context.recentNumbers : [],
+        stability_level: context.stabilityLevel || 'red',
+        pattern_label: context.patternLabel || '',
+        dominant_axis: context.dominantAxis || 'none',
+        dominant_signal: context.dominantSignal || '',
+        dominance_score: Number(context.dominanceScore || 0),
+        dominance8: context.dominance8 || {},
+        momentum15: context.momentum15 || {},
+        performance8: context.performance8 || {},
+        routes: context.routes || {},
+        context: context.context || { source: 'auto_ai_context', notes: '' },
+        captured_at: new Date().toISOString()
+    }, () => {});
+}
+
+function persistIngestMetricSnapshot(tableId, spinId, history, mode = 'INGEST') {
+    try {
+        const snapshot = buildMetricSnapshot({
+            tableId,
+            tableCode: 'AUTO',
+            spinId,
+            history,
+            mode
+        });
+
+        db.addMetricSnapshot(snapshot, (err) => {
+            if (err) console.error('[MetricSnapshot] Save error:', err.message);
+        });
+        return snapshot;
+    } catch (err) {
+        console.error('[MetricSnapshot] Build error:', err.message);
+        return null;
     }
 }
-setTimeout(syncCounter, 5000); // Wait for mongo connection
+
+function persistTableStateSnapshot(tableId, spinId, metricSnapshot) {
+    try {
+        const stateSnapshot = buildTableStateSnapshot({
+            metricSnapshot,
+            tableId,
+            tableCode: 'AUTO',
+            spinId
+        });
+        if (!stateSnapshot) return null;
+
+        db.addTableStateSnapshot(stateSnapshot, (err) => {
+            if (err) console.error('[TableStateSnapshot] Save error:', err.message);
+        });
+        return stateSnapshot;
+    } catch (err) {
+        console.error('[TableStateSnapshot] Build error:', err.message);
+        return null;
+    }
+}
+
+function resolvePendingAiPredictions(tableId, resolvedNumber) {
+    db.resolvePendingAiPredictions(tableId, resolvedNumber, evaluatePredictionHit, (err, info) => {
+        if (err) return console.error('[AiPrediction] Resolve error:', err.message);
+        if (info?.resolved) console.log(`[AiPrediction] Resolved ${info.resolved} pending prediction(s).`);
+    });
+}
+
+function persistDominanceAiPrediction(tableId, spinId, snapshot) {
+    const prediction = chooseDominancePrediction(snapshot, spinId);
+    if (!prediction) return;
+
+    db.addAiPrediction(prediction, (err) => {
+        if (err) return console.error('[AiPrediction] Save error:', err.message);
+        console.log(`[AiPrediction] Next ${prediction.route}/${prediction.zone} N9=${prediction.n9} N4=${prediction.n4} (${prediction.result})`);
+    });
+}
+
+function normalizeAiRoute(value, n9, context) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (raw === 'CW' || raw === 'DER' || raw === 'DERECHA' || raw === 'RIGHT') return 'CW';
+    if (raw === 'CCW' || raw === 'IZQ' || raw === 'IZQUIERDA' || raw === 'LEFT') return 'CCW';
+    if (raw === 'SMALL' || raw === 'S' || raw === 'MISMA') return 'SMALL';
+    if (raw === 'BIG' || raw === 'B' || raw === 'OPUESTA') return 'BIG';
+    const routes = context?.routes || {};
+    if (n9 !== 'ESPERAR') {
+        if (String(routes.cw?.n9) === String(n9)) return 'CW';
+        if (String(routes.ccw?.n9) === String(n9)) return 'CCW';
+        if (String(routes.small?.n9) === String(n9)) return 'SMALL';
+        if (String(routes.big?.n9) === String(n9)) return 'BIG';
+    }
+    return 'ESPERAR';
+}
+
+function normalizeAiZone(value, route, n4, context) {
+    const raw = String(value || '').trim().toUpperCase();
+    if (raw === 'SMALL' || raw === 'CORTA' || raw === 'SHORT') return 'SMALL';
+    if (raw === 'BIG' || raw === 'AMPLIA' || raw === 'LARGA' || raw === 'LONG') return 'BIG';
+    const routes = context?.routes || {};
+    if (n4 !== 'ESPERAR') {
+        if (route === 'CW' && String(routes.cw?.n4Small) === String(n4)) return 'SMALL';
+        if (route === 'CW' && String(routes.cw?.n4Big) === String(n4)) return 'BIG';
+        if (route === 'CCW' && String(routes.ccw?.n4Small) === String(n4)) return 'SMALL';
+        if (route === 'CCW' && String(routes.ccw?.n4Big) === String(n4)) return 'BIG';
+    }
+    return 'ESPERAR';
+}
+
+function buildAiUnavailableDecision(reason) {
+    const analysis = reason === 'rate_limit'
+        ? 'IA externa limitada por 429. No se fuerza lectura sin auditor; queda en espera.'
+        : 'IA externa no disponible. No se fuerza lectura sin auditor; queda en espera.';
+    return {
+        reply: formatAutoReply('ESPERAR', 'ESPERAR'),
+        route: 'ESPERAR',
+        zone: 'ESPERAR',
+        analysis,
+        provider: reason === 'rate_limit' ? 'llm-rate-limit' : 'llm-unavailable'
+    };
+}
+
+function persistAiPredictionRecord(tableId, context, normalizedReply, parsed, meta = {}) {
+    if (!context || !normalizedReply) return;
+
+    const normalized = typeof normalizedReply === 'object'
+        ? normalizedReply
+        : { reply: String(normalizedReply || '') };
+    const parts = String(normalized.reply || '').split('|');
+    const n9 = parts[0] ? parts[0].replace('N9:', '').trim() : 'ESPERAR';
+    const n4 = parts[1] ? parts[1].replace('N4:', '').trim() : 'ESPERAR';
+    const mode = String(context.mode || 'SAFE').toUpperCase();
+    const recentKey = Array.isArray(context.recentNumbers) ? context.recentNumbers.slice(-15).join('-') : '';
+    const contextHash = ['AI', mode, recentKey, n9, n4].join('|');
+    const route = normalizeAiRoute(normalized.route || parsed?.route || parsed?.direccion, n9, context);
+    const zone = normalizeAiZone(normalized.zone || parsed?.zone || parsed?.zona, route, n4, context);
+
+    db.addAiPrediction({
+        table_id: Number(tableId) || 0,
+        basis: 'ai_analysis',
+        dominance_priority: false,
+        mode,
+        route,
+        zone,
+        n9,
+        n4,
+        analysis: String(normalized.analysis || parsed?.analysis || parsed?.reason || '').trim(),
+        strategy_refs: parsed?.strategy_name ? [String(parsed.strategy_name)] : [],
+        context_snapshot: buildAutoAiContextSnapshot(context, meta.strategyDigest, meta.learningDigest),
+        decision_source: meta.provider || normalized.provider || 'auto_ai',
+        prompt_version: 'auto_ai_v3_connected_rl',
+        context_hash: contextHash,
+        result: n9 === 'ESPERAR' || n4 === 'ESPERAR' ? 'skip' : 'pending',
+        n9_result: n9 === 'ESPERAR' ? 'skip' : 'pending',
+        n4_result: n4 === 'ESPERAR' ? 'skip' : 'pending',
+        created_at: new Date().toISOString()
+    }, (err) => {
+        if (err) console.error('[AiPrediction] Auto AI save error:', err.message);
+    });
+}
+
+function parseChatStrategyCommand(text, tableId) {
+    const raw = String(text || '').trim();
+    const lower = raw.toLowerCase();
+    const prefixes = ['/estrategia', 'guardar estrategia:', 'guardar estrategia '];
+    const prefix = prefixes.find(item => lower.startsWith(item));
+    if (!prefix) return null;
+
+    let body = raw.slice(prefix.length).trim();
+    if (!body) return { error: 'Formato sugerido: /estrategia Nombre | resumen | trigger=... | action=... | tags=a,b' };
+
+    const parts = body.split('|').map(part => String(part || '').trim()).filter(Boolean);
+    if (parts.length < 2) {
+        return { error: 'Te falta informacion. Usa: /estrategia Nombre | resumen | trigger=... | action=... | tags=a,b' };
+    }
+
+    const data = {
+        source: 'human',
+        origin: 'chat_command',
+        tableId: tableId || 'global',
+        name: parts[0],
+        summary: parts[1]
+    };
+
+    for (const part of parts.slice(2)) {
+        const idx = part.indexOf('=');
+        if (idx === -1) continue;
+        const key = part.slice(0, idx).trim().toLowerCase();
+        const value = part.slice(idx + 1).trim();
+        if (!value) continue;
+        if (key === 'trigger') data.trigger = value;
+        if (key === 'action') data.action = value;
+        if (key === 'pattern') data.pattern = value;
+        if (key === 'tags') data.tags = value.split(',').map(tag => tag.trim()).filter(Boolean);
+    }
+
+    return { data };
+}
+
+function buildAutoAiFallback(context) {
+    const brainState = brain.loadBrain();
+    const t = brainState.thresholds;
+
+    if (!context || !context.routes || !context.routes.cw || !context.routes.ccw) {
+        return {
+            n9: 'ESPERAR',
+            n4: 'ESPERAR',
+            route: 'ESPERAR',
+            zone: 'ESPERAR',
+            analysis: 'Sin medidas matematicas activas para analizar.'
+        };
+    }
+
+    const dom8 = context.dominance8 || {};
+    const mom15 = context.momentum15 || {};
+    const cw = context.routes.cw;
+    const ccw = context.routes.ccw;
+
+    const scoreCW = (Number(cw.hitRate) || 0) + ((Number(mom15.cw) || 0) * 4) + ((Number(dom8.cw) || 0) * 2);
+    const scoreCCW = (Number(ccw.hitRate) || 0) + ((Number(mom15.ccw) || 0) * 4) + ((Number(dom8.ccw) || 0) * 2);
+    const zoneBigScore = ((Number(mom15.big) || 0) * 4) + ((Number(dom8.big) || 0) * 2);
+    const zoneSmallScore = ((Number(mom15.small) || 0) * 4) + ((Number(dom8.small) || 0) * 2);
+
+    const routeKey = scoreCW >= scoreCCW ? 'cw' : 'ccw';
+    const zoneKey = zoneBigScore > zoneSmallScore ? 'big' : 'small';
+    const route = context.routes[routeKey];
+    const routeLabel = routeKey.toUpperCase();
+    const zoneLabel = zoneKey.toUpperCase();
+    const stability = String(context.stabilityLevel || 'red').toLowerCase();
+    const safeMode = String(context.mode || 'SAFE').toUpperCase() === 'SAFE';
+    const patternText = summarizePatternContext(context, routeKey);
+    const dominantRoute = routeKey === 'cw' ? 'CW' : 'CCW';
+    const routeGap = Math.abs(scoreCW - scoreCCW);
+    const zoneGap = Math.abs(zoneBigScore - zoneSmallScore);
+    const strongestHitRate = Math.max(Number(cw.hitRate) || 0, Number(ccw.hitRate) || 0);
+    const directionalPressure = Math.max(Number(dom8.cw) || 0, Number(dom8.ccw) || 0) + Math.max(Number(mom15.cw) || 0, Number(mom15.ccw) || 0);
+    const zonePressure = Math.max(Number(dom8.big) || 0, Number(dom8.small) || 0) + Math.max(Number(mom15.big) || 0, Number(mom15.small) || 0);
+    const patternLower = String(context.patternLabel || '').toLowerCase();
+    const unstablePattern = ['mixta', 'mixto', 'transicion', 'turbulencia', 'inest'].some(tag => patternLower.includes(tag));
+
+    if (safeMode && (
+        routeGap < t.minRouteDiff ||
+        strongestHitRate < t.minHitRate ||
+        directionalPressure < t.minRouteDiff ||
+        brainState.streakState.protected
+    )) {
+        return {
+            n9: 'ESPERAR',
+            n4: 'ESPERAR',
+            route: 'ESPERAR',
+            zone: 'ESPERAR',
+            analysis: buildHumanAutoAiAnalysis(context, {
+                route: 'ESPERAR',
+                zone: 'ESPERAR',
+                n9: 'ESPERAR',
+                n4: 'ESPERAR'
+            }, patternText)
+        };
+    }
+
+    const decision = {
+        route: routeKey.toUpperCase(),
+        zone: zoneLabel,
+        n9: String(route.n9),
+        n4: zoneKey === 'big' ? String(route.n4Big) : String(route.n4Small)
+    };
+
+    return {
+        n9: decision.n9,
+        n4: decision.n4,
+        route: decision.route,
+        zone: decision.zone,
+        analysis: buildHumanAutoAiAnalysis(
+            context,
+            decision,
+            `${patternText}. Dom ${dominantRoute} con zona ${zoneLabel}. Brecha ruta ${routeGap}, brecha zona ${zoneGap}. Mesa ${stability.toUpperCase()}.`
+        )
+    };
+}
+
+function buildAutoAiPromptLines(context, strategyDigest, learningDigest = '', mode = 'SAFE') {
+    const dom8 = context.dominance8 || {};
+    const mom15 = context.momentum15 || {};
+    const perf8 = context.performance8 || {};
+    const cw = context.routes.cw;
+    const ccw = context.routes.ccw;
+    const safeMode = String(mode || context.mode || 'SAFE').toUpperCase() === 'SAFE';
+
+    return [
+        safeMode ? 'MODO SAFE: audita; si no hay ventaja clara responde ESPERAR.' : 'MODO FULL: elige la mejor lectura relativa entre las 6 medidas.',
+        `ESTABILIDAD=${String(context.stabilityLevel || 'red').toUpperCase()} PATRON=${context.patternLabel || 'Sin patron'}`,
+        `DOM8 CW=${dom8.cw || 0} CCW=${dom8.ccw || 0} BIG=${dom8.big || 0} SMALL=${dom8.small || 0}`,
+        `MOM15 CW=${mom15.cw || 0} CCW=${mom15.ccw || 0} BIG=${mom15.big || 0} SMALL=${mom15.small || 0}`,
+        `WL CW_N9=${perf8.cwN9 || '-'} CW_N4=${perf8.cwN4 || '-'} CCW_N9=${perf8.ccwN9 || '-'} CCW_N4=${perf8.ccwN4 || '-'}`,
+        `DIR15=${context.sequence15?.dir || '-'} ZON15=${context.sequence15?.zone || '-'}`,
+        `MEDIDAS: CW_N9=${cw?.n9} CW_N4S=${cw?.n4Small} CW_N4B=${cw?.n4Big} CCW_N9=${ccw?.n9} CCW_N4S=${ccw?.n4Small} CCW_N4B=${ccw?.n4Big}`,
+        `NUMS=${(context.recentNumbers || []).slice(-12).join(',') || '-'}`,
+        `MEM=${compactDigest(learningDigest || 'sin memoria', 280)}`,
+        `ESTR=${compactDigest(strategyDigest || 'sin estrategias', 260)}`,
+        `MEM=${compactDigest(learningDigest || 'sin memoria', 280)}`,
+        `ESTR=${compactDigest(strategyDigest || 'sin estrategias', 260)}`,
+        'Reglas: SMALL=1-9, BIG=10-18. No inventes numeros. Patrones W/L: racha, alternancia, ola, bambu, pico, trampa, bloque, turbulencia, farol, mixto.',
+        'REGLA DIRECCION: Si N9 es CW/CCW, N4 debe ser de esa misma direccion. Si N9 es SMALL, N4 debe ser un Small-N4 (izq o der). Si N9 es BIG, N4 debe ser un Big-N4 (izq o der).',
+        safeMode ? 'Bloquea por contradiccion, fatiga, mezcla o W/L peligroso.' : 'Prioriza dominancia viva, momentum, W/L e hit rate; si hay mezcla elige la opcion menos mala.',
+        'JSON exacto: {"route":"CW|CCW|SMALL|BIG|ESPERAR","zone":"SMALL|BIG|ESPERAR","n9":"numero o ESPERAR","n4":"numero o ESPERAR","analysis":"max 25 palabras","strategy_name":"opcional","strategy_note":"opcional"}.'
+    ];
+}
+
+function buildSafeAutoAiUserPrompt(context, strategyDigest, learningDigest = '') {
+    return buildAutoAiPromptLines(context, strategyDigest, learningDigest, 'SAFE').join('\n');
+}
+
+function buildFullAutoAiUserPrompt(context, strategyDigest, learningDigest = '') {
+    return buildAutoAiPromptLines(context, strategyDigest, learningDigest, 'FULL').join('\n');
+}
+
+function buildRawAutoAiUserPrompt(context) {
+    if (!context || !context.routes || !context.routes.cw || !context.routes.ccw) {
+        return 'RAW: sin contexto suficiente.';
+    }
+    const dom8 = context.dominance8 || {};
+    const mom15 = context.momentum15 || {};
+    const perf8 = context.performance8 || {};
+    const cw = context.routes.cw;
+    const ccw = context.routes.ccw;
+    const strategyText = String(context.strategyDigest || buildStrategyDigest('global') || '').slice(0, 800);
+    return [
+        'MODO RAW: trabajas con las metricas actuales + estrategias disenadas por el usuario.',
+        'Tienes acceso a las estrategias guardadas pero NO a la memoria RL ni al historial de aprendizaje.',
+        'Las estrategias del usuario son reglas que debes considerar en tu decision.',
+        `ESTRATEGIAS:\n${strategyText || '(sin estrategias guardadas)'}`,
+        `DOM8 CW=${dom8.cw || 0} CCW=${dom8.ccw || 0} BIG=${dom8.big || 0} SMALL=${dom8.small || 0}`,
+        `MOM15 CW=${mom15.cw || 0} CCW=${mom15.ccw || 0} BIG=${mom15.big || 0} SMALL=${mom15.small || 0}`,
+        `WL CW_N9=${perf8.cwN9 || '-'} CW_N4=${perf8.cwN4 || '-'} CCW_N9=${perf8.ccwN9 || '-'} CCW_N4=${perf8.ccwN4 || '-'}`,
+        `DIR15=${context.sequence15?.dir || '-'}`,
+        `CW n9=${cw.n9} n4S=${cw.n4Small} n4B=${cw.n4Big}`,
+        `CCW n9=${ccw.n9} n4S=${ccw.n4Small} n4B=${ccw.n4Big}`,
+        `NUMS=${(context.recentNumbers || []).slice(-12).join(',') || '-'}`,
+        'Elige el mejor entre CW/CCW basado en DOM8+MOM15+WL+ESTRATEGIAS. Responde JSON.',
+        'Si la diferencia entre rutas es < 3 y el hit rate < 40%, responde ESPERAR.',
+        'Aplica las estrategias del usuario: continuidad en bloques, zigzag en turbulencia, etc.',
+        'JSON: {"route":"CW|CCW|ESPERAR","zone":"SMALL|BIG|ESPERAR","n9":"numero","n4":"numero","analysis":"max 20 palabras"}'
+    ].join('\n');
+}
+
+function buildAutoAiUserPrompt(context, strategyDigest, learningDigest = '') {
+    const mode = String(context?.mode || 'SAFE').toUpperCase();
+    if (mode === 'RAW') return buildRawAutoAiUserPrompt(context);
+    return mode === 'SAFE'
+        ? buildSafeAutoAiUserPrompt(context, strategyDigest, learningDigest)
+        : buildFullAutoAiUserPrompt(context, strategyDigest, learningDigest);
+}
+
+function normalizeAutoAiResponse(parsed, context, fallback) {
+    const cw = context.routes.cw;
+    const ccw = context.routes.ccw;
+    const small = context.routes.small || {};
+    const big = context.routes.big || {};
+    const isRouletteNumber = (v) => String(v).match(/^\d+$/) && parseInt(v) >= 0 && parseInt(v) <= 36;
+    const allowedN9 = [
+        String(cw.n9), String(ccw.n9),
+        String(cw.n4Small), String(cw.n4Big),
+        String(ccw.n4Small), String(ccw.n4Big)
+    ].filter(v => v && v !== 'undefined' && v !== 'null');
+    const allowedN4 = [
+        String(cw.n4Small), String(cw.n4Big),
+        String(ccw.n4Small), String(ccw.n4Big)
+    ].filter(v => v && v !== 'undefined' && v !== 'null');
+
+    let route = normalizeAiRoute(parsed.route || parsed.direccion || '', cleanAutoNumber(parsed.n9), context);
+    let zone = String(parsed.zone || parsed.zona || '').toUpperCase();
+    let n9 = cleanAutoNumber(parsed.n9);
+    let n4 = cleanAutoNumber(parsed.n4);
+    const rawAnalysis = String(parsed.analysis || parsed.reason || fallback.analysis || '').trim();
+
+    if (!allowedN9.includes(n9)) {
+        if (route === 'CW') n9 = String(cw.n9);
+        else if (route === 'CCW') n9 = String(ccw.n9);
+        else if (route === 'SMALL') n9 = String(small.n9 || fallback.n9);
+        else if (route === 'BIG') n9 = String(big.n9 || fallback.n9);
+        else n9 = fallback.n9;
+    }
+
+    if (!allowedN4.includes(n4)) {
+        if (zone === 'SMALL') {
+            n4 = (route === 'CCW') ? String(ccw.n4Small) : String(cw.n4Small);
+        } else if (zone === 'BIG') {
+            n4 = (route === 'CCW') ? String(ccw.n4Big) : String(cw.n4Big);
+        } else if (route === 'CW') {
+            n4 = String(cw.n4Small);
+        } else if (route === 'CCW') {
+            n4 = String(ccw.n4Small);
+        } else {
+            n4 = fallback.n4;
+        }
+    }
+
+    // Force direction consistency: N4 must match route direction
+    if (route === 'CW') {
+        const cwN4s = [String(cw.n4Small), String(cw.n4Big)];
+        if (!cwN4s.includes(n4)) {
+            n4 = (zone === 'BIG') ? String(cw.n4Big) : String(cw.n4Small);
+        }
+    } else if (route === 'CCW') {
+        const ccwN4s = [String(ccw.n4Small), String(ccw.n4Big)];
+        if (!ccwN4s.includes(n4)) {
+            n4 = (zone === 'BIG') ? String(ccw.n4Big) : String(ccw.n4Small);
+        }
+    } else if (route === 'SMALL') {
+        const smallN4s = [String(cw.n4Small), String(ccw.n4Small)];
+        if (!smallN4s.includes(n4)) {
+            n4 = smallN4s.includes(String(cw.n4Small)) ? String(cw.n4Small) : String(ccw.n4Small);
+        }
+    } else if (route === 'BIG') {
+        const bigN4s = [String(cw.n4Big), String(ccw.n4Big)];
+        if (!bigN4s.includes(n4)) {
+            n4 = bigN4s.includes(String(cw.n4Big)) ? String(cw.n4Big) : String(ccw.n4Big);
+        }
+    }
+
+    // VALIDACIÓN BRUTAL: Si N9 o N4 no están en las 6 métricas del DIR, 
+    // RECHAZAMOS la respuesta de la IA y usamos el fallback local
+    const n9Valido = allowedN9.includes(n9);
+    const n4Valido = allowedN4.includes(n4) || n4 === 'ESPERAR';
+    
+    if (!n9Valido || !n4Valido) {
+        console.warn(`[AI] RECHAZADA: N9=${n9} (válido:${n9Valido}), N4=${n4} (válido:${n4Valido}). Usando fallback local.`);
+        console.warn(`[AI] Métricas permitidas N9: [${allowedN9.join(', ')}]`);
+        console.warn(`[AI] Métricas permitidas N4: [${allowedN4.join(', ')}]`);
+        // Retornar el fallback directamente, ignorando todo lo que hizo la IA
+        return {
+            reply: formatAutoReply(fallback.n9, fallback.n4),
+            route: fallback.route,
+            zone: fallback.zone,
+            analysis: `[FALLBACK] ${fallback.analysis}`,
+            provider: 'local-fallback-brutal'
+        };
+    }
+
+    if (!route || route === 'ESPERAR') {
+        if (n9 === String(cw.n9)) route = 'CW';
+        else if (n9 === String(ccw.n9)) route = 'CCW';
+        else if (n9 === String(small.n9)) route = 'SMALL';
+        else if (n9 === String(big.n9)) route = 'BIG';
+    }
+    if (!zone || zone === 'ESPERAR') {
+        if (route === 'CW' && n4 === String(cw.n4Small)) zone = 'SMALL';
+        else if (route === 'CW' && n4 === String(cw.n4Big)) zone = 'BIG';
+        else if (route === 'CCW' && n4 === String(ccw.n4Small)) zone = 'SMALL';
+        else if (route === 'CCW' && n4 === String(ccw.n4Big)) zone = 'BIG';
+        else if (route === 'SMALL') zone = 'SMALL';
+        else if (route === 'BIG') zone = 'BIG';
+    }
+
+    if (n9 === 'ESPERAR') {
+        return {
+            reply: formatAutoReply('ESPERAR', 'ESPERAR'),
+            route: 'ESPERAR',
+            zone: 'ESPERAR',
+            analysis: buildHumanAutoAiAnalysis(
+                context,
+                { route: 'ESPERAR', zone: 'ESPERAR', n9: 'ESPERAR', n4: 'ESPERAR' },
+                rawAnalysis || fallback.analysis
+            )
+        };
+    }
+
+    return {
+        reply: formatAutoReply(n9, n4 || 'ESPERAR'),
+        route,
+        zone,
+        analysis: buildHumanAutoAiAnalysis(context, { route, zone, n9, n4: n4 || 'ESPERAR' }, rawAnalysis || fallback.analysis)
+    };
+}
+
+// ─── AI COLLABORATION ENDPOINTS (V5 GEMINI) ────────────────────────
+
+// ---------------------------------------------------
+// Groq LLM endpoint (Llama 4 via Groq API)
+// ---------------------------------------------------
+app.post('/api/ai/groq', async (req, res) => {
+    const { prompt, autoAiContext: clientAutoAiContext, tableId } = req.body;
+    try {
+        const autoAiContext = clientAutoAiContext
+            ? await buildServerAutoAiContext(tableId || 0, clientAutoAiContext)
+            : null;
+        const fallback = buildAutoAiFallback(autoAiContext);
+        const groqKey = process.env.GROQ_API_KEY;
+        const autoMode = String(autoAiContext?.mode || 'SAFE').toUpperCase();
+        const strategyDigest = buildStrategyDigest(tableId || 'global');
+        const learningSummary = (autoAiContext && autoMode !== 'RAW') ? await getLearningSummaryAsync(tableId || 0) : null;
+        const learningDigest = (autoAiContext && autoMode !== 'RAW') ? buildLearningDigest(learningSummary, autoMode) : '';
+        const brainDigest = (autoAiContext && autoMode !== 'RAW') ? brain.buildBrainDigest(autoAiContext) : '';
+        const combinedDigest = [brainDigest, learningDigest].filter(Boolean).join('\n') || 'sin datos de aprendizaje';
+        const predictionMeta = { strategyDigest, learningDigest: combinedDigest, provider: 'llm-pending' };
+        if (autoAiContext && !AUTO_AI_REMOTE_ANALYSIS) {
+            const localDecision = {
+                reply: formatAutoReply(fallback.n9, fallback.n4),
+                route: fallback.route,
+                zone: fallback.zone,
+                analysis: fallback.analysis,
+                provider: 'local-dominance'
+            };
+            persistAiPredictionRecord(tableId || 0, autoAiContext, localDecision, fallback, { ...predictionMeta, provider: 'local-dominance' });
+            return res.json(localDecision);
+        }
+        if (!groqKey && !hasOllamaConfigured() && !DEEPSEEK_API_KEY) {
+            const unavailableDecision = buildAiUnavailableDecision('unavailable');
+            persistAiPredictionRecord(tableId || 0, autoAiContext, unavailableDecision, unavailableDecision, { ...predictionMeta, provider: unavailableDecision.provider });
+            return res.json(unavailableDecision);
+        }
+        if (autoAiContext && isLlmRateLimited()) {
+            const unavailableDecision = buildAiUnavailableDecision('rate_limit');
+            return res.json({
+                ...unavailableDecision,
+                rateLimited: true,
+                model: GROQ_MODEL,
+                estimatedPromptTokens: 0,
+                rateLimitedUntil: new Date(llmRateLimitedUntil).toISOString()
+            });
+        }
+
+        const userPrompt = autoAiContext ? buildAutoAiUserPrompt({ ...autoAiContext, strategyDigest }, strategyDigest, combinedDigest) : prompt;
+        
+        let systemPrompt;
+        if (autoAiContext) {
+            if (autoMode === 'SAFE') {
+                systemPrompt = [
+                    'Eres AUDITOR SAFE de ROULETTE-CLASSIC. Tu unico trabajo es decidir SI conviene entrar o esperar.',
+                    'Responde solo JSON valido. No inventes numeros fuera de las metricas dadas.',
+                    'Analiza estabilidad, dominancia, momentum, brechas ruta/zona, patron W/L, fatiga, faroles.',
+                    'REGLAS DEL AUDITOR:',
+                    '- Si la mesa esta VERDE (bloque estable): puedes entrar con confianza.',
+                    '- Si esta AMARILLA (transicion): entra solo si la brecha entre rutas >= 5 y la brecha entre zonas >= 3.',
+                    '- Si esta ROJA (caos/mixta): responde ESPERAR en n9 y n4.',
+                    '- Si hay fatiga (3+ L seguidos en la ruta dominante): responde ESPERAR.',
+                    '- Si hay farol activo: responde ESPERAR.',
+                    '- Si las seniales se contradicen (ruta dice CW pero zona dice SMALL y no concuerdan): responde ESPERAR.',
+                    'Cuando sea seguro entrar, dame los mismos numeros de las medidas (no inventes).',
+                    'JSON: {"route":"CW|CCW|ESPERAR","zone":"SMALL|BIG|ESPERAR","n9":"numero o ESPERAR","n4":"numero o ESPERAR","analysis":"max 25 palabras explicando la decision"}'
+                ].join('\n');
+            } else if (autoMode === 'RAW') {
+                systemPrompt = [
+                    'Eres motor RAW de ROULETTE-CLASSIC. Trabajas SIN memoria, SIN aprendizaje, SIN estrategias guardadas.',
+                    'Solo ves las metricas actuales de la mesa. Nada de historial RL ni patrones aprendidos.',
+                    'Responde solo JSON valido. Elige exclusivamente entre las medidas dadas.',
+                    'Si la brecha entre rutas (DOM8) es >= 4 y el hit rate >= 45%: elige la ruta dominante.',
+                    'Si la brecha es < 3 o el hit rate < 35%: responde ESPERAR (no hay ventaja clara).',
+                    'Entre 3-4 de brecha: decide segun el momentum de los ultimos 15 tiros.',
+                    'JSON: {"route":"CW|CCW|ESPERAR","zone":"SMALL|BIG|ESPERAR","n9":"numero o ESPERAR","n4":"numero o ESPERAR","analysis":"max 20 palabras"}'
+                ].join('\n');
+            } else {
+                systemPrompt = [
+                    'Eres motor FULL de ROULETTE-CLASSIC.',
+                    'Responde solo JSON valido. Elige exclusivamente entre las medidas dadas. No inventes numeros.',
+                    'SMALL=1-9, BIG=10-18. Analiza dominancia, momentum, W/L, hit rate, bloque/farol/turbulencia.',
+                    'En FULL elige la mejor opcion relativa disponible. SIEMPRE elige un numero, nunca ESPERAR.'
+                ].join('\n');
+            }
+        } else {
+            systemPrompt = 'Eres un motor de prediccion. RESPONDE SOLO JSON.';
+        }
+        const estimatedPromptTokens = estimateTokens(systemPrompt) + estimateTokens(userPrompt);
+
+        const llm = await callPreferredLlm({
+            systemPrompt,
+            userPrompt,
+            temperature: 0.15,
+            maxTokens: 800,
+            jsonMode: true
+        });
+
+        let result = llm.content;
+        // Extract first JSON object from response (small LLMs often wrap JSON in text)
+        const jsonMatch = result.match(/\{[\s\S]*\}/);
+        if (jsonMatch) result = jsonMatch[0];
+        try {
+            const parsed = JSON.parse(result);
+            if (autoAiContext) {
+                const modeContext = { ...autoAiContext, mode: autoMode };
+                
+                // SAFE auditor + RAW: if LLM says ESPERAR, trust it and block
+                if (autoMode === 'SAFE' || autoMode === 'RAW') {
+                    const safeN9 = cleanAutoNumber(parsed.n9);
+                    const safeRoute = normalizeAiRoute(parsed.route || parsed.direccion, safeN9, modeContext);
+                    
+                    if (safeN9 === 'ESPERAR' || safeRoute === 'ESPERAR' || String(parsed.n9 || '').toUpperCase().includes('ESPERAR')) {
+                        const safeDecision = {
+                            reply: formatAutoReply('ESPERAR', 'ESPERAR'),
+                            route: 'ESPERAR',
+                            zone: 'ESPERAR',
+                            analysis: String(parsed.analysis || (autoMode === 'RAW' ? 'RAW: metricas insuficientes para entrar.' : 'Auditor SAFE: condiciones no optimas para entrar.')).trim()
+                        };
+                        persistAiPredictionRecord(tableId || 0, modeContext, safeDecision, parsed, { ...predictionMeta, provider: llm.provider });
+                        return res.json({
+                            ...safeDecision,
+                            provider: llm.provider,
+                            model: GROQ_MODEL,
+                            usage: llm.usage || {},
+                            estimatedPromptTokens
+                        });
+                    }
+                }
+                
+                // FULL / SAFE-green / RAW-green: normalize prediction
+                const normalized = normalizeAutoAiResponse(parsed, modeContext, fallback);
+                persistAutoAiStrategy(parsed, autoAiContext, tableId || 'global');
+                persistAiPredictionRecord(tableId || 0, modeContext, normalized, parsed, { ...predictionMeta, provider: llm.provider });
+
+                return res.json({
+                    ...normalized,
+                    provider: llm.provider,
+                    model: GROQ_MODEL,
+                    usage: llm.usage || {},
+                    estimatedPromptTokens
+                });
+            }
+
+            let n9 = String(parsed.n9 || '').replace(/[^0-9]/g, '');
+            let n4 = String(parsed.n4 || '').replace(/[^0-9]/g, '');
+            res.json({ reply: formatAutoReply(n9 || 'ESPERAR', n4 || 'ESPERAR'), provider: llm.provider });
+        } catch(e) {
+            console.warn('[AI] JSON parse failed. Raw:', String(result || '').slice(0, 120));
+            if (autoAiContext) {
+                const unavailableDecision = {
+                    ...buildAiUnavailableDecision('unavailable'),
+                    analysis: 'La IA respondio fuera de formato JSON. No se fuerza lectura sin auditor; queda en espera.',
+                    provider: 'llm-invalid-json'
+                };
+                persistAiPredictionRecord(tableId || 0, autoAiContext, unavailableDecision, unavailableDecision, { ...predictionMeta, provider: unavailableDecision.provider });
+                return res.json(unavailableDecision);
+            }
+            res.json({ reply: 'N9: ESPERAR | N4: ESPERAR' });
+        }
+    } catch (error) {
+        const autoAiContext = req.body.autoAiContext || null;
+        const isRateLimit = markLlmRateLimit(error);
+        const unavailableDecision = buildAiUnavailableDecision(isRateLimit ? 'rate_limit' : 'unavailable');
+        if (autoAiContext && !isRateLimit) {
+            persistAiPredictionRecord(tableId || 0, autoAiContext, unavailableDecision, unavailableDecision, { provider: unavailableDecision.provider });
+        }
+        if (isRateLimit) {
+            console.warn('LLM predictor rate limited (429). AI decision paused; no prediction stored.');
+        } else {
+            console.error('LLM predictor error:', error.response?.status || error.message);
+        }
+        res.json({
+            ...unavailableDecision,
+            rateLimited: isRateLimit,
+            model: GROQ_MODEL,
+            rateLimitedUntil: isRateLimit ? new Date(llmRateLimitedUntil).toISOString() : null
+        });
+    }
+});
+
+app.post('/api/ai/chat', async (req, res) => {
+    const { text, tableId, historyStr } = req.body;
+    try {
+        if (getPreferredLlmProvider() === 'none') {
+            return res.json({ reply: 'IA desconectada. Configura OLLAMA o GROQ para el chat.' });
+        }
+
+        const strategyCommand = parseChatStrategyCommand(text, tableId || 'global');
+        if (strategyCommand) {
+            if (strategyCommand.error) {
+                return res.json({ reply: strategyCommand.error });
+            }
+
+            const saved = strategyStore.saveStrategy(strategyCommand.data);
+            if (!saved.ok) {
+                return res.json({ reply: 'No pude guardar esa estrategia. Revisa nombre y resumen.' });
+            }
+
+            return res.json({
+                reply: `Estrategia guardada en la biblioteca: ${saved.strategy.name}.`
+            });
+        }
+
+        if (!aiMemory[tableId]) aiMemory[tableId] = [];
+        // Sanitizar memoria vieja (formato Gemini -> Groq)
+        aiMemory[tableId] = aiMemory[tableId].map(m => {
+            if (m.parts && m.parts[0]) return { role: m.role === 'model' ? 'assistant' : m.role, content: m.parts[0].text };
+            if (!m.content && m.text) return { role: m.role, content: m.text };
+            return m;
+        }).filter(m => m.content && m.role);
+
+        const sysPrompt = `Eres la IA analista de apoyo en la web "ROULETTE CLASSIC". 
+Eres conversacional, directo y casual.
+IMPORTANTE: Si Santi te saluda, SALUDALO de vuelta como un amigo. Si te pregunta algo personal, responde normal.
+NO eres un robot de datos. Eres un compañero humano que TAMBIEN sabe de ruleta.
+Cuando te pregunten sobre la mesa, usas tu conocimiento: SMALL(1-9), BIG(10-18), CW(Derecha), CCW(Izquierda).
+Colores: Verde=Dominancia, Amarillo=Tendencia, Rojo=Caos.
+Si el usuario quiere guardar una estrategia en la biblioteca, dile que use: /estrategia Nombre | resumen | trigger=... | action=... | tags=...
+Responde CORTO, maximo 2-3 oraciones. Sin listas, sin markdown, sin asteriscos.`;
+        const priorTurns = aiMemory[tableId]
+            .slice(-10)
+            .map(item => `${item.role === 'assistant' ? 'IA' : 'Usuario'}: ${item.content}`)
+            .join('\n');
+        const userPrompt = [
+            priorTurns ? `MEMORIA:\n${priorTurns}` : '',
+            historyStr ? `HISTORIAL MESA: ${historyStr}` : '',
+            `USUARIO: ${text}`
+        ].filter(Boolean).join('\n\n');
+
+        const llm = await callPreferredLlm({
+            systemPrompt: sysPrompt,
+            userPrompt,
+            temperature: 0.6,
+            maxTokens: 150,
+            jsonMode: false
+        });
+        
+        const reply = llm.content;
+        aiMemory[tableId].push({ role: "user", content: text });
+        aiMemory[tableId].push({ role: "assistant", content: reply });
+        if (aiMemory[tableId].length > 20) aiMemory[tableId] = aiMemory[tableId].slice(-20);
+
+        res.json({ reply, provider: llm.provider });
+    } catch (error) {
+        console.error('Chat error:', error.response?.status || error.message);
+        res.json({ reply: 'Error de conexion con la IA. Revisa OLLAMA o GROQ.' });
+    }
+});
+
+// Tracker AI endpoint — OpenRouter
+app.post('/api/ai/tracker', async (req, res) => {
+    const { provider, model, apiKey, system, messages } = req.body;
+    console.log('[Tracker AI] Request:', { provider, model, hasKey: !!apiKey, msgCount: messages?.length });
+    try {
+        // Strip non-ASCII characters from API key to prevent ByteString errors
+        const rawKey = (apiKey || process.env.OPENROUTER_API_KEY || '').trim();
+        const key = rawKey.replace(/[^\x00-\x7F]/g, '');
+        if (!key) throw new Error('API key de OpenRouter faltante. Pegala en Config IA o configura OPENROUTER_API_KEY.');
+        const orModel = (model || 'openai/gpt-oss-120b').trim();
+        const orBody = {
+            model: orModel,
+            messages: [{ role: 'system', content: system }, ...messages],
+            temperature: 0.7,
+            max_tokens: 1024
+        };
+        const orHeaders = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + key,
+            'HTTP-Referer': process.env.OPENROUTER_REFERER || 'http://localhost',
+            'X-Title': 'Roulette-Classic'
+        };
+        const orResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: orHeaders,
+            body: JSON.stringify(orBody)
+        });
+        if (!orResp.ok) {
+            const orErr = await orResp.text().catch(() => '');
+            console.error('[Tracker AI] OpenRouter HTTP', orResp.status, orErr);
+            let orFriendly = 'OpenRouter HTTP ' + orResp.status;
+            if (orErr.includes('auth') || orErr.includes('invalid') || orErr.includes('Invalid') || orResp.status === 401) {
+                orFriendly = 'API key de OpenRouter invalida. Revisala en https://openrouter.ai/keys';
+            } else if (orErr.includes('model') || orErr.includes('not found') || orResp.status === 404) {
+                orFriendly = 'Modelo "' + orModel + '" no disponible en OpenRouter.';
+            } else {
+                orFriendly = orErr.substring(0, 200);
+            }
+            throw new Error(orFriendly);
+        }
+        const orData = await orResp.json();
+        const responseText = orData.choices?.[0]?.message?.content || '';
+        console.log('[Tracker AI] OpenRouter success:', orModel, 'response length:', responseText.length);
+        res.json({ success: true, response: responseText });
+    } catch (err) {
+        console.error('[Tracker AI] ERROR:', err.message);
+        res.json({ success: false, error: err.message, provider: provider || 'openrouter' });
+    }
+});
+
+app.get('/api/strategies', (req, res) => {
+    try {
+        const strategies = strategyStore.listStrategies({
+            source: req.query.source,
+            tableId: req.query.tableId,
+            includeInactive: String(req.query.includeInactive || '').toLowerCase() === 'true'
+        });
+        res.json({
+            count: strategies.length,
+            strategies
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/strategies', (req, res) => {
+    try {
+        const saved = strategyStore.saveStrategy({
+            source: req.body.source === 'ai' ? 'ai' : 'human',
+            origin: req.body.origin || 'manual_api',
+            tableId: req.body.tableId || 'global',
+            name: req.body.name,
+            summary: req.body.summary || req.body.note,
+            pattern: req.body.pattern,
+            trigger: req.body.trigger,
+            action: req.body.action,
+            tags: req.body.tags,
+            status: req.body.status
+        });
+
+        if (!saved.ok) {
+            return res.status(400).json({ error: saved.error });
+        }
+
+        res.json({ success: true, strategy: saved.strategy });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/ai/teach', async (req, res) => {
+    const { patternDna, label, suggestedMove } = req.body;
+    try {
+        strategyStore.saveStrategy({
+            source: 'human',
+            origin: 'teach',
+            tableId: req.body.tableId || 'global',
+            name: label || 'Patron humano',
+            summary: suggestedMove || 'Sin movimiento sugerido.',
+            pattern: patternDna || '',
+            trigger: req.body.trigger || '',
+            action: suggestedMove || ''
+        });
+
+        db.addExpertRule({ pattern_dna: patternDna, label, suggested_move: suggestedMove, learned_from: 'human' }, (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, message: 'Conceito aprendido y guardado.' });
+        });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 app.post('/api/spin', async (req, res) => {
-    // ── NODO 1: INGESTA ──
-    const { table_id, number, source, direction, event_id } = req.body;
+    // ── NODO 1: INGESTA SÚPER RÁPIDA ──
+    const { table_id, number, source, direction } = req.body || {};
+    let currentHistory = [];
     if (table_id == null || number == null) return res.status(400).json({ error: 'table_id and number required' });
     if (number < 0 || number > 36) return res.status(400).json({ error: 'number must be 0-36' });
+    const isMongo = db.getUseMongo();
+    if (isMongo) {
+        currentHistory = await Spin.find({ table_id }).sort({ id: -1 }).limit(100).exec();
+        currentHistory.reverse();
+    } else {
+        currentHistory = await new Promise((resolve, reject) => {
+            db.getHistory(table_id, 100, (err, rows) => {
+                if (err) reject(err);
+                else resolve(Array.isArray(rows) ? rows : []);
+            });
+        });
+    }
+    if (isLiveDuplicateSpin(currentHistory, req.body)) {
+        return res.json({ status: 'ignored_duplicate', table_id, number });
+    }
 
-    try {
-        const isMongo = db.getUseMongo();
-        let newSpinId = 1;
-        
-        // DE-DUPLICATION (by event_id or public scraper last number)
-        let earlyReturnId = null;
-        if (isMongo) {
-            if (event_id) {
-                const existing = await Spin.findOne({ event_id, table_id }).lean();
-                if (existing) {
-                    console.log(`[DUPLICATE IGNORED] Table ${table_id}, Event ${event_id} already exists (ID: ${existing.id})`);
-                    return res.json({ id: existing.id, table_id, number, source, note: 'Duplicate by event_id ignored', event_id });
+    // El crawler recibe OK rapido; el frontend espera el evento listo despues de Mongo + metricas.
+    res.json({ status: 'received_fast', table_id, number });
+
+    // ── NODO 2: PROCESAMIENTO ASÍNCRONO (IA, FÍSICA Y BASE DE DATOS) ──
+    // Se ejecuta en background sin bloquear al usuario
+    (async () => {
+        try {
+            if (ntfyCooldowns[table_id] && ntfyCooldowns[table_id] > 0) {
+                ntfyCooldowns[table_id]--;
+            }
+
+            let savedSpinId = null;
+            const numsOnly = currentHistory.map(s => s.number);
+
+            resolvePendingAiPredictions(table_id, number);
+
+            const prevSpin = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1] : null;
+            const prevNumber = prevSpin ? prevSpin.number : null;
+            const physics = agent5.getPhysics(prevNumber, number);
+            const sector = agent5.getSector(number);
+
+            // EVALUACIÓN DE AGENTES DEL TIRO ANTERIOR
+            if (isMongo && prevSpin && prevSpin.predictions) {
+                prevSpin.results = {
+                    agent1_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent1_top),
+                    agent2_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent2_top),
+                    agent3_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent3_top),
+                    agent4_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent4_top)
+                };
+                await prevSpin.save();
+            }
+
+            numsOnly.push(number);
+
+            // PATTERN MEMORY (Mongo focus, JSON-sync skipped for performance)
+            if (isMongo && numsOnly.length >= 6) {
+                try {
+                    const Pattern = require('./models/Pattern');
+                    const last6 = numsOnly.slice(-6); 
+                    const jumps = [];
+                    for (let i = 1; i < last6.length; i++) {
+                        const p = agent5.getPhysics(last6[i-1], last6[i]);
+                        const mag = (p.distance === 'Big' || p.distance === 'ULTRA') ? 'B' : 'S';
+                        let dir = 'CW';
+                        if (p.direction === 'IZQUIERDA') dir = 'CCW';
+                        jumps.push({ mag, dir });
+                    }
+                    const seq = jumps.slice(0, 4);
+                    const outcome = jumps[4];
+                    const seqMag = seq.map(x => x.mag).join('');
+                    const seqDir = seq.map(x => x.dir).join('');
+                    
+                    const newPattern = new Pattern({
+                        table_id: String(table_id),
+                        sequence_mag: seqMag,
+                        sequence_dir: seqDir,
+                        next_mag: outcome.mag,
+                        next_dir: outcome.dir
+                    });
+                    await newPattern.save();
+                } catch (err) { console.error('[DB] Pattern save err:', err.message); }
+            }
+
+            // PREDICCIONES FUTURAS (Optimizado: Cálculo Plano Inmediato)
+            let newPredictions = { agent1_top: null, agent2_top: null, agent3_top: null, agent4_top: null, master_target: null, master_confidence: null, analyst_dir: null, analyst_size: null, zone_magnitude: null, zone_direction: null };
+            if (numsOnly.length >= 3) {
+                const nextRound = predictor.projectNextRound(numsOnly, {});
+                const signature = predictor.computeDealerSignature(numsOnly);
+                const masterSignals = predictor.getIAMasterSignals(nextRound, signature, numsOnly);
+
+                if (masterSignals && masterSignals.length > 0) {
+                    const ag1 = masterSignals.find(s => s.name === 'Android n17');
+                    const ag2 = masterSignals.find(s => s.name === 'Android n16');
+                    const ag3 = masterSignals.find(s => s.name === 'Android 1717');
+                    const ag4 = masterSignals.find(s => s.name === 'N18');
+                    if (ag1) newPredictions.agent1_top = ag1.number;
+                    if (ag2 && ag2.tp !== undefined) newPredictions.agent2_top = ag2.tp;
+                    if (ag3) newPredictions.agent3_top = ag3.number;
+                    if (ag4) newPredictions.agent4_top = ag4.number;
                 }
-            } else if (source === 'public_scraper') {
-                const lastSpin = await Spin.findOne({ table_id }).sort({ id: -1 }).lean();
-                if (lastSpin && lastSpin.number === number) {
-                    console.log(`[DUPLICATE IGNORED] Table ${table_id}, Number ${number} (Source: ${source})`);
-                    return res.json({ id: lastSpin.id, table_id, number, source, note: 'Duplicate by number match ignored' });
+
+                const travels = [];
+                for (let i = 1; i < numsOnly.length; i++) {
+                    travels.push(predictor.getDistance(numsOnly[i-1], numsOnly[i]));
                 }
-            } else if (source === 'bot') {
-                // OCR Anti-Double-Read: Prevent same number within 30 seconds
-                const lastSpin = await Spin.findOne({ table_id }).sort({ id: -1 }).lean();
-                if (lastSpin && lastSpin.number === number) {
-                    const ageMs = lastSpin.timestamp ? (Date.now() - new Date(lastSpin.timestamp).getTime()) : 0;
-                    if (ageMs < 30000) { // 30 seconds
-                        console.log(`[DUPLICATE IGNORED] Table ${table_id}, Number ${number} (OCR too fast: ${ageMs}ms)`);
-                        return res.json({ id: lastSpin.id, table_id, number, source, note: 'Duplicate OCR read ignored' });
+                const analystPred = predictor.analyzeTravelWave(travels);
+                if (analystPred) {
+                    newPredictions.analyst_dir = analystPred.targetDir || null;
+                    newPredictions.analyst_size = analystPred.size || null;
+                }
+                const zonePred = predictor.predictZonePattern(numsOnly, null);
+                if (zonePred) {
+                    newPredictions.zone_magnitude = zonePred.magnitude || null;
+                    newPredictions.zone_direction = zonePred.direction || null;
+                }
+                if (analystPred && zonePred) {
+                    const masterPred = predictor.analyzeMasterConfluence(numsOnly, analystPred, zonePred, {});
+                    if (masterPred) {
+                        newPredictions.master_target = masterPred.target || null;
+                        newPredictions.master_confidence = masterPred.confidence || null;
                     }
                 }
             }
 
-            // ATOMIC ID GENERATION
-            const counter = await Counter.findOneAndUpdate(
-                { id: 'spinId' },
-                { $inc: { seq: 1 } },
-                { returnDocument: 'after', upsert: true }
-            );
-            newSpinId = counter.seq;
-            
-            // QUICK SAVE AND EARLY RESPONSE ("FIRE AND FORGET")
-            const newSpin = new Spin({
-                id: newSpinId,
-                table_id,
-                number,
-                source: source || 'bot',
-                event_id,
-                distance: 0, // Placeholder
-                direction: direction || '--',
-                sector: '--',
-                predictions: {}
-            });
-            await newSpin.save();
-            res.json({ id: newSpinId, table_id, number, source, note: 'Spin logged instantly. Background enrichment started.' });
+            // EXPORTAR A DB PARA QUE CUANDO EL CLIENTE RECARGUE ESTÉ TODO LINCADO
+            if (isMongo) {
+                let savedSpin = null, attempts = 0;
+                while (!savedSpin && attempts < 5) {
+                    try {
+                        const maxSpin = await Spin.findOne().sort('-id').exec();
+                        const newId = maxSpin ? maxSpin.id + 1 : 1;
+                        const newSpin = new Spin({
+                            schema_version: 2,
+                            id: newId,
+                            table_id,
+                            table_code: 'AUTO',
+                            number,
+                            source: source || 'bot',
+                            source_quality: source === 'casino_org_live' ? 'live' : 'manual',
+                            session_id: req.body.session_id || '',
+                            round_key: req.body.round_key || req.body.event_id || '',
+                            event_id: req.body.event_id || null,
+                            raw_history: Array.isArray(req.body.raw_history) ? req.body.raw_history : [],
+                            distance: physics.distance, direction: direction || physics.direction, sector,
+                            predictions: newPredictions,
+                            observed_at: req.body.observed_at || new Date(),
+                            ingested_at: new Date()
+                        });
+                        savedSpin = await newSpin.save();
+                        savedSpinId = savedSpin.id;
+                    } catch (err) {
+                        if (err.code === 11000 && err.keyPattern && err.keyPattern.id) attempts++;
+                        else throw err;
+                    }
+                }
+            } else {
+                savedSpinId = await new Promise(resolve => {
+                    db.addSpin(table_id, number, source || 'bot', {
+                        event_id: req.body.event_id,
+                        source_quality: source === 'casino_org_live' ? 'live' : 'manual',
+                        session_id: req.body.session_id || '',
+                        round_key: req.body.round_key || req.body.event_id || '',
+                        raw_history: Array.isArray(req.body.raw_history) ? req.body.raw_history : [],
+                        observed_at: req.body.observed_at || new Date().toISOString()
+                    }, (err, id) => {
+                        if (err) console.error('[DB] JSON spin save err:', err.message);
+                        resolve(id || null);
+                    });
+                });
+            }
 
-            // BACKGROUND ENRICHMENT (Does not block the API response)
-            processSpinBackground(newSpin, table_id, number, source, direction).catch(err => {
-                console.error(`[BACKGROUND ENRICHMENT FAILED] Spin ${newSpinId}:`, err);
-            });
-        } else {
-            // Fallback SQLite/JSON
-            db.addSpin(table_id, number, source || 'bot', (err, id) => {
-                if (err) return res.status(500).json({ error: err.message });
-                res.json({ id, table_id, number, source, note: 'Saved to fallback DB' });
-            });
-        }
-    } catch (e) {
-        if (e.code === 11000) {
-            console.warn(`[API] Ignored duplicate key error during rapid ingestion.`);
-            return res.status(200).json({ note: 'Duplicate safely ignored.' });
-        }
-        console.error('Pipeline Error:', e);
-        if (!res.headersSent) res.status(500).json({ error: e.message });
-    }
-});
-
-// NON-BLOCKING BACKGROUND TASK (Original Intelligence)
-async function processSpinBackground(newSpin, table_id, number, source, direction) {
-    // Fetch up to 5000 historical spins to enable Deep Pattern Matching for ALL agents
-    const HISTORY_LIMIT = 5000;
-    let currentHistory = await Spin.find({ table_id, id: { $lt: newSpin.id } })
-        .sort({ id: -1 })
-        .limit(HISTORY_LIMIT)
-        .lean();
-    currentHistory = currentHistory.reverse(); // oldest first
-    
-    const numsOnly = currentHistory.map(s => s.number);
-    const prevSpin = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1] : null;
-    
-    // ── NODO 2: PROCESAMIENTO FÍSICO ──
-    const prevNumber = prevSpin ? prevSpin.number : null;
-    const physics = agent5.getPhysics(prevNumber, number);
-    const sector = agent5.getSector(number);
-
-    // EVALUATION (Of previous predictions against current number)
-    if (prevSpin && prevSpin.predictions) {
-        await Spin.updateOne({ _id: prevSpin._id }, {
-            $set: {
-                results: {
-                    agent1_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent1_top, 9),
-                    agent2_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent2_top, 3),
-                    agent3_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent3_top, 9),
-                    agent4_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent4_top, 9),
-                    agent5_result: agent5.evaluatePrediction(number, prevSpin.predictions.agent5_top, 9)
+            if (savedSpinId) {
+                const snapshot = persistIngestMetricSnapshot(table_id, savedSpinId, numsOnly, source || 'bot');
+                persistTableStateSnapshot(table_id, savedSpinId, snapshot);
+                persistDominanceAiPrediction(table_id, savedSpinId, snapshot);
+                if (sseClients[table_id]) {
+                    sseClients[table_id].forEach(client => {
+                        client.write(`data: ${JSON.stringify({ type: 'new_spin', number, spin_id: savedSpinId, ready: true })}\n\n`);
+                    });
+                }
+                
+                // Forest engine: observe which metrics predicted correctly
+                if (snapshot && snapshot.routes) {
+                    try {
+                        const fmem = forest.loadForest();
+                        const ctx = {
+                            stability: snapshot.stability_level || 'red',
+                            pattern: snapshot.pattern_label || 'unknown',
+                            dominant_axis: snapshot.dominant_axis || 'none'
+                        };
+                        const { wheelNeighbors } = require('./src/engine/analytics_snapshot');
+                        const metrics = [
+                            { id: 'cw_n9', target: snapshot.routes.cw?.n9, radius: 9 },
+                            { id: 'cw_n4s', target: snapshot.routes.cw?.n4Small, radius: 4 },
+                            { id: 'cw_n4b', target: snapshot.routes.cw?.n4Big, radius: 4 },
+                            { id: 'ccw_n4s', target: snapshot.routes.ccw?.n4Small, radius: 4 },
+                            { id: 'ccw_n4b', target: snapshot.routes.ccw?.n4Big, radius: 4 }
+                        ];
+                        metrics.forEach(m => {
+                            if (m.target != null && Number.isInteger(m.target)) {
+                                const hit = wheelNeighbors(m.target, m.radius).includes(number);
+                                forest.observe(fmem, ctx, m.id, hit);
+                            }
+                        });
+                    } catch (fe) { /* forest observe non-critical */ }
                 }
             }
+
+        } catch(e) { console.error('[Background Sync Err]', e); }
+    })();
+});
+
+// ── Forest Engine API ────────────────────────────────────
+app.get('/api/forest/discoveries', (req, res) => {
+    try {
+        const fmem = forest.loadForest();
+        const promoted = forest.getPromotedDiscoveries(fmem);
+        const rlContexts = forest.getRlBestContexts(fmem);
+        res.json({
+            total: fmem.discoveries.length,
+            promoted: promoted.length,
+            discoveries: promoted,
+            rlBestContexts: rlContexts
         });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Spin Method API (post-mortem analysis) ──────────────
+app.get('/api/spin-method/analyze/:tableId', async (req, res) => {
+    try {
+        const tableId = req.params.tableId;
+        const results = await spinMethod.analyze(db, tableId);
+        res.json(results);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/spin-method/results', (req, res) => {
+    try {
+        if (fs.existsSync(spinMethod.ANALYSIS_FILE)) {
+            const data = JSON.parse(fs.readFileSync(spinMethod.ANALYSIS_FILE, 'utf8'));
+            res.json(data);
+        } else {
+            res.json({ status: 'no_data', message: 'No hay analisis aun. Ejecuta /api/spin-method/analyze/:tableId' });
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Auto-run analysis every 5 minutes ──────────────────
+setInterval(async () => {
+    try {
+        await spinMethod.analyze(db, 1);
+    } catch (e) { /* silent */ }
+}, 5 * 60 * 1000);
+
+// Batch import (for manual/automatic history sync)
+app.post('/api/spin/batch', async (req, res) => {
+    const { table_id, numbers, source } = req.body || {};
+    if (!table_id || !Array.isArray(numbers)) {
+        return res.status(400).json({ error: 'table_id and numbers[] required' });
     }
 
-    numsOnly.push(number);
-
-    // ── NODO 3: IA & AGENTES (Predicciones para el FUTURO) ──
-    let newPredictions = { agent1_top: null, agent2_top: null, agent3_top: null, agent4_top: null, agent5_top: null };
-
-    if (numsOnly.length >= 3) {
-        const stats = {};
-        // Only analyze last 50 spins in the loop to avoid timeout
-        const analysisWindow = numsOnly.slice(-50);
-        for (let i = 2; i < analysisWindow.length; i++) {
-            predictor.analyzeSpin(analysisWindow.slice(0, i + 1), stats);
-        }
-        
-        const nextRound = predictor.projectNextRound(numsOnly, stats);
-        const signature = predictor.computeDealerSignature(numsOnly);
-        const masterSignals = predictor.getIAMasterSignals(nextRound, signature, numsOnly);
-
-        if (masterSignals && masterSignals.length > 0) {
-            const ag1 = masterSignals.find(s => s.name === 'Android n17');
-            const ag2 = masterSignals.find(s => s.name === 'Android n16');
-            const ag3 = masterSignals.find(s => s.name === 'Android 1717');
-            const ag4 = masterSignals.find(s => s.name === 'N18');
-            
-            if (ag1) newPredictions.agent1_top = ag1.number;
-            if (ag2 && ag2.tp !== undefined) newPredictions.agent2_top = ag2.tp;
-            if (ag3) newPredictions.agent3_top = ag3.number;
-            if (ag4) newPredictions.agent4_top = ag4.number;
-        }
-
-        // ORIGINAL Célula (Androide Célula) Call - UNTOUCHED LOGIC
-        const ag5Result = await agent5.predictAgent5(table_id, numsOnly, masterSignals);
-        if (ag5Result) {
-            newPredictions.agent5_top = ag5Result.topNum;
-            newPredictions.agent5_dna = ag5Result.dnaMatch; 
-        }
-    }
-
-    await Spin.updateOne({ _id: newSpin._id }, {
-        $set: {
-            distance: physics.distance,
-            direction: direction || physics.direction,
-            sector: sector,
-            predictions: newPredictions,
-            pattern_code: (masterSignals && masterSignals[0]) ? masterSignals[0].patternCode : null,
-            streak_count: (masterSignals && masterSignals[0]) ? masterSignals[0].streakCount : 0
-        }
-    });
-
-    console.log(`✅ [BKG] Processed spin ${newSpin.id} | Result: ${number} | AI done.`);
-}
-
-// Batch import (for OCR auto-capture)
-app.post('/api/spin/batch', (req, res) => {
-    const { table_id, numbers, source } = req.body;
-    if (!table_id || !Array.isArray(numbers)) return res.status(400).json({ error: 'table_id and numbers[] required' });
     let inserted = 0;
     const errors = [];
-    const done = () => {
-        if (inserted + errors.length === numbers.length) {
-            res.json({ inserted, errors });
-        }
-    };
-    if (numbers.length === 0) return res.json({ inserted: 0, errors: [] });
-    numbers.forEach(n => {
-        if (n < 0 || n > 36) { errors.push(n); return done(); }
-        db.addSpin(table_id, n, source || 'ocr', (err) => {
-            if (err) errors.push(n); else inserted++;
-            done();
+    const cleanNumbers = numbers
+        .map(n => Number(n))
+        .filter(n => Number.isInteger(n));
+    let rollingHistory = await new Promise(resolve => {
+        db.getHistory(table_id, 100, (err, rows) => {
+            if (err || !Array.isArray(rows)) return resolve([]);
+            resolve(rows.map(row => Number(row.number)).filter(n => Number.isInteger(n)));
         });
+    });
+
+    for (const n of cleanNumbers) {
+        if (n < 0 || n > 36) {
+            errors.push(n);
+            continue;
+        }
+
+        let savedBatchSpinId = null;
+        await new Promise(resolve => {
+            db.addSpin(table_id, n, source || 'batch', {}, (err, id) => {
+                if (err) errors.push({ number: n, error: err.message });
+                else {
+                    inserted++;
+                    savedBatchSpinId = id || null;
+                }
+                resolve();
+            });
+        });
+
+        if (savedBatchSpinId || source === 'batch') {
+            resolvePendingAiPredictions(table_id, n);
+            rollingHistory.push(n);
+            const snapshot = persistIngestMetricSnapshot(table_id, savedBatchSpinId, rollingHistory, source || 'batch');
+            persistTableStateSnapshot(table_id, savedBatchSpinId, snapshot);
+            persistDominanceAiPrediction(table_id, savedBatchSpinId, snapshot);
+        }
+    }
+
+    if (sseClients[table_id]) {
+        sseClients[table_id].forEach(client => {
+            client.write(`data: ${JSON.stringify({ type: 'batch_load', inserted })}\n\n`);
+        });
+    }
+
+    res.json({ inserted, errors });
+});
+
+app.delete('/api/history/:tableId', (req, res) => {
+    db.clearHistory(req.params.tableId, (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
     });
 });
 
-app.delete('/api/history/:tableId', async (req, res) => {
+app.get('/api/history/:tableId', async (req, res) => {
+    const tableId = req.params.tableId;
+    const limit = parseInt(req.query.limit) || 100;
     try {
-        const isMongo = db.getUseMongo();
-        if (isMongo) {
-            await Spin.deleteMany({ table_id: req.params.tableId });
-            // Reset the counter after wipe
-            await Counter.findOneAndUpdate(
-                { id: 'spinId' },
-                { $set: { seq: 0 } },
-                { upsert: true }
-            );
-            console.log(`[WIPE] Deleted all spins for table ${req.params.tableId}`);
-            return res.json({ success: true, message: 'MongoDB data cleared' });
-        } else {
-            db.clearHistory(req.params.tableId, (err) => {
-                if (err) return res.status(500).json({ error: err.message });
-                res.json({ success: true });
-            });
-        }
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// WIPE ALL spins across all tables
-app.delete('/api/wipe-all', async (req, res) => {
-    try {
-        const isMongo = db.getUseMongo();
-        if (!isMongo) return res.status(400).json({ error: 'Only available in MongoDB mode' });
-        const result = await Spin.deleteMany({});
-        await Counter.findOneAndUpdate(
-            { id: 'spinId' },
-            { $set: { seq: 0 } },
-            { upsert: true }
-        );
-        console.log(`[WIPE ALL] Deleted ${result.deletedCount} spins.`);
-        return res.json({ success: true, deleted: result.deletedCount });
-    } catch(e) {
+        db.getHistory(tableId, limit, (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(rows || []);
+        });
+    } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
@@ -336,10 +2061,11 @@ app.get('/api/predict/:tableId', async (req, res) => {
         let spins = [];
         const isMongo = db.getUseMongo();
         if (isMongo) {
-            spins = await Spin.find({ table_id: tableId }).sort({ id: 1 }).exec();
+            spins = await Spin.find({ table_id: tableId }).sort({ id: -1 }).limit(100).exec();
+            spins.reverse();
         } else {
             spins = await new Promise((resolve, reject) => {
-                db.getHistory(tableId, null, (err, rows) => {
+                db.getHistory(tableId, 100, (err, rows) => {
                     if (err) reject(err); else resolve(rows);
                 });
             });
@@ -347,12 +2073,8 @@ app.get('/api/predict/:tableId', async (req, res) => {
         const numsOnly = spins.map(s => s.number);
         if (numsOnly.length < 3) return res.json({ agent5_top: null, message: 'Not enough data' });
 
-        // Full prediction pipeline
-        const stats = {};
-        for (let i = 2; i < numsOnly.length; i++) {
-            predictor.analyzeSpin(numsOnly.slice(0, i + 1), stats);
-        }
-        const nextRound = predictor.projectNextRound(numsOnly, stats);
+        // Fast prediction pipeline (No 400-spin history loop)
+        const nextRound = predictor.projectNextRound(numsOnly, {});
         const signature = predictor.computeDealerSignature(numsOnly);
         const masterSignals = predictor.getIAMasterSignals(nextRound, signature, numsOnly);
         
@@ -367,9 +2089,22 @@ app.get('/api/predict/:tableId', async (req, res) => {
             if (ag3) predictions.agent3_top = ag3.number;
             if (ag4) predictions.agent4_top = ag4.number;
         }
-        if (isMongo) {
-            predictions.agent5_top = await agent5.predictAgent5(tableId, numsOnly);
+
+        // Agent 5 Neural Logic (V5 Learning)
+        const jumpsA5 = [];
+        for (let i = 1; i < numsOnly.slice(-5).length; i++) {
+            const p = agent5.getPhysics(numsOnly.slice(-5)[i-1], numsOnly.slice(-5)[i]);
+            jumpsA5.push({ mag: (p.distance==='Big'||p.distance==='ULTRA')?'B':'S', dir: p.direction==='IZQUIERDA'?'CCW':'CW' });
         }
+        const seqMA5 = jumpsA5.map(x=>x.mag).join('');
+        const seqDA5 = jumpsA5.map(x=>x.dir).join('');
+        const dnaA5 = `${seqMA5}|${seqDA5}`;
+
+        const expert = await new Promise(r => db.getExpertRule(dnaA5, (err, rule) => r(rule)));
+        const stats = await new Promise(r => db.getPatternStats(tableId, seqMA5, seqDA5, (err, s) => r(s)));
+        
+        predictions.agent5_top = await agent5.predictAgent5(numsOnly, expert, stats);
+        
         res.json(predictions);
     } catch (e) {
         console.error('Predict endpoint error:', e);
@@ -377,19 +2112,18 @@ app.get('/api/predict/:tableId', async (req, res) => {
     }
 });
 
-// Admin endpoint to wipe DB without shell (Free tier Render doesn't have shell)
-app.get('/api/admin/wipe-all-spins-securely', async (req, res) => {
+app.get('/api/admin/fix-urls', async (req, res) => {
     try {
         if (db.getUseMongo()) {
-            const result = await Spin.deleteMany({});
-            res.send(`✅ [ADMIN] MongoDB: Historial borrado. Se eliminaron ${result.deletedCount} registros.`);
+            const Table = require('./models/Table');
+            await Table.updateOne({ id: 1 }, { $set: { url: 'https://www.casino.org/casinoscores/es/auto-roulette/' } });
+            await Table.updateOne({ id: 2 }, { $set: { url: 'https://www.casino.org/casinoscores/es/immersive-roulette/' } });
+            res.send('✅ URLs de MongoDB Atlas actualizadas a Casino.org.');
         } else {
-            // Wipe local JSON too
-            db.wipeAllSpins(() => {});
-            res.send('✅ [ADMIN] Local JSON: Historial borrado.');
+            res.send('⚠️ No se está usando MongoDB, cambio ignorado.');
         }
     } catch (e) {
-        res.status(500).send(`❌ Error en el wipe: ${e.message}`);
+        res.status(500).send('❌ Error: ' + e.message);
     }
 });
 
@@ -397,19 +2131,26 @@ app.get('/api/admin/wipe-all-spins-securely', async (req, res) => {
 app.delete('/api/wipe-all', async (req, res) => {
     try {
         console.log('🧹 [Wipe All] Triggering full database cleaning...');
-        if (db.getUseMongo()) {
-            const result = await Spin.deleteMany({});
-            res.json({ success: true, deleted: result.deletedCount, message: `Borrados ${result.deletedCount} registros de MongoDB.` });
-        } else {
-            db.wipeAllSpins((err) => {
-                if (err) return res.status(500).json({ error: err.message });
-                res.json({ success: true, message: 'Historial local vaciado.' });
+        db.wipeAllSpins((err, gen) => {
+            if (err) return res.status(500).json({ error: err.message });
+            // Broadcast wipe to ALL connected devices so they clear instantly
+            Object.keys(sseClients).forEach(tableId => {
+                sseClients[tableId].forEach(client => {
+                    try { client.write('data: {"type":"wipe"}\n\n'); } catch(e) {}
+                });
             });
-        }
+            console.log('[Wipe All] SSE wipe broadcast enviado a todos los dispositivos conectados.');
+            res.json({ success: true, message: 'Base operativa vaciada por completo.', wipeGeneration: gen });
+        });
     } catch (e) {
         console.error('Wipe failed:', e);
         res.status(500).json({ error: e.message });
     }
+});
+
+// Get wipe generation (for cross-device sync)
+app.get('/api/wipe-generation', (req, res) => {
+    res.json({ wipeGeneration: db.getWipeGeneration() });
 });
 
 app.get('/api/stats/:tableId', (req, res) => {
@@ -419,12 +2160,97 @@ app.get('/api/stats/:tableId', (req, res) => {
     });
 });
 
+// ─── Sync Log: append V1/V2 results per spin (ligero, incremental) ───
+app.post('/api/sync-log/:tableId', (req, res) => {
+    try {
+        db.appendSyncLog(req.params.tableId, req.body);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/sync-log/:tableId', (req, res) => {
+    try {
+        const afterIdx = parseInt(req.query.localCount || '0');
+        const data = db.getSyncLog(req.params.tableId, afterIdx);
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Legacy endpoints (backward compat) ───
+app.get('/api/sync-state/:tableId', (req, res) => {
+    try {
+        const data = db.getV1V2History(req.params.tableId);
+        res.json(data || { analyst: [], master: [], analystV2: [], sniperV2: [] });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/sync-state/:tableId', (req, res) => {
+    try {
+        db.saveV1V2History(req.params.tableId, req.body);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/v1v2-history/:tableId', (req, res) => {
+    try {
+        const data = db.getV1V2History(req.params.tableId);
+        res.json(data || { analyst: [], master: [], analystV2: [], sniperV2: [] });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/v1v2-history/:tableId', (req, res) => {
+    try {
+        db.saveV1V2History(req.params.tableId, req.body);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════ NUKE: Wipe total via navegador ═══════════
+app.get('/nuke', async (req, res) => {
+    try {
+        db.wipeAllSpins((err) => {
+            if (err) console.error('Nuke DB error:', err);
+            // Broadcast wipe to all connected SSE clients
+            Object.keys(sseClients).forEach(tableId => {
+                sseClients[tableId].forEach(client => {
+                    try { client.write('data: {"type":"wipe"}\n\n'); } catch(e) {}
+                });
+            });
+        });
+        res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>NUKE</title>
+<style>body{background:#0a0e1a;color:#f55;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;font-size:18px;text-align:center;}</style></head>
+<body><div><p>&#9762;&#65039; LIMPIANDO TODO...</p><small id="msg"></small></div>
+<script>
+(function(){
+    var keys = Object.keys(localStorage).filter(function(k){ return k.startsWith('clasi_roulette_'); });
+    var el = document.getElementById('msg');
+    el.innerText = 'Borrando ' + keys.length + ' keys de localStorage...';
+    keys.forEach(function(k){ localStorage.removeItem(k); });
+    localStorage.clear();
+    sessionStorage.clear();
+    setTimeout(function(){ el.innerText = 'Hecho. Redirigiendo...'; setTimeout(function(){ location.href='/'; }, 800); }, 400);
+})();
+</script></body></html>`);
+    } catch(e) { res.status(500).send('Error: ' + e.message); }
+});
+
+// Catch-all: Siempre servir el frontend para cualquier ruta no reconocida (Middleware final)
+app.use((req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 // ---- Start ----
+
 const server = app.listen(PORT, '0.0.0.0', async () => {
+    await databaseReady;
     console.log(`\n🎰 Roulette Predictor Server running at http://0.0.0.0:${PORT}`);
     console.log(`   API ready at:          http://0.0.0.0:${PORT}/api/\n`);
+    console.log(`[AI] Provider preference: ${getPreferredLlmProvider()} | Ollama: ${hasOllamaConfigured() ? OLLAMA_BASE_URL : 'not configured'} | Auto remote analysis: ${AUTO_AI_REMOTE_ANALYSIS}`);
     
-    // 🔥 CRITICAL: Update table names if they exist but have old names (for Mongo)
     if (db.getUseMongo()) {
         try {
             const Table = require('./models/Table');
@@ -436,7 +2262,15 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
         }
     }
 
-    if (!process.env.DISABLE_BOTS) {
-        require('./start-bots.js')(PORT);
+    if (String(process.env.DISABLE_BOTS || '').toLowerCase() === 'true') {
+        console.log('[BOOT] Automatic casino.org crawler disabled by DISABLE_BOTS=true.');
+    } else {
+        try {
+            console.log('[BOOT] Starting automatic casino.org crawler...');
+            require('./start-bots.js')(PORT);
+        } catch (e) {
+            console.error('[BOOT] Failed to start crawler:', e.message);
+        }
     }
 });
+

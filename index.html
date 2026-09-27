@@ -1,122 +1,1219 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-    <title>ROULETTE PREDICTOR PRO</title>
-    <link rel="stylesheet" href="styles.css" />
+    <title>ONEMILLON ROULETTE</title>
+    <link rel="stylesheet" href="styles.css?v=1018" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
-</head>
+    <style>
+    /* Compact travel table */
+    .travel-section { width: 100%; max-width: 100%; }
+    .travel-table { width:100%; border-collapse:collapse; table-layout: fixed; }
+    .travel-table th, .travel-table td { padding:1px 3px; font-size:9px; }
+    .travel-table-wrap { max-height:140px; overflow-y:auto; overflow-x:hidden; }
+
+    /* ===== LANDING PAGE ===== */
+    #landing-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: linear-gradient(135deg, #0a0a0a 0%, #0d1117 50%, #0a0a0a 100%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 28px;
+        padding: 20px;
+    }
+    .landing-title {
+        font-family: 'Inter', sans-serif;
+        font-weight: 900;
+        font-size: 2.6rem;
+        color: #fff;
+        text-align: center;
+        letter-spacing: -1px;
+        text-shadow: 0 0 40px rgba(0,229,200,0.25);
+    }
+    .landing-subtitle {
+        font-family: 'Inter', sans-serif;
+        font-size: 0.95rem;
+        color: var(--muted);
+        text-align: center;
+        max-width: 420px;
+        line-height: 1.5;
+    }
+    .landing-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+        width: 100%;
+        max-width: 760px;
+    }
+    .landing-card {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 16px;
+        padding: 24px 20px;
+        text-align: center;
+        cursor: pointer;
+        transition: all 0.25s ease;
+        position: relative;
+        overflow: hidden;
+    }
+    .landing-card:hover {
+        background: rgba(0,229,200,0.04);
+        border-color: rgba(0,229,200,0.25);
+        transform: translateY(-3px);
+        box-shadow: 0 8px 32px rgba(0,229,200,0.12);
+    }
+    .landing-card-icon {
+        font-size: 2.2rem;
+        margin-bottom: 10px;
+        display: block;
+    }
+    .landing-card-title {
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        font-size: 1.15rem;
+        color: #fff;
+        margin-bottom: 6px;
+    }
+    .landing-card-desc {
+        font-size: 0.78rem;
+        color: var(--muted);
+        line-height: 1.4;
+    }
+    .landing-card-badge {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        font-size: 0.65rem;
+        font-weight: 700;
+        padding: 2px 7px;
+        border-radius: 20px;
+        text-transform: uppercase;
+    }
+    .badge-live { background: rgba(48,224,144,0.15); color: var(--green); border: 1px solid rgba(48,224,144,0.25); }
+    .badge-manual { background: rgba(240,192,64,0.15); color: var(--gold); border: 1px solid rgba(240,192,64,0.25); }
+    .badge-tracker { background: rgba(0,229,200,0.12); color: var(--accent); border: 1px solid rgba(0,229,200,0.25); }
+
+    /* ===== MODE PANELS ===== */
+    .mode-panel {
+        display: none;
+        width: 100%;
+        height: 100%;
+    }
+    .mode-panel.active {
+        display: block;
+    }
+    .mode-header-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 14px;
+        background: rgba(0,0,0,0.25);
+        border-bottom: 1px solid var(--border);
+    }
+    .mode-header-bar .mode-title {
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        font-size: 0.85rem;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .btn-back {
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.1);
+        color: var(--text2);
+        font-size: 0.75rem;
+        padding: 4px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .btn-back:hover {
+        background: rgba(255,255,255,0.1);
+        color: #fff;
+    }
+
+    /* ===== MANUAL MODE ===== */
+    .manual-input-wrap {
+        display: flex;
+        gap: 8px;
+        padding: 12px 14px;
+        background: rgba(0,0,0,0.15);
+        border-bottom: 1px solid var(--border);
+    }
+    .manual-input-wrap input {
+        flex: 1;
+        background: rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.08);
+        color: #fff;
+        font-family: var(--mono);
+        font-size: 0.9rem;
+        padding: 8px 12px;
+        border-radius: 8px;
+        outline: none;
+    }
+    .manual-input-wrap input:focus {
+        border-color: var(--accent);
+    }
+    .btn-action {
+        background: linear-gradient(135deg, var(--accent), #00c8a8);
+        border: none;
+        color: #000;
+        font-weight: 700;
+        font-size: 0.8rem;
+        padding: 8px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: opacity 0.2s;
+    }
+    .btn-action:hover { opacity: 0.85; }
+    .btn-action-secondary {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.1);
+        color: var(--text2);
+        font-size: 0.75rem;
+        padding: 8px 14px;
+        border-radius: 8px;
+        cursor: pointer;
+    }
+    .manual-history-strip {
+        padding: 8px 14px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        max-height: 80px;
+        overflow-y: auto;
+        background: rgba(0,0,0,0.08);
+        border-bottom: 1px solid var(--border);
+    }
+    .manual-history-strip .ball {
+        width: 26px; height: 26px;
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-family: var(--mono);
+        font-size: 0.7rem;
+        font-weight: 700;
+        color: #fff;
+        flex-shrink: 0;
+    }
+
+    /* ===== TRACKER MODE (based on user image) ===== */
+    .tracker-shell-compact {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 8px 10px;
+    }
+    .tracker-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--border);
+    }
+    .tracker-header-title {
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        font-size: 0.95rem;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .tracker-status-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .tracker-status-badge {
+        font-size: 0.65rem;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .status-active { background: rgba(48,224,144,0.15); color: var(--green); border: 1px solid rgba(48,224,144,0.3); }
+    .status-placed { background: rgba(0,229,200,0.15); color: var(--accent); border: 1px solid rgba(0,229,200,0.3); }
+    .status-wait { background: rgba(255,255,255,0.06); color: var(--muted); border: 1px solid rgba(255,255,255,0.1); }
+
+    .tracker-control-panel {
+        background: rgba(0,0,0,0.22);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-family: var(--mono);
+    }
+    .tracker-control-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.62rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        margin-bottom: 8px;
+    }
+    .tracker-version { color: var(--text2); font-weight: 500; }
+    .tracker-status-badge {
+        font-size: 0.55rem;
+        padding: 2px 6px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 700;
+    }
+    .tracker-control-row {
+        font-size: 0.72rem;
+        color: var(--text2);
+        margin-bottom: 4px;
+        line-height: 1.3;
+    }
+    .tracker-control-label {
+        color: var(--muted);
+        margin-right: 4px;
+    }
+    .tracker-control-value {
+        color: #fff;
+        font-weight: 600;
+    }
+    .tracker-status-active { color: var(--green); }
+    .tracker-control-hint {
+        color: var(--muted);
+        font-size: 0.62rem;
+    }
+    .tracker-btn-mode {
+        font-size: 0.6rem;
+        padding: 4px 8px;
+        min-width: 36px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(255,255,255,0.03);
+        color: var(--muted);
+        border-radius: 5px;
+        cursor: pointer;
+        text-transform: uppercase;
+        font-family: var(--mono);
+        letter-spacing: 0.5px;
+    }
+    .tracker-btn-mode:hover { background: rgba(255,255,255,0.06); color: #fff; }
+    .tracker-btn-mode.active { background: rgba(255,255,255,0.1); color: #fff; border-color: var(--accent); }
+
+    .tracker-chart-wrap {
+        background: rgba(0,0,0,0.25);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 10px;
+        padding: 6px 8px;
+        flex: 1;
+        min-height: 160px;
+        display: flex;
+        flex-direction: column;
+    }
+    .tracker-chart-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+    }
+    .tracker-chart-label {
+        font-size: 0.7rem;
+        color: var(--muted);
+        font-weight: 600;
+    }
+    .tracker-chart-scale {
+        font-family: var(--mono);
+        font-size: 0.65rem;
+        color: var(--muted);
+    }
+    #trackerChart {
+        flex: 1;
+        width: 100%;
+        border-radius: 6px;
+    }
+
+    .tracker-controls {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .tracker-btn {
+        flex: 1;
+        min-width: 120px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        font-weight: 700;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.2s;
+        border: none;
+        text-align: center;
+    }
+    .tracker-btn-toggle {
+        background: rgba(48,224,144,0.1);
+        border: 1px solid rgba(48,224,144,0.25);
+        color: var(--green);
+    }
+    .tracker-btn-toggle.off {
+        background: rgba(255,59,92,0.08);
+        border: 1px solid rgba(255,59,92,0.2);
+        color: #f55;
+    }
+    .tracker-btn-primary {
+        background: linear-gradient(135deg, var(--accent), #00c8a8);
+        color: #000;
+    }
+    .tracker-btn-secondary {
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.1);
+        color: var(--text2);
+    }
+
+    .tracker-last-spins {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        padding: 6px 0;
+    }
+    .tracker-spin-chip {
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px;
+        padding: 3px 8px;
+        font-family: var(--mono);
+        font-size: 0.7rem;
+        color: var(--text2);
+    }
+
+    /* â•â• TRACKER TOOLBAR â•â• */
+    .tracker-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 4px 0;
+    }
+    .tracker-source-toggle {
+        display: flex;
+        gap: 4px;
+        flex: 1;
+    }
+    .tgl-btn {
+        flex: 1;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        color: var(--muted);
+        font-size: 0.65rem;
+        font-weight: 700;
+        padding: 4px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .tgl-btn.active {
+        background: rgba(0,229,200,0.12);
+        border-color: rgba(0,229,200,0.3);
+        color: var(--accent);
+    }
+    .tracker-cog {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        color: var(--text2);
+        font-size: 1rem;
+        width: 30px; height: 30px;
+        border-radius: 6px;
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .tracker-cog:hover { background: rgba(255,255,255,0.08); }
+
+    /* â•â• CONFIG PANEL â•â• */
+    .tracker-config-panel {
+        background: rgba(0,0,0,0.18);
+        border: 1px solid rgba(0,229,200,0.12);
+        border-radius: 8px;
+        padding: 8px 10px;
+        animation: fadeIn 0.2s ease;
+    }
+    .tracker-select, .tracker-input {
+        flex: 1;
+        background: rgba(0,0,0,0.25);
+        border: 1px solid rgba(255,255,255,0.08);
+        color: #fff;
+        font-size: 0.7rem;
+        padding: 4px 6px;
+        border-radius: 5px;
+        outline: none;
+    }
+    .tracker-select:focus, .tracker-input:focus { border-color: var(--accent); }
+
+    /* â•â• CHAT BOX â•â• */
+    .tracker-chat-box {
+        background: rgba(0,0,0,0.15);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        max-height: 160px;
+        overflow: hidden;
+    }
+    .tracker-chat-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.7rem;
+        font-weight: 700;
+        color: var(--accent);
+    }
+    .tracker-chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 6px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+    .tracker-msg {
+        font-size: 0.72rem;
+        line-height: 1.4;
+        padding: 5px 8px;
+        border-radius: 6px;
+        max-width: 92%;
+    }
+    .ai-msg {
+        background: rgba(0,229,200,0.06);
+        border: 1px solid rgba(0,229,200,0.15);
+        color: var(--text);
+        align-self: flex-start;
+    }
+    .user-msg {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.1);
+        color: var(--text2);
+        align-self: flex-end;
+    }
+    .tracker-chat-input-row {
+        display: flex;
+        gap: 4px;
+        padding: 4px 6px;
+        border-top: 1px solid var(--border);
+    }
+    .tracker-chat-input {
+        flex: 1;
+        background: rgba(0,0,0,0.2);
+        border: 1px solid rgba(255,255,255,0.08);
+        color: #fff;
+        font-size: 0.72rem;
+        padding: 4px 8px;
+        border-radius: 5px;
+        outline: none;
+    }
+    .tracker-chat-input:focus { border-color: var(--accent); }
+    .tracker-chat-send {
+        background: linear-gradient(135deg, var(--accent), #00c8a8);
+        border: none;
+        color: #000;
+        font-weight: 700;
+        font-size: 0.7rem;
+        width: 26px; height: 26px;
+        border-radius: 5px;
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .tracker-chat-mic {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.1);
+        color: var(--text2);
+        font-size: 0.8rem;
+        width: 26px; height: 26px;
+        border-radius: 5px;
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        transition: all 0.2s;
+        flex-shrink: 0;
+    }
+    .tracker-chat-mic:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    .tracker-chat-mic.recording {
+        background: rgba(255,59,92,0.2);
+        border-color: rgba(255,59,92,0.4);
+        color: #f55;
+        animation: micPulse 1s infinite;
+    }
+    @keyframes micPulse {
+        0% { box-shadow: 0 0 0 0 rgba(255,59,92,0.3); }
+        70% { box-shadow: 0 0 0 8px rgba(255,59,92,0); }
+        100% { box-shadow: 0 0 0 0 rgba(255,59,92,0); }
+    }
+    @keyframes fadeIn { from { opacity:0; transform: translateY(-4px); } to { opacity:1; transform: translateY(0); } }
+</style>
+
+
 <body>
-<div class="app-shell">
 
-    <!-- ═══ TOP BAR ═══ -->
-    <header class="top-bar">
-        <div class="top-bar-left">
-            <span class="app-logo">🎰</span>
-            <span class="app-title">ROULETTE PRO</span>
+<!-- â•â•â• LANDING PAGE â•â•â• -->
+<div id="landing-overlay">
+    <div class="landing-title">ONEMILLON</div>
+    <div class="landing-subtitle">Elige tu modo de operaciÃ³n. Sincroniza con casino en vivo, ingresa nÃºmeros manualmente, o usa el Tracker de viaje.</div>
+    <div class="landing-grid">
+        <div class="landing-card" onclick="activateMode('manual')">
+            <span class="landing-card-badge badge-manual">Offline</span>
+            <span class="landing-card-icon">&#x270F;&#xFE0F;</span>
+            <div class="landing-card-title">MANUAL</div>
+            <div class="landing-card-desc">Ingresa nÃºmeros a mano y visualiza Travel, predicciones y anÃ¡lisis completo sin conexiÃ³n.</div>
         </div>
-        <div class="top-bar-right">
-            <select id="table-select" class="compact-select"></select>
-            <button id="wipe-btn" onclick="wipeAllData()" style="background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b;border-radius:4px;padding:3px 8px;font-size:10px;cursor:pointer;font-weight:700;">🗑 WIPE DATA</button>
-            <span class="live-clock" id="live-clock">00:00:00</span>
+        <div class="landing-card" onclick="activateMode('live')">
+            <span class="landing-card-badge badge-live">Online</span>
+            <span class="landing-card-icon">&#x1F534;</span>
+            <div class="landing-card-title">LIVE</div>
+            <div class="landing-card-desc">SincronizaciÃ³n en tiempo real con casino.org. Todos los agentes, Sniper, Analyst y Dashboard.</div>
         </div>
-    </header>
-
-    <!-- ═══ VISUAL PANEL (Wheel + Mini History) ═══ -->
-    <section class="visual-panel-mini">
-        <div class="wheel-container">
-            <canvas id="wheel-canvas" width="130" height="130"></canvas>
+        <div class="landing-card" onclick="activateMode('tracker')">
+            <span class="landing-card-badge badge-tracker">Focus</span>
+            <span class="landing-card-icon">&#x1F4CA;</span>
+            <div class="landing-card-title">TRACKER</div>
+            <div class="landing-card-desc">Panel exclusivo de viaje. GrÃ¡fico de lÃ­nea -20 a +20, predicciÃ³n, auto-bet y estados en tiempo real.</div>
         </div>
-        <div id="history-strip-mini" class="history-strip-mini">
-            <!-- Last 15 numbers (ball style) -->
-        </div>
-    </section>
-
-    <!-- ═══ AGENT TABS ═══ -->
-    <nav class="agent-tab-bar" id="strat-tabs"></nav>
-
-    <!-- ═══ AGENT CARD ═══ -->
-    <section class="agent-card" id="agent-card">
-        <div class="agent-card-header">
-            <span class="agent-icon">🤖</span>
-            <span class="agent-card-name" id="active-agent-name">ANDROID N17</span>
-            <span class="agent-confidence" id="agent-confidence">0%</span>
-        </div>
-        <div class="agent-dominance-row" id="agent-dominance" style="font-size: 10px; color: var(--accent); margin-top: 4px; text-transform: uppercase;">SELECCIONA UNA MESA...</div>
-
-        <div class="agent-strategy-label" id="agent-strategy">--</div>
-
-        <!-- Wheel dots (visual flair) -->
-        <div class="wheel-dots">
-            <span class="wd"></span><span class="wd"></span><span class="wd"></span>
-        </div>
-
-        <div class="agent-status-row" id="agent-status-row">
-            <span class="status-line" id="agent-status"></span>
-        </div>
-        <div class="agent-sync-row" id="agent-sync"></div>
-
-        <!-- 3-Column Prediction Grid -->
-        <div class="prediction-grid-3" id="prediction-grid">
-            <div class="p-box pb-left">
-                <span class="p-label">SMALL</span>
-                <span class="p-val" id="psn-small-val">--</span>
-                <span class="p-sub">n4</span>
-            </div>
-            <div class="p-box pb-center">
-                <div class="p-val-main" id="target-number">--</div>
-                <div class="p-sub-main" id="pi-radius">n9</div>
-                <div class="p-tendency" id="pi-tendency">TENDENCIA: --</div>
-            </div>
-            <div class="p-box pb-right">
-                <span class="p-label">BIG</span>
-                <span class="p-val" id="psn-big-val">--</span>
-                <span class="p-sub">n4</span>
-            </div>
-        </div>
-
-        <div class="agent-footer-stats">
-            <span class="st">W:<span id="agent-wins">0</span> L:<span id="agent-losses">0</span></span>
-            <span class="status-msg" id="agent-status-msg">SOPORTE BIG N9</span>
-        </div>
-
-        <!-- Long-form performance string (WWLL...) -->
-        <div class="performance-string" id="agent-performance">
-            <!-- Filled by JS -->
-        </div>
-    </section>
-
-    <!-- ═══ TRAVEL DATA ═══ -->
-    <section class="travel-section">
-        <div class="travel-top-bar">
-            <span class="section-title">📊 TRAVEL DATA</span>
-            <div class="travel-badges">
-                <span class="badge badge-stable" id="travel-pattern">ESTABLE</span>
-                <span class="badge badge-zone" id="travel-last-zone">LAST: --</span>
-            </div>
-        </div>
-        <div class="travel-table-wrap">
-            <table class="travel-table">
-                <thead>
-                    <tr>
-                        <th>N°</th>
-                        <th>DIST</th>
-                        <th>DIR</th>
-                        <th>PHASE</th>
-                    </tr>
-                </thead>
-                <tbody id="travel-tbody">
-                    <tr><td colspan="4" class="muted">Selecciona una mesa...</td></tr>
-                </tbody>
-            </table>
-        </div>
-    </section>
-
+    </div>
 </div>
 
-<script src="agent5.js?v=8"></script>
-<script src="predictor.js?v=8"></script>
-<script src="app.js?v=8"></script>
+<!-- â•â•â• MODE: LIVE (existing app, wrapped) â•â•â• -->
+<div id="live-mode" class="mode-panel">
+    <div class="mode-header-bar">
+        <div class="mode-title"><span style="font-size:1.1rem;">&#x1F534;</span> MODO LIVE â€” SincronizaciÃ³n en tiempo real</div>
+        <button class="btn-back" onclick="activateMode('landing')">&#x2190; Volver</button>
+    </div>
+    <div class="resizable-wrapper">
+        <div class="app-shell">
+            <!-- (Top bar removed as per user request) -->
+            <!-- â•â•â• THREE-COLUMN BODY â•â•â• -->
+            <div class="three-col-body">
+                <!-- â”€â”€ COL 1: VISUAL â”€â”€ -->
+                <div class="col-visual">
+                    <!-- Visual Panel (Table Image + Mini History) -->
+                    <section class="visual-panel-mini">
+                        <div class="table-image-container" style="text-align: center; margin-bottom: 10px;">
+                            <img src="table-1.jpg" alt="Mesa de Ruleta" style="width: 100%; max-width: 100%; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                        </div>
+                        <div id="history-strip-mini" class="history-strip-mini"></div>
+                    </section>
+                    <div style="display:flex; align-items:center; gap:6px; margin-top: 8px;">
+                        <div class="strategy-tabs" style="flex:1; margin-top:0;">
+                            <button class="tab-btn active" id="tab-btn-dir">DIR</button>
+                            <button class="tab-btn" id="tab-btn-pattern">PATTERN</button>
+                            <button class="tab-btn" id="tab-btn-auto" style="display:none !important;">AUTO</button>
+                            <button class="tab-btn" id="tab-btn-sniper">SNIPER</button>
+                            <button class="tab-btn" id="tab-btn-panel">PANEL</button>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:4px; flex-shrink:0;">
+                            <button id="btn-pred-dec" title="Bajar DIR" style="background:rgba(0,0,0,0.18); border:1px solid var(--border); color:var(--text2); font-size:12px; width:20px; border-radius:4px; height:20px; cursor:pointer; font-weight:700; line-height:1;">-</button>
+                            <span id="pred-offset-badge" style="font-family:var(--mono); font-size:9px; color:var(--accent); background:rgba(0,229,200,0.08); border:1px solid rgba(0,229,200,0.2); border-radius:4px; padding:1px 4px; white-space:nowrap;">0</span>
+                            <button id="btn-pred-inc" title="Subir DIR" style="background:rgba(0,0,0,0.18); border:1px solid var(--border); color:var(--text2); font-size:12px; width:20px; border-radius:4px; height:20px; cursor:pointer; font-weight:700; line-height:1;">+</button>
+                            <button id="btn-wipe" title="Reiniciar todo" onclick="wipeData()" style="background:rgba(255,59,92,0.1); border:1px solid rgba(255,59,92,0.3); color:#f55; font-size:8px; border-radius:4px; padding:1px 6px; cursor:pointer; font-weight:700; white-space:nowrap; margin-left:4px;">WIPE</button>
+                        </div>
+                    </div>
+
+                    <!-- 1. DIR (ANDROID 1717) -->
+                    <section class="shadow-panel" id="panel-dir">
+                        <!-- CW BLOCK -->
+                        <div class="dual-block" style="padding-top: 5px;">
+                            <div class="prediction-grid-3">
+                                <div class="p-box pb-left">
+                                    <span class="p-label">UNDER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="dir-cw-l-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="dir-cw-l-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="dir-cw-l-balls"></div>
+                                </div>
+                                <div class="p-box pb-center">
+                                    <div class="val-row-main">
+                                        <div class="p-val-main" id="dir-cw-c-val">--</div><sup class="p-power" style="font-size:10px;">n9</sup>
+                                    </div>
+                                    <div class="p-sub-main">DIR CW &#8635;</div>
+                                    <div class="p-tendency" id="dir-cw-trend" style="display:none !important;">MAIN PRED.</div>
+                                    <div class="filtered-neighbors" id="dir-cw-c-balls"></div>
+                                </div>
+                                <div class="p-box pb-right">
+                                    <span class="p-label">OVER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="dir-cw-r-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="dir-cw-r-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="dir-cw-r-balls"></div>
+                                </div>
+                            </div>
+                            <div class="agent-footer-stats">
+                                <span class="st wl-hidden">W:<span id="dir-cw-w">0</span> L:<span id="dir-cw-l">0</span></span>
+                                <span class="status-msg compact-rate"><span id="dir-cw-rate">0.0%</span></span>
+                                <span class="compact-perf" id="dir-cw-perf">--</span>
+                            </div>
+                        </div>
+                        <!-- CCW BLOCK -->
+                        <div class="dual-block" style="border-top: 1px solid rgba(0,229,200,0.15); padding-top: 5px;">
+                            <div class="prediction-grid-3">
+                                <div class="p-box pb-left">
+                                    <span class="p-label">UNDER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="dir-ccw-l-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="dir-ccw-l-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="dir-ccw-l-balls"></div>
+                                </div>
+                                <div class="p-box pb-center">
+                                    <div class="val-row-main">
+                                        <div class="p-val-main" id="dir-ccw-c-val">--</div><sup class="p-power" style="font-size:10px;">n9</sup>
+                                    </div>
+                                    <div class="p-sub-main">DIR CCW &#8634;</div>
+                                    <div class="p-tendency" id="dir-ccw-trend" style="display:none !important;">MAIN PRED.</div>
+                                    <div class="filtered-neighbors" id="dir-ccw-c-balls"></div>
+                                </div>
+                                <div class="p-box pb-right">
+                                    <span class="p-label">OVER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="dir-ccw-r-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="dir-ccw-r-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="dir-ccw-r-balls"></div>
+                                </div>
+                            </div>
+                            <div class="agent-footer-stats">
+                                <span class="st wl-hidden">W:<span id="dir-ccw-w">0</span> L:<span id="dir-ccw-l">0</span></span>
+                                <span class="status-msg compact-rate"><span id="dir-ccw-rate">0.0%</span></span>
+                                <span class="compact-perf" id="dir-ccw-perf">--</span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- 3. AUTO AI PREDICTOR -->
+                    <!-- PATTERN MATCHING PANEL - Contiene Analyst V2 y Sniper V2 -->
+                    <section class="shadow-panel" id="panel-pattern" style="display: none;">
+                        <div class="agent-card-header" style="padding: 4px 10px;">
+                            <span class="agent-icon">&#x1F50D;</span>
+                            <span class="agent-card-name">PATTERN MACHINE V2</span>
+                            <span id="pattern-status" style="padding:1px 6px; font-size:9px;">ANALIZANDO...</span>
+                        </div>
+                        <div style="padding: 6px 8px;">
+                            <div id="pattern-current-seq" style="font-size: 9px; color: var(--muted); margin-bottom: 8px; font-family: var(--mono);">Secuencia: --</div>
+                            <!-- === ANALYST V2 (con Pattern Machine) === -->
+                            <div style="margin-bottom: 10px; padding: 8px; background: rgba(0,229,200,0.03); border: 1px solid rgba(0,229,200,0.15); border-radius: 8px;">
+                                <div style="font-size: 10px; color: var(--accent); font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                                    <span>&#x1F4CA; ANALYST V2</span>
+                                    <span id="analyst-v2-signal" style="color: var(--text-dim);">ANALIZANDO...</span>
+                                </div>
+                                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
+                                    <span id="analyst-v2-dir" style="display: none; padding: 2px 6px; background: rgba(48,224,144,0.15); border-radius: 4px; font-size: 9px; color: var(--green);">--</span>
+                                    <span id="analyst-v2-size" style="display: none; padding: 2px 6px; background: rgba(240,192,64,0.15); border-radius: 4px; font-size: 9px; color: var(--gold);">--</span>
+                                </div>
+                                <div id="analyst-v2-detail" style="font-size: 8px; color: var(--text-dim); margin-bottom: 4px;">Esperando datos...</div>
+                                <div style="display: flex; align-items: center; gap: 8px; font-size: 8px; margin-bottom: 4px;">
+                                    <span id="analyst-v2-rate" style="color: var(--text-dim); font-weight: 700;">0%</span>
+                                    <span id="analyst-v2-perf" style="display: flex; gap: 2px;">--</span>
+                                </div>
+                                <div id="analyst-v2-pattern-boost" style="font-size: 8px; color: var(--accent); display: none;">
+                                    &#x1F50B; Boost: <span id="analyst-v2-boost-val">+0%</span> por patrÃ³n histÃ³rico
+                                </div>
+                            </div>
+                            <!-- === SNIPER V2 (con Pattern Machine) === -->
+                            <div style="margin-bottom: 10px; padding: 8px; background: rgba(255,100,100,0.03); border: 1px solid rgba(255,100,100,0.15); border-radius: 8px;">
+                                <div style="font-size: 10px; color: #f55; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                                    <span>&#x1F3AF; SNIPER V2</span>
+                                    <span id="sniper-v2-conf" style="color: var(--gold);">0%</span>
+                                </div>
+                                <div style="font-size: 1.1rem; font-weight: 900; color: #fff; text-align: center; margin: 6px 0;" id="sniper-v2-target">--</div>
+                                <div id="sniper-v2-reasons" style="font-size: 8px; color: var(--text-dim); margin-bottom: 4px; text-align: center;">--</div>
+                                <div style="display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 8px; margin-bottom: 4px;">
+                                    <span id="sniper-v2-rate" style="color: var(--text-dim); font-weight: 700;">0%</span>
+                                    <span id="sniper-v2-perf" style="display: flex; gap: 2px;">--</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 8px; color: var(--text-dim);">
+                                    <span>Ritmo: <span id="sniper-v2-rhythm">--</span></span>
+                                    <span>Patterns: <span id="sniper-v2-patterns">--</span></span>
+                                </div>
+                            </div>
+                            <!-- === META-PATRONES (Rachas W/L) === -->
+                            <div style="display: none;">
+                                <div id="meta-wl-history"></div>
+                                <div id="meta-alert"></div>
+                                <div id="meta-pattern-name"></div>
+                                <div id="meta-alert-text"></div>
+                                <div id="meta-status"></div>
+                                <div id="meta-long-patterns"></div>
+                                <div id="meta-long-list"></div>
+                            </div>
+                            <!-- Stats de memoria -->
+                            <div style="padding: 6px; background: rgba(0,0,0,0.1); border-radius: 6px; font-size: 8px; color: var(--text-dim);">
+                                <strong style="color: var(--accent);">DB:</strong> <span id="pattern-memory-count">0</span> patrones |
+                                <strong style="color: var(--accent);">SesiÃ³n:</strong> <span id="pattern-session-count">0</span> spins
+                            </div>
+                            <!-- Debug (oculto) -->
+                            <div id="pattern-matches" style="display: none; margin-top: 6px;">
+                                <div id="pattern-list"></div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- DASHBOARD DE AGENTES -->
+                    <section class="shadow-panel" id="panel-panel" style="display: none;">
+                        <div class="agent-card-header" style="padding: 4px 10px;">
+                            <span class="agent-icon">&#x1F4CA;</span>
+                            <span class="agent-card-name">DASHBOARD ANALÃTICO</span>
+                            <span id="panel-status" style="padding:1px 6px; font-size:9px;">ANALIZANDO...</span>
+                        </div>
+                        <div id="dash-subtabs" class="dash-subtabs" style="display:flex; gap:2px; padding:2px 6px; border-bottom:1px solid var(--border); overflow-x:auto;">
+                            <button class="dash-subtab active" data-dash="summary">&#x1F4CB; Resumen</button>
+                            <button class="dash-subtab" data-dash="timeline">&#x1F4C8; LÃ­nea Tiempo</button>
+                            <button class="dash-subtab" data-dash="compare">&#x2696;&#xFE0F; Comparativa</button>
+                            <button class="dash-subtab" data-dash="patterns">&#x1F50C; Patrones</button>
+                            <button class="dash-subtab" data-dash="insights">&#x1F4A1; Insights</button>
+                            <button class="dash-subtab" data-dash="besthours">&#x1F525; Mejores Horas</button>
+                        </div>
+                        <div id="dash-content" style="padding: 4px 8px; font-size:10px; color:var(--text2); min-height: 120px;">
+                            <div style="padding: 10px; text-align: center; color: var(--muted);">Esperando datos de los agentes...</div>
+                        </div>
+                        <div id="dash-summary" style="display:none;"></div>
+                        <div id="dash-timeline" style="display:none; padding:4px 8px;">
+                            <canvas id="dashTimelineCanvas" height="200" style="width:100%; border-radius:6px; background:rgba(0,0,0,0.15);"></canvas>
+                            <div id="dash-timeline-hotzones" style="margin-top:4px; font-size:8px;"></div>
+                        </div>
+                        <div id="dash-compare" style="display:none; padding:4px 8px;"></div>
+                        <div id="dash-patterns" style="display:none; padding:4px 8px;"></div>
+                        <div id="dash-insights" style="display:none; padding:4px 8px;"></div>
+                        <div id="dash-besthours" style="display:none; padding:4px 8px;"></div>
+                    </section>
+
+                    <!-- SNIPER + ANALYST -->
+                    <section class="shadow-panel" id="panel-sniper" style="display: none;">
+                        <div class="agent-card-header" style="padding: 4px 10px;">
+                            <span class="agent-icon">&#x1F3AF;</span>
+                            <span class="agent-card-name">SNIPER &amp; ANALYST</span>
+                            <span style="padding:1px 6px; font-size:9px;">EN VIVO</span>
+                        </div>
+                        <div style="padding: 6px 8px;">
+                            <section class="master-panel" style="margin-bottom: 8px;">
+                                <div class="master-header">
+                                    <span class="master-icon">&#x1F3AF;</span>
+                                    <span class="master-name">SNIPER MASTER AI</span>
+                                    <div class="master-conf-bar"><div class="master-conf-fill" id="master-conf-fill"></div></div>
+                                    <span class="master-conf-text" id="master-conf-text">0%</span>
+                                </div>
+                                <div class="master-body">
+                                    <div class="master-main-signal" id="master-signal">SYNCHRONIZING...</div>
+                                    <div class="master-details">
+                                        <span class="master-target-badge" id="master-target">--</span>
+                                        <span class="master-reason-text" id="master-reason">Analizando flujos...</span>
+                                    </div>
+                                </div>
+                                <div class="master-footer">
+                                    <span class="master-stats" id="master-rate">0%</span>
+                                    <span class="compact-perf" id="master-perf">--</span>
+                                </div>
+                            </section>
+                            <div class="analyst-box" id="analyst-panel">
+                                <div class="analyst-header">
+                                    <span class="analyst-tag">&#x1F4C8; ANALYST AGENT</span>
+                                    <div class="analyst-score">
+                                        <span id="analyst-rate">0%</span>
+                                        <span class="compact-perf" id="analyst-perf-string">--</span>
+                                    </div>
+                                </div>
+                                <div class="analyst-main">
+                                    <span class="analyst-signal" id="analyst-signal">ANALIZANDO...</span>
+                                    <div class="analyst-decision">
+                                        <span class="dir-badge" id="analyst-dir">--</span>
+                                        <span class="mag-badge" id="analyst-size">--</span>
+                                    </div>
+                                </div>
+                                <div class="analyst-reason" id="analyst-reason">-</div>
+                            </div>
+                        </div>
+                    </section>
+                    <!-- FIN SNIPER + ANALYST -->
+                </div><!-- /col-visual -->
+
+                <!-- â”€â”€ COL 3: TRAVEL DATA â”€â”€ -->
+                <div class="col-travel">
+                    <section class="travel-section">
+                        <div style="padding: 4px 8px; border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.12); display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; font-weight: 600; color: var(--accent); font-family: var(--mono);">&#x1F4CA; TRAVEL</span>
+                                <select id="table-select" class="compact-select" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); color: #00e5c8; font-size: 9px; padding: 1px 3px; border-radius: 3px; font-weight: 600; outline: none; "></select>
+                            </div>
+                            <span class="badge badge-zone" id="travel-last-zone" style="font-size: 8px; padding: 1px 4px;">Ãšltimo: --</span>
+                        </div>
+                        <!-- NEW: Travel Pattern Bar -->
+                        <div style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--border); padding: 4px 10px; display: flex; justify-content: space-between; align-items: center;">
+                            <div id="travel-pattern-label" style="font-size: 10px; font-weight: 700; color: #fff;">PatrÃ³n: Detectando...</div>
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <div id="travel-pattern-count" style="font-family: var(--mono); font-size: 9px; color: var(--gold); background: rgba(240,192,64,0.1); padding: 1px 4px; border-radius: 3px;">0t</div>
+                                <button id="travel-history-toggle" class="travel-history-toggle" title="Mostrar/Ocultar historial de patrones" aria-expanded="false">&#9662;</button>
+                            </div>
+                        </div>
+                        <div id="travel-pattern-hist" class="hidden" style="background: rgba(0,0,0,0.05); border-bottom: 1px solid var(--border); padding: 2px 8px; max-height: 45px; overflow-y: auto;"></div>
+                        <!-- Travel Chart Canvas -->
+                        <div style="padding: 2px 0; background: rgba(0,0,0,0.2); border-bottom: 1px solid var(--border); overflow-x: hidden;">
+                            <canvas id="travelChart" height="140" style="width: 100%; min-width: 0; display: block;"></canvas>
+                        </div>
+                        <div class="travel-table-wrap" id="travel-table-wrap" style="display: block; flex: 1; min-height: 140px; overflow-y: auto; overflow-x: hidden;">
+                            <table style="width: 100%; border-collapse: collapse; font-family: var(--mono);">
+                                <thead>
+                                    <tr style="background: rgba(255,255,255,0.03);">
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">N</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">D</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">DIR</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">ZON</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">U/O</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="travel-tbody">
+                                    <tr><td colspan="5" style="padding: 10px; font-size: 9px; text-align: center; color: var(--muted);">Cargando datos...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div><!-- /col-travel -->
+            </div><!-- /three-col-body -->
+        </div>
+    </div>
+    <div class="resizer"></div>
+</div>
+
+<!-- â•â•â• MODE: MANUAL â•â•â• -->
+<div id="manual-mode" class="mode-panel">
+    <div class="resizable-wrapper">
+        <div class="app-shell">
+            <div class="mode-header-bar">
+                <div class="mode-title"><span style="font-size:1.1rem;">&#x270F;&#xFE0F;</span> MODO MANUAL</div>
+                <button class="btn-back" onclick="activateMode('landing')">&#x2190; Volver</button>
+            </div>
+
+            <div class="manual-input-wrap">
+                <input type="text" id="manual-number-input" placeholder="Ingresa nÃºmero (0-36) y presiona Enter" maxlength="2" inputmode="numeric" />
+                <button class="btn-action" onclick="processManualNumber()">AGREGAR</button>
+                <button class="btn-action-secondary" onclick="clearManualHistory()">LIMPIAR</button>
+            </div>
+
+            <div class="manual-history-strip" id="manual-history-strip"></div>
+
+            <div class="three-col-body" style="padding: 8px 14px;">
+                <div class="col-visual" style="flex: 1.2;">
+                    <!-- Reutilizamos los paneles DIR, PATTERN, SNIPER, PANEL pero con IDs manual-* -->
+                    <div style="display:flex; align-items:center; gap:6px; margin: 8px 0;">
+                        <div class="strategy-tabs" style="flex:1; margin-top:0;">
+                            <button class="tab-btn active" onclick="showManualTab('dir')">DIR</button>
+                            <button class="tab-btn" onclick="showManualTab('pattern')">PATTERN</button>
+                            <button class="tab-btn" onclick="showManualTab('sniper')">SNIPER</button>
+                            <button class="tab-btn" onclick="showManualTab('panel')">PANEL</button>
+                        </div>
+                    </div>
+
+                    <section class="shadow-panel" id="manual-panel-dir">
+                        <div class="dual-block" style="padding-top: 5px;">
+                            <div class="prediction-grid-3">
+                                <div class="p-box pb-left">
+                                    <span class="p-label">UNDER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="manual-dir-cw-l-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="manual-dir-cw-l-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="manual-dir-cw-l-balls"></div>
+                                </div>
+                                <div class="p-box pb-center">
+                                    <div class="val-row-main">
+                                        <div class="p-val-main" id="manual-dir-cw-c-val">--</div><sup class="p-power" style="font-size:10px;">n9</sup>
+                                    </div>
+                                    <div class="p-sub-main">DIR CW &#8635;</div>
+                                    <div class="filtered-neighbors" id="manual-dir-cw-c-balls"></div>
+                                </div>
+                                <div class="p-box pb-right">
+                                    <span class="p-label">OVER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="manual-dir-cw-r-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="manual-dir-cw-r-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="manual-dir-cw-r-balls"></div>
+                                </div>
+                            </div>
+                            <div class="agent-footer-stats">
+                                <span class="st wl-hidden">W:<span id="manual-dir-cw-w">0</span> L:<span id="manual-dir-cw-l">0</span></span>
+                                <span class="status-msg compact-rate"><span id="manual-dir-cw-rate">0.0%</span></span>
+                                <span class="compact-perf" id="manual-dir-cw-perf">--</span>
+                            </div>
+                        </div>
+                        <div class="dual-block" style="border-top: 1px solid rgba(0,229,200,0.15); padding-top: 5px;">
+                            <div class="prediction-grid-3">
+                                <div class="p-box pb-left">
+                                    <span class="p-label">UNDER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="manual-dir-ccw-l-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="manual-dir-ccw-l-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="manual-dir-ccw-l-balls"></div>
+                                </div>
+                                <div class="p-box pb-center">
+                                    <div class="val-row-main">
+                                        <div class="p-val-main" id="manual-dir-ccw-c-val">--</div><sup class="p-power" style="font-size:10px;">n9</sup>
+                                    </div>
+                                    <div class="p-sub-main">DIR CCW &#8634;</div>
+                                    <div class="filtered-neighbors" id="manual-dir-ccw-c-balls"></div>
+                                </div>
+                                <div class="p-box pb-right">
+                                    <span class="p-label">OVER</span>
+                                    <div class="val-row">
+                                        <span class="p-val" id="manual-dir-ccw-r-val">--</span><sup class="p-power">n4</sup><span class="hit-text" id="manual-dir-ccw-r-hit"></span>
+                                    </div>
+                                    <div class="filtered-neighbors" id="manual-dir-ccw-r-balls"></div>
+                                </div>
+                            </div>
+                            <div class="agent-footer-stats">
+                                <span class="st wl-hidden">W:<span id="manual-dir-ccw-w">0</span> L:<span id="manual-dir-ccw-l">0</span></span>
+                                <span class="status-msg compact-rate"><span id="manual-dir-ccw-rate">0.0%</span></span>
+                                <span class="compact-perf" id="manual-dir-ccw-perf">--</span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="shadow-panel" id="manual-panel-sniper" style="display:none;">
+                        <div class="agent-card-header" style="padding: 4px 10px;">
+                            <span class="agent-icon">&#x1F3AF;</span>
+                            <span class="agent-card-name">SNIPER &amp; ANALYST</span>
+                            <span style="padding:1px 6px; font-size:9px;">MANUAL</span>
+                        </div>
+                        <div style="padding: 6px 8px;">
+                            <section class="master-panel" style="margin-bottom: 8px;">
+                                <div class="master-header">
+                                    <span class="master-icon">&#x1F3AF;</span>
+                                    <span class="master-name">SNIPER MASTER AI</span>
+                                    <div class="master-conf-bar"><div class="master-conf-fill" id="manual-master-conf-fill"></div></div>
+                                    <span class="master-conf-text" id="manual-master-conf-text">0%</span>
+                                </div>
+                                <div class="master-body">
+                                    <div class="master-main-signal" id="manual-master-signal">ESPERANDO DATOS...</div>
+                                    <div class="master-details">
+                                        <span class="master-target-badge" id="manual-master-target">--</span>
+                                        <span class="master-reason-text" id="manual-master-reason">Ingresa nÃºmeros manualmente</span>
+                                    </div>
+                                </div>
+                                <div class="master-footer">
+                                    <span class="master-stats" id="manual-master-rate">0%</span>
+                                    <span class="compact-perf" id="manual-master-perf">--</span>
+                                </div>
+                            </section>
+                            <div class="analyst-box" id="manual-analyst-panel">
+                                <div class="analyst-header">
+                                    <span class="analyst-tag">&#x1F4C8; ANALYST AGENT</span>
+                                    <div class="analyst-score">
+                                        <span id="manual-analyst-rate">0%</span>
+                                        <span class="compact-perf" id="manual-analyst-perf-string">--</span>
+                                    </div>
+                                </div>
+                                <div class="analyst-main">
+                                    <span class="analyst-signal" id="manual-analyst-signal">ESPERANDO...</span>
+                                    <div class="analyst-decision">
+                                        <span class="dir-badge" id="manual-analyst-dir">--</span>
+                                        <span class="mag-badge" id="manual-analyst-size">--</span>
+                                    </div>
+                                </div>
+                                <div class="analyst-reason" id="manual-analyst-reason">-</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="shadow-panel" id="manual-panel-pattern" style="display:none;">
+                        <div style="padding: 10px; text-align: center; color: var(--muted); font-size: 0.8rem;">Pattern Machine requiere al menos 20 spins manuales para activar el anÃ¡lisis de patrones histÃ³ricos.</div>
+                    </section>
+
+                    <section class="shadow-panel" id="manual-panel-panel" style="display:none;">
+                        <div class="agent-card-header" style="padding: 4px 10px;">
+                            <span class="agent-icon">&#x1F4CA;</span>
+                            <span class="agent-card-name">DASHBOARD ANALÃTICO</span>
+                            <span style="padding:1px 6px; font-size:9px;">MANUAL</span>
+                        </div>
+                        <div id="manual-dash-content" style="padding: 4px 8px; font-size:10px; color:var(--text2); min-height: 120px;">
+                            <div style="padding: 10px; text-align: center; color: var(--muted);">Ingresa nÃºmeros para ver el dashboard.</div>
+                        </div>
+                        <div id="manual-dash-timeline" style="display:none; padding:4px 8px;">
+                            <canvas id="manualDashTimelineCanvas" height="200" style="width:100%; border-radius:6px; background:rgba(0,0,0,0.15);"></canvas>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="col-travel">
+                    <section class="travel-section">
+                        <div style="padding: 4px 8px; border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.12); display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; font-weight: 600; color: var(--accent); font-family: var(--mono);">&#x1F4CA; TRAVEL</span>
+                                <span style="font-size: 9px; color: var(--muted);">MANUAL</span>
+                            </div>
+                            <span class="badge badge-zone" id="manual-travel-last-zone" style="font-size: 8px; padding: 1px 4px;">Ãšltimo: --</span>
+                        </div>
+                        <div style="padding: 2px 0; background: rgba(0,0,0,0.2); border-bottom: 1px solid var(--border); overflow-x: hidden;">
+                            <canvas id="manualTravelChart" height="140" style="width: 100%; min-width: 0; display: block;"></canvas>
+                        </div>
+                        <div class="travel-table-wrap" style="display: block; flex: 1; min-height: 140px; overflow-y: auto; overflow-x: hidden;">
+                            <table style="width: 100%; border-collapse: collapse; font-family: var(--mono);">
+                                <thead>
+                                    <tr style="background: rgba(255,255,255,0.03);">
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">N</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">D</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">DIR</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">ZON</th>
+                                        <th style="padding: 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">U/O</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="manual-travel-tbody">
+                                    <tr><td colspan="5" style="padding: 10px; font-size: 9px; text-align: center; color: var(--muted);">Ingresa nÃºmeros para ver el travel.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- â•â•â• MODE: TRACKER â•â•â• -->
+<div id="tracker-mode" class="mode-panel">
+    <div class="resizable-wrapper">
+        <div class="app-shell">
+            <div class="mode-header-bar">
+                <div class="mode-title"><span style="font-size:1.1rem;">&#x1F4CA;</span> MODO TRACKER</div>
+                <button class="btn-back" onclick="activateMode('landing')">&#x2190; Volver</button>
+            </div>
+
+            <div class="tracker-shell-compact">
+                <!-- â•â• TOOLBAR: Source + AI Config â•â• -->
+                <div class="tracker-toolbar">
+                    <div class="tracker-source-toggle">
+                        <button class="tgl-btn active" id="tracker-src-manual" onclick="setTrackerSource('manual')">&#x270F;&#xFE0F; MANUAL</button>
+                        <button class="tgl-btn" id="tracker-src-live" onclick="setTrackerSource('live')">&#x1F534; LIVE</button>
+                    </div>
+                    <button class="tracker-cog" onclick="toggleTrackerConfig()" title="Configurar IA">&#x2699;&#xFE0F;</button>
+                </div>
+
+                <!-- Input MANUAL (condicional) -->
+                <div class="manual-input-wrap" id="tracker-manual-input" style="padding:6px 10px;">
+                    <input type="text" id="tracker-number-input" placeholder="# (0-36)" maxlength="2" inputmode="numeric" style="flex:0 0 60px;text-align:center;" />
+                    <button class="btn-action" style="padding:6px 12px;" onclick="processTrackerNumber()">+</button>
+                    <button class="btn-action-secondary" style="padding:6px 10px;" onclick="undoTrackerNumber()">&#x232B;</button>
+                    <button class="btn-action-secondary" style="padding:6px 10px;" onclick="clearTrackerData()">LIMPIAR</button>
+                </div>
+                <div id="tracker-live-info" style="display:none; padding:2px 10px; font-size:0.6rem; color:var(--muted); text-align:center;">
+                    Live
+                </div>
+
+                <!-- â•â• CONFIG PANEL (colapsable) â•â• -->
+                <div id="tracker-config-panel" class="tracker-config-panel" style="display:none;">
+                    <div style="font-size:0.7rem; font-weight:700; color:var(--accent); margin-bottom:6px; text-transform:uppercase; letter-spacing:1px;">&#x1F916; ConfiguraciÃ³n IA</div>
+                    <div style="display:grid; gap:6px;">
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <label style="font-size:0.65rem; color:var(--muted); width:70px;">Proveedor</label>
+                            <select id="tracker-ai-provider" class="tracker-select" onchange="onTrackerProviderChange()">
+                                <option value="openrouter">&#x1F4F7; OpenRouter</option>
+                            </select>
+                        </div>
+<div style="display:flex; gap:6px; align-items:center;">
+                            <label style="font-size:0.65rem; color:var(--muted); width:70px;">Modelo</label>
+                            <select id="tracker-ai-model" class="tracker-select" onchange="onTrackerProviderChange()"></select>
+                        </div>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <label style="font-size:0.65rem; color:var(--muted); width:70px;">API Key</label>
+                            <input type="password" id="tracker-ai-key" class="tracker-input" placeholder="API key de OpenRouter (https://openrouter.ai/keys)" />
+                        </div>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <label style="font-size:0.65rem; color:var(--muted); width:70px;">PredicciÃ³n</label>
+                            <select id="tracker-ai-pred" class="tracker-select" onchange="setTrackerPredictionMode(this.value)">
+                                <option value="n9">N9 (radio 9)</option>
+                                <option value="n4">N4 (radio 4)</option>
+                                <option value="both" selected>N9 + N4</option>
+                            </select>
+                        </div>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <label style="font-size:0.65rem; color:var(--muted); width:70px;">Voz</label>
+                            <button class="tracker-btn tracker-btn-toggle off" id="tracker-voice-btn" style="flex:1; padding:4px 8px; font-size:0.65rem;" onclick="toggleTrackerVoice()">&#x1F50A; OFF</button>
+                        </div>
+                        <button class="btn-action" style="font-size:0.7rem; padding:5px; margin-top:2px;" onclick="saveTrackerConfig()">&#x1F4BE; Guardar config</button>
+                        <button class="tracker-btn tracker-btn-secondary" style="font-size:0.65rem; padding:4px; margin-top:2px;" onclick="testTrackerAIConnection()">&#x1F9EA; Test conexiÃ³n IA</button>
+                    </div>
+                </div>
+
+                <!-- â•â• CHAT PANEL â•â• -->
+                <div class="tracker-chat-box">
+                    <div class="tracker-chat-header">
+                        <span>&#x1F4AC; RouletteAI</span>
+                        <span id="tracker-ai-status" style="font-size:0.6rem; color:var(--muted);">Esperando datos...</span>
+                    </div>
+                    <div class="tracker-chat-messages" id="tracker-chat-messages"></div>
+                    <div class="tracker-chat-input-row">
+                        <button class="tracker-chat-mic" id="tracker-chat-mic" onclick="toggleTrackerMic()" title="Hablar con la IA">&#x1F3A4;</button>
+                        <input type="text" id="tracker-chat-input" class="tracker-chat-input" placeholder="PregÃºntame algo o usa el mic..." />
+                        <button class="tracker-chat-send" onclick="sendTrackerChat()">&#x25B6;</button>
+                    </div>
+                </div>
+
+                <!-- Last Spins Row -->
+                <div class="tracker-last-spins" id="tracker-last-spins"></div>
+
+                <!-- Tracker Control Panel -->
+                <div class="tracker-control-panel" id="tracker-control-panel">
+                    <div class="tracker-control-header">
+                        <div>Tracker Control Panel <span class="tracker-version">v1.5.0</span></div>
+                        <div class="tracker-status-badge status-placed" id="tracker-placed-badge">Placed</div>
+                    </div>
+                    <div class="tracker-control-row"><span class="tracker-control-label">Status:</span> <span class="tracker-control-value tracker-status-active" id="tracker-status-text">Active</span></div>
+                    <div class="tracker-control-row"><span class="tracker-control-label">Prediction:</span> <span class="tracker-control-value" id="tracker-prediction">--</span></div>
+                </div>
+
+                <!-- Travel Chart (same style as Live) -->
+                <div style="padding: 2px 0; background: rgba(0,0,0,0.2); border-bottom: 1px solid var(--border); overflow-x: hidden;">
+                    <canvas id="trackerChart" height="140" style="width: 100%; min-width: 0; display: block;"></canvas>
+                </div>
+
+                <!-- Travel Table -->
+                <div class="travel-table-wrap" style="display: block; flex: 1; min-height: 100px; overflow-y: auto; overflow-x: hidden;">
+                    <table style="width: 100%; border-collapse: collapse; font-family: var(--mono);">
+                        <thead>
+                            <tr style="background: rgba(255,255,255,0.03);">
+                                <th style="padding: 3px 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">N</th>
+                                <th style="padding: 3px 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">D</th>
+                                <th style="padding: 3px 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">DIR</th>
+                                <th style="padding: 3px 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">ZON</th>
+                                <th style="padding: 3px 4px; font-size: 9px; color: var(--muted); border-bottom: 1px solid var(--border); text-align: center;">U/O</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tracker-travel-tbody">
+                            <tr><td colspan="4" style="padding: 8px; font-size: 9px; text-align: center; color: var(--muted);">Esperando datos...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Controls -->
+                <div class="tracker-controls" style="flex-wrap: wrap; gap: 4px;">
+                    <div style="display: flex; gap: 2px; margin-right: 4px;">
+                        <button class="tracker-btn tracker-btn-mode active" id="tracker-btn-n9" onclick="setTrackerPredictionMode('n9')">N9</button>
+                        <button class="tracker-btn tracker-btn-mode" id="tracker-btn-n4" onclick="setTrackerPredictionMode('n4')">N4</button>
+                        <button class="tracker-btn tracker-btn-mode" id="tracker-btn-both" onclick="setTrackerPredictionMode('both')">Both</button>
+                    </div>
+                    <button class="tracker-btn tracker-btn-toggle off" id="tracker-auto-bet-btn" onclick="toggleTrackerAutoBet()">
+                        &#x1F916; AUTO BET: OFF
+                    </button>
+                    <button class="tracker-btn tracker-btn-primary" id="tracker-neigh-btn" onclick="trackerBetNeighbors()">
+                        &#x1F3B2; 9 NEIGHBOURS
+                    </button>
+                    <button class="tracker-btn tracker-btn-secondary" onclick="askTrackerAIForAnalysis()">
+                        &#x1F916; ANALIZAR AHORA
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="src/engine/predictor.js?v=999"></script>
+<script src="ai_chat.js?v=5"></script>
+<script src="modes.js?v=16"></script>
+<script src="app.js?v=1042"></script>
 </body>
 </html>

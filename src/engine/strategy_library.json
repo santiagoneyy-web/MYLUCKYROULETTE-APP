@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "updatedAt": "2026-05-12T00:00:00.000Z",
+  "strategies": [
+    {
+      "id": "sys_identificacion_contexto",
+      "source": "system",
+      "origin": "user_rule",
+      "tableId": "global",
+      "status": "active",
+      "name": "Identificacion: Dominancia vs Bloques",
+      "summary": "Detectar cual de las 4 opciones (CW, CCW, BIG, SMALL) esta en dominancia y cual en turbulencia. 'Verde' es solo contexto visual.",
+      "pattern": "Evaluacion estructural de la mesa.",
+      "trigger": "Siempre activo.",
+      "action": "Diferenciar entre mesa de bloques y de dominancia. Si sale por bloques (ej. dir salta en grupos), IGNORA la dominancia a largo plazo y sigue el bloque. Si es dominancia clara, sigue la dominancia.",
+      "tags": ["contexto", "dominancia", "bloques"],
+      "createdAt": "2026-05-12T00:00:00.000Z",
+      "updatedAt": "2026-05-12T00:00:00.000Z"
+    },
+    {
+      "id": "sys_continuidad_fuerte",
+      "source": "system",
+      "origin": "user_rule",
+      "tableId": "global",
+      "status": "active",
+      "name": "Mesa Clara (Continuidad)",
+      "summary": "Las mejores mesas son las que tienen bloques grandes o dominancias claras. Aqui NO se buscan cambios.",
+      "pattern": "Estructuras solidas sin cortes bruscos.",
+      "trigger": "Cuando se detecta Bloques o Dominancia evidente en una o mas de las 4 opciones.",
+      "action": "Continuar siempre a favor de la tendencia (el bloque actual o la dominancia viva). No buscar rupturas.",
+      "tags": ["continuidad", "bloques", "dominancia"],
+      "createdAt": "2026-05-12T00:00:00.000Z",
+      "updatedAt": "2026-05-12T00:00:00.000Z"
+    },
+    {
+      "id": "sys_turbulencia_patrones",
+      "source": "system",
+      "origin": "user_rule",
+      "tableId": "global",
+      "status": "active",
+      "name": "Turbulencia: Patrones de Lectura",
+      "summary": "Exclusivo para momentos de turbulencia. Aqui es donde se aplican los patrones de lectura corta (ola 2-2, zig zag, rodillo).",
+      "pattern": "Caos direccional o falta de dominio claro. W/L saltarin.",
+      "trigger": "Cuando de las 4 opciones, alguna entra en turbulencia o mezcla evidente.",
+      "action": "Aplicar logica de tramos cortos. Si viene zig zag, operar el salto. Si hace ola WWLL, anticipar el corte.",
+      "tags": ["turbulencia", "zigzag", "ola"],
+      "createdAt": "2026-05-12T00:00:00.000Z",
+      "updatedAt": "2026-05-12T00:00:00.000Z"
+    }
+  ]
+}
