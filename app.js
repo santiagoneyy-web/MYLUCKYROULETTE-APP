@@ -1891,6 +1891,10 @@ async function syncData() {
                 } catch(e) { console.error('Predict error on sync:', e); }
             }
         }
+        // Refresh the Tracker from the canonical Live history after every server sync.
+        if (typeof trackerSource !== 'undefined' && trackerSource === 'live' && typeof syncTrackerFromLive === 'function') {
+            syncTrackerFromLive();
+        }
         await syncAiPredictionState();
         await loadSyncLogFromServer();
     } catch(e) {}
