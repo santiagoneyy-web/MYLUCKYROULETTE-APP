@@ -4845,7 +4845,9 @@ async function fetchMetaPatternStats(type) {
         originalSubmitNumber(val, silent, batch);
         const n = parseInt(val);
         if (!isNaN(n) && n >= 0 && n <= 36) {
-            if (typeof trackerSource !== 'undefined' && trackerSource === 'live') {
+            // Bulk history is copied once by syncTrackerFromLive after sync completes.
+            // Forwarding it here prevents that sync from detecting changes and rendering.
+            if (!batch && typeof trackerSource !== 'undefined' && trackerSource === 'live') {
                 if (typeof submitTrackerNumber === 'function') submitTrackerNumber(n, batch, 'live');
             }
         }
