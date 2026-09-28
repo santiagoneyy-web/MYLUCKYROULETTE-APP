@@ -74,24 +74,47 @@ app.use(express.static(path.join(__dirname)));
 
 const databaseReady = db.initDB();
 strategyStore.ensureStore();
+let crawlerStarted = false;
+
+function startCrawlerIfEnabled() {
+    if (crawlerStarted || String(process.env.DISABLE_BOTS || '').toLowerCase() === 'true') return;
+    try {
+        console.log('[BOOT] Starting automatic casino.org crawler...');
+        require('./start-bots.js')(PORT);
+        crawlerStarted = true;
+    } catch (error) {
+        console.error('[BOOT] Failed to start crawler:', error.message);
+    }
+}
+
+app.get('/api/db/status', (req, res) => {
+    const status = db.getConnectionStatus();
+    if (status.connected) startCrawlerIfEnabled();
+    res.status(status.connected ? 200 : 503).json(status);
+});
+
+app.post('/api/db/reconnect', async (req, res) => {
+    const status = await db.reconnect();
+    if (status.connected) startCrawlerIfEnabled();
+    res.status(status.connected ? 200 : 503).json(status);
+});
+
+app.use('/api', (req, res, next) => {
+    if (req.path === '/db/status' || req.path === '/db/reconnect') return next();
+    if (!db.getUseMongo()) {
+        return res.status(503).json({
+            error: 'MongoDB Atlas está desconectado. Los datos y análisis están pausados.',
+            code: 'MONGODB_DISCONNECTED'
+        });
+    }
+    next();
+});
 
 // ---- API: Tables ----
 app.get('/api/tables', (req, res) => {
     db.getTables((err, tables) => {
         if (err || !tables || tables.length === 0) {
-            // Hard fallback in case database.js logic fails
-            return res.json([
-                {
-                    schema_version: 2,
-                    id: 1,
-                    code: 'AUTO',
-                    name: 'Auto Roulette',
-                    provider: 'Evolution',
-                    url: 'https://www.casino.org/casinoscores/es/auto-roulette/',
-                    source_type: 'casino_org',
-                    status: 'active'
-                }
-            ]);
+            return res.status(503).json({ error: 'No se pudieron cargar las mesas desde MongoDB Atlas.' });
         }
         res.json(tables);
     });
@@ -708,7 +731,7 @@ function isLiveDuplicateSpin(currentHistory, payload) {
 
     if (eventId && history.some(spin => String(spin.event_id || '') === eventId)) return true;
     if (roundKey && history.some(spin => String(spin.round_key || '') === roundKey)) return true;
-    if (['public_scraper', 'casino_org_live'].includes(source) && Number.isInteger(number) && lastSpin && Number(lastSpin.number) === number) {
+    if (!eventId && !roundKey && ['public_scraper', 'casino_org_live'].includes(source) && Number.isInteger(number) && lastSpin && Number(lastSpin.number) === number) {
         return true;
     }
 
@@ -1611,10 +1634,58 @@ Responde CORTO, maximo 2-3 oraciones. Sin listas, sin markdown, sin asteriscos.`
     }
 });
 
+app.get('/api/tracker/memory/:tableId/:source', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    const source = req.params.source;
+    if (!Number.isInteger(tableId) || source !== 'live') {
+        return res.status(400).json({ error: 'La memoria persistente está disponible solo para Live.' });
+    }
+    if (!db.getUseMongo()) {
+        return res.status(503).json({ error: 'MongoDB Atlas no está conectado. La memoria y la IA del Tracker están pausadas.' });
+    }
+    try {
+        const memory = await db.getTrackerMemory(tableId, source);
+        res.json({
+            ...(memory || { table_id: tableId, source, summary: '', messages: [], context: {} }),
+            storage: 'mongodb'
+        });
+    } catch (error) {
+        console.error('[Tracker memory] Load failed:', error.message);
+        res.status(500).json({ error: 'No se pudo cargar la memoria del Tracker.' });
+    }
+});
+
+app.put('/api/tracker/memory/:tableId/:source', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    const source = req.params.source;
+    if (!Number.isInteger(tableId) || source !== 'live') {
+        return res.status(400).json({ error: 'Solo se guarda el contexto y análisis de Live.' });
+    }
+    if (!db.getUseMongo()) {
+        return res.status(503).json({ error: 'MongoDB Atlas no está conectado. No se guardó la memoria.' });
+    }
+    try {
+        const memory = await db.saveTrackerMemory({
+            table_id: tableId,
+            source,
+            summary: req.body.summary,
+            messages: req.body.messages,
+            context: req.body.context
+        });
+        res.json({ success: true, updated_at: memory.updated_at, storage: 'mongodb' });
+    } catch (error) {
+        console.error('[Tracker memory] Save failed:', error.message);
+        res.status(500).json({ error: 'No se pudo guardar la memoria del Tracker.' });
+    }
+});
+
 // Tracker AI endpoint — OpenRouter
 app.post('/api/ai/tracker', async (req, res) => {
     const { provider, model, apiKey, system, messages } = req.body;
     console.log('[Tracker AI] Request:', { provider, model, hasKey: !!apiKey, msgCount: messages?.length });
+    if (!db.getUseMongo()) {
+        return res.status(503).json({ success: false, error: 'MongoDB Atlas no está conectado. La IA del Tracker permanece pausada.' });
+    }
     try {
         // Strip non-ASCII characters from API key to prevent ByteString errors
         const rawKey = (apiKey || process.env.OPENROUTER_API_KEY || '').trim();
@@ -1745,11 +1816,7 @@ app.post('/api/spin', async (req, res) => {
         return res.json({ status: 'ignored_duplicate', table_id, number });
     }
 
-    // El crawler recibe OK rapido; el frontend espera el evento listo despues de Mongo + metricas.
-    res.json({ status: 'received_fast', table_id, number });
-
-    // ── NODO 2: PROCESAMIENTO ASÍNCRONO (IA, FÍSICA Y BASE DE DATOS) ──
-    // Se ejecuta en background sin bloquear al usuario
+    // Persist first: the crawler retries this event if MongoDB cannot confirm it.
     (async () => {
         try {
             if (ntfyCooldowns[table_id] && ntfyCooldowns[table_id] > 0) {
@@ -1897,6 +1964,7 @@ app.post('/api/spin', async (req, res) => {
             }
 
             if (savedSpinId) {
+                if (!res.headersSent) res.json({ status: 'saved', table_id, number, spin_id: savedSpinId });
                 const snapshot = persistIngestMetricSnapshot(table_id, savedSpinId, numsOnly, source || 'bot');
                 persistTableStateSnapshot(table_id, savedSpinId, snapshot);
                 persistDominanceAiPrediction(table_id, savedSpinId, snapshot);
@@ -1933,7 +2001,10 @@ app.post('/api/spin', async (req, res) => {
                 }
             }
 
-        } catch(e) { console.error('[Background Sync Err]', e); }
+        } catch(e) {
+            console.error('[Spin Ingest Err]', e);
+            if (!res.headersSent) res.status(503).json({ error: 'No se pudo guardar el giro en MongoDB.', code: 'SPIN_NOT_PERSISTED' });
+        }
     })();
 });
 
@@ -2211,6 +2282,7 @@ app.post('/api/v1v2-history/:tableId', (req, res) => {
 
 // ═══════════ NUKE: Wipe total via navegador ═══════════
 app.get('/nuke', async (req, res) => {
+    if (!db.getUseMongo()) return res.status(503).send('MongoDB Atlas desconectado. No se modificó ningún dato.');
     try {
         db.wipeAllSpins((err) => {
             if (err) console.error('Nuke DB error:', err);
@@ -2245,13 +2317,20 @@ app.use((req, res) => {
 
 // ---- Start ----
 
-const server = app.listen(PORT, '0.0.0.0', async () => {
-    await databaseReady;
+const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🎰 Roulette Predictor Server running at http://0.0.0.0:${PORT}`);
     console.log(`   API ready at:          http://0.0.0.0:${PORT}/api/\n`);
     console.log(`[AI] Provider preference: ${getPreferredLlmProvider()} | Ollama: ${hasOllamaConfigured() ? OLLAMA_BASE_URL : 'not configured'} | Auto remote analysis: ${AUTO_AI_REMOTE_ANALYSIS}`);
-    
-    if (db.getUseMongo()) {
+
+    if (String(process.env.DISABLE_BOTS || '').toLowerCase() === 'true') {
+        console.log('[BOOT] Automatic casino.org crawler disabled by DISABLE_BOTS=true.');
+    } else {
+        console.log('[BOOT] Starting crawler independently of MongoDB availability.');
+        startCrawlerIfEnabled();
+    }
+
+    databaseReady.then(async () => {
+        if (!db.getUseMongo()) return;
         try {
             const Table = require('./models/Table');
             await Table.updateOne({ id: 1 }, { $set: { name: 'Auto Roulette', url: 'https://www.casino.org/casinoscores/es/auto-roulette/' } });
@@ -2260,17 +2339,6 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
         } catch (e) {
             console.error('❌ [BOOT] Table sync error:', e.message);
         }
-    }
-
-    if (String(process.env.DISABLE_BOTS || '').toLowerCase() === 'true') {
-        console.log('[BOOT] Automatic casino.org crawler disabled by DISABLE_BOTS=true.');
-    } else {
-        try {
-            console.log('[BOOT] Starting automatic casino.org crawler...');
-            require('./start-bots.js')(PORT);
-        } catch (e) {
-            console.error('[BOOT] Failed to start crawler:', e.message);
-        }
-    }
+    }).catch(error => console.error('[BOOT] Database initialization failed:', error.message));
 });
 

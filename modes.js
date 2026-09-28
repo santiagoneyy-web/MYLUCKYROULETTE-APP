@@ -55,6 +55,9 @@ let trackerConfig = {
 
 // â”€â”€ Tracker Chat â”€â”€
 const trackerChatHistory = [];
+let trackerAiMemory = { summary: '', messages: [], context: {} };
+let trackerMemoryLoadId = 0;
+let trackerMemoryAvailable = false;
 let trackerVoiceEnabled = false;
 let trackerTriggerCounter = 0;
 let trackerLastDominantDir = null;
@@ -406,6 +409,7 @@ function renderManualDashTimeline() {
 
 document.addEventListener('DOMContentLoaded', () => {
     loadTrackerConfig();
+    loadTrackerAiMemory();
     const input = document.getElementById('tracker-number-input');
     if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') processTrackerNumber(); });
     const chatInput = document.getElementById('tracker-chat-input');
@@ -425,13 +429,10 @@ async function syncTrackerFromLive() {
                     .map(spin => Number(spin.number))
                     .filter(number => Number.isInteger(number) && number >= 0 && number <= 36);
             }
-        }
+        } else return;
     } catch (error) {
-        console.warn('[Tracker] No se pudo leer historial Live de la API; usando historial local.', error);
-    }
-    if (liveNumbers === null) {
-        if (typeof history === 'undefined' || !Array.isArray(history)) return;
-        liveNumbers = history.slice();
+        console.warn('[Tracker] No se pudo leer historial Live desde MongoDB.', error);
+        return;
     }
     const changed = liveNumbers.length !== trackerLiveHistory.length ||
         liveNumbers.some((number, index) => number !== trackerLiveHistory[index]);
@@ -440,6 +441,98 @@ async function syncTrackerFromLive() {
         for (const number of liveNumbers) trackerLiveHistory.push(number);
         renderTracker();
         console.log('[Tracker] Synced ' + trackerLiveHistory.length + ' spins from Live mode');
+    }
+}
+
+async function loadTrackerAiMemory() {
+    const loadId = ++trackerMemoryLoadId;
+    const tableId = typeof currentTableId !== 'undefined' && currentTableId ? currentTableId : 1;
+    const source = 'live';
+    try {
+        const response = await fetch(`/api/tracker/memory/${encodeURIComponent(tableId)}/${source}`);
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || `HTTP ${response.status}`);
+        }
+        const memory = await response.json();
+        if (loadId !== trackerMemoryLoadId) return;
+        if (memory.storage !== 'mongodb') throw new Error('El backend no confirmó conexión con MongoDB Atlas.');
+        trackerMemoryAvailable = true;
+        trackerAiMemory = {
+            summary: String(memory.summary || ''),
+            messages: Array.isArray(memory.messages) ? memory.messages.slice(-20) : [],
+            context: memory.context && typeof memory.context === 'object' ? memory.context : {}
+        };
+        const box = document.getElementById('tracker-chat-messages');
+        if (box) {
+            box.replaceChildren();
+            (trackerSource === 'live' ? trackerAiMemory.messages.slice(-10) : []).forEach(message => {
+                const div = document.createElement('div');
+                div.className = 'tracker-msg ' + (message.role === 'user' ? 'user-msg' : 'ai-msg');
+                div.textContent = String(message.content || '');
+                box.appendChild(div);
+            });
+            box.scrollTop = box.scrollHeight;
+        }
+        const status = document.getElementById('tracker-ai-status');
+        if (status) {
+            status.innerText = trackerSource === 'manual'
+                ? 'MongoDB conectado. Manual usa conocimiento Live; no se guarda.'
+                : trackerAiMemory.messages.length
+                    ? `Memoria MongoDB restaurada: ${trackerAiMemory.messages.length} mensajes`
+                    : 'MongoDB conectado. Memoria IA lista.';
+        }
+        if (trackerAutoBet && trackerHistory.length >= 3) askTrackerAIForAnalysisSilent();
+    } catch (error) {
+        if (loadId === trackerMemoryLoadId) trackerMemoryAvailable = false;
+        console.warn('[Tracker] No se pudo cargar la memoria guardada:', error.message);
+        const status = document.getElementById('tracker-ai-status');
+        if (status) status.innerText = error.message || 'MongoDB Atlas no conectado. IA pausada.';
+    }
+}
+
+function pauseTrackerForMongo() {
+    trackerMemoryAvailable = false;
+    if (trackerAutoAnalysisTimer) {
+        clearTimeout(trackerAutoAnalysisTimer);
+        trackerAutoAnalysisTimer = null;
+    }
+    const status = document.getElementById('tracker-ai-status');
+    if (status) status.innerText = 'MongoDB Atlas desconectado; Tracker pausado.';
+}
+
+async function saveTrackerAiMemory(userText, assistantText, source = trackerSource, baseMemory = trackerAiMemory, context = buildTrackerAIContext()) {
+    if (source !== 'live') return;
+    const tableId = typeof currentTableId !== 'undefined' && currentTableId ? currentTableId : 1;
+    if (source === trackerSource) baseMemory = trackerAiMemory;
+    const nextMessages = [
+        ...baseMemory.messages,
+        { role: 'user', content: String(userText || '').slice(0, 1800) },
+        { role: 'assistant', content: String(assistantText || '').slice(0, 1800) }
+    ].slice(-20);
+    const summary = String(assistantText || baseMemory.summary).slice(-3000);
+    const savedContext = {
+        totalSpins: context.totalSpins,
+        recentNumbers: context.spins.slice(-20),
+        savedAt: new Date().toISOString()
+    };
+    try {
+        const response = await fetch(`/api/tracker/memory/${encodeURIComponent(tableId)}/${source}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ summary, messages: nextMessages, context: savedContext })
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        if (result.storage !== 'mongodb') throw new Error('El servidor no confirmó guardado en MongoDB Atlas.');
+        if (source === trackerSource) trackerAiMemory = { summary, messages: nextMessages, context: savedContext };
+        const status = document.getElementById('tracker-ai-status');
+        if (status) status.innerText = 'Análisis y memoria guardados en MongoDB';
+    } catch (error) {
+        if (source === trackerSource) pauseTrackerForMongo();
+        console.error('[Tracker] No se pudo guardar la memoria de IA:', error.message);
+        const status = document.getElementById('tracker-ai-status');
+        if (status) status.innerText = 'MongoDB Atlas no disponible; IA pausada y memoria no guardada.';
     }
 }
 
@@ -465,6 +558,7 @@ function setTrackerSource(source) {
     if (source === 'live') {
         syncTrackerFromLive();
     }
+    loadTrackerAiMemory();
     trackerConfig.source = source;
     try { localStorage.setItem('tracker_ai_config', JSON.stringify(trackerConfig)); } catch(e) {}
     renderTracker();
@@ -549,14 +643,6 @@ async function testTrackerAIConnection() {
 
 function loadTrackerConfig() {
     try {
-        const savedManualHistory = JSON.parse(localStorage.getItem('tracker_manual_history') || '[]');
-        if (Array.isArray(savedManualHistory)) {
-            for (const number of savedManualHistory) {
-                if (Number.isInteger(number) && number >= 0 && number <= 36) trackerManualHistory.push(number);
-            }
-        }
-    } catch(e) {}
-    try {
         const raw = localStorage.getItem('tracker_ai_config');
         if (raw) {
             const cfg = JSON.parse(raw);
@@ -589,12 +675,12 @@ function loadTrackerConfig() {
             }
         }
     } catch(e) {}
-    // Restaurar estado AUTO BET (OFF por defecto = ahorro de tokens)
+    // Restaurar estado del análisis automático.
     const savedAutoBet = localStorage.getItem('tracker_auto_bet');
     if (savedAutoBet === '1') {
         trackerAutoBet = true;
         const btn = document.getElementById('tracker-auto-bet-btn');
-        if (btn) { btn.innerHTML = '&#x1F916; AUTO BET: ON'; btn.classList.remove('off'); }
+        if (btn) { btn.innerHTML = '&#x1F916; IA AUTO: ON'; btn.classList.remove('off'); }
     }
 }
 
@@ -611,10 +697,12 @@ let trackerAutoAnalysisTimer = null;
 
 function submitTrackerNumber(n, batch = false, source = trackerSource) {
     if (source !== trackerSource || !Number.isInteger(n) || n < 0 || n > 36) return;
-    trackerHistory.push(n);
-    if (source === 'manual') {
-        try { localStorage.setItem('tracker_manual_history', JSON.stringify(trackerManualHistory)); } catch(e) {}
+    if (source === 'manual' && !trackerMemoryAvailable) {
+        const status = document.getElementById('tracker-ai-status');
+        if (status) status.innerText = 'MongoDB Atlas no conectado; Manual está pausado.';
+        return;
     }
+    trackerHistory.push(n);
     if (trackerSource === 'live' && !batch) {
         console.log('[Tracker Live] NÃºmero recibido:', n, '| Total:', trackerHistory.length);
         const status = document.getElementById('tracker-ai-status');
@@ -622,8 +710,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource) {
     }
     if (!batch) {
         renderTracker();
-        // Auto-analisis silencioso: la IA piensa y actualiza solo la prediccion
-        // SOLO si AUTO BET esta ON (OFF = ahorro de tokens, IA pausada)
+        // El análisis automático solo se ejecuta cuando IA AUTO está activado.
         if (trackerAutoBet && trackerHistory.length >= 3) {
             if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
             trackerAutoAnalysisTimer = setTimeout(() => {
@@ -642,15 +729,25 @@ async function askTrackerAIForAnalysisSilent() {
 async function callTrackerAISilent(promptObj) {
     const status = document.getElementById('tracker-ai-status');
     const predEl = document.getElementById('tracker-prediction');
+    if (!trackerMemoryAvailable) {
+        if (status) status.innerText = 'MongoDB Atlas no conectado; IA pausada.';
+        if (predEl) predEl.innerText = '--';
+        return;
+    }
     if (status) status.innerText = 'Pensando...';
     if (predEl) predEl.innerText = 'ANALIZANDO...';
+    const requestSource = trackerSource;
+    const requestMemory = trackerAiMemory;
+    const requestContext = buildTrackerAIContext();
     try {
         const payload = {
             provider: trackerConfig.provider,
             model: trackerConfig.model,
             apiKey: trackerConfig.apiKey,
-            system: promptObj.system,
-            messages: promptObj.messages
+            messages: [...(requestSource === 'live' ? requestMemory.messages.slice(-8) : []), ...promptObj.messages],
+            system: requestMemory.summary
+                ? `${promptObj.system}\n\nCONTEXTO DE SESIONES ANTERIORES (úsalo como referencia y prioriza los datos actuales):\n${requestMemory.summary}\nNúmeros recientes guardados: ${(requestMemory.context?.recentNumbers || []).join(', ')}. Total guardado: ${requestMemory.context?.totalSpins || 0}.`
+                : promptObj.system
         };
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000);
@@ -661,16 +758,25 @@ async function callTrackerAISilent(promptObj) {
             signal: controller.signal
         });
         clearTimeout(timeoutId);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        if (!res.ok) {
+            if (res.status === 503) pauseTrackerForMongo();
+            throw new Error('HTTP ' + res.status);
+        }
         const data = await res.json();
         if (data.success && data.response) {
             syncPredictionFromAI(data.response);
+            const finalUserMessage = promptObj.memoryText || 'Análisis automático del Tracker.';
+            if (requestSource === 'live') {
+                await saveTrackerAiMemory(finalUserMessage, data.response, requestSource, requestMemory, requestContext);
+            } else if (status) {
+                status.innerText = 'Análisis Manual listo; los datos no se guardaron.';
+            }
         }
     } catch (err) {
         console.error('[Tracker AI Silent] ERROR:', err.name, err.message);
         if (predEl) predEl.innerText = '--';
     }
-    if (status) status.innerText = 'Esperando datos...';
+    if (status && status.innerText === 'Pensando...') status.innerText = 'Esperando datos...';
 }
 
 function processTrackerNumber() {
@@ -692,14 +798,13 @@ function processTrackerNumber() {
 let isWiping = false;
 
 function undoTrackerNumber() {
-    if (trackerSource !== 'manual' || trackerHistory.length === 0) return;
+    if (trackerSource !== 'manual' || trackerHistory.length === 0 || !trackerMemoryAvailable) return;
     trackerHistory.pop();
-    try { localStorage.setItem('tracker_manual_history', JSON.stringify(trackerManualHistory)); } catch(e) {}
     renderTracker();
 }
 
 function clearTrackerData() {
-    if (isWiping || trackerSource !== 'manual') return;
+    if (isWiping || trackerSource !== 'manual' || !trackerMemoryAvailable) return;
     isWiping = true;
     trackerManualHistory.length = 0;
     trackerLastSignal = null;
@@ -709,31 +814,35 @@ function clearTrackerData() {
     trackerLastZigzag = false;
     trackerCurrentAvgCW = 9;
     trackerCurrentAvgCCW = -9;
-    try { localStorage.removeItem('tracker_manual_history'); } catch(e) {}
     renderTracker();
     isWiping = false;
 }
 
 function toggleTrackerAutoBet() {
+    if (!trackerAutoBet && !trackerMemoryAvailable) {
+        const status = document.getElementById('tracker-ai-status');
+        if (status) status.innerText = 'Conecta MongoDB Atlas para activar la IA del Tracker.';
+        return;
+    }
     trackerAutoBet = !trackerAutoBet;
     const btn = document.getElementById('tracker-auto-bet-btn');
     if (btn) {
-        if (trackerAutoBet) { btn.innerHTML = '&#x1F916; AUTO BET: ON'; btn.classList.remove('off'); }
-        else { btn.innerHTML = '&#x1F916; AUTO BET: OFF'; btn.classList.add('off'); }
+        if (trackerAutoBet) { btn.innerHTML = '&#x1F916; IA AUTO: ON'; btn.classList.remove('off'); }
+        else { btn.innerHTML = '&#x1F916; IA AUTO: OFF'; btn.classList.add('off'); }
     }
     localStorage.setItem('tracker_auto_bet', trackerAutoBet ? '1' : '0');
-    console.log('[Tracker] AUTO BET:', trackerAutoBet ? 'ON (IA analiza cada numero)' : 'OFF (IA no analiza, ahorro de tokens)');
+    console.log('[Tracker] IA AUTO:', trackerAutoBet ? 'ON (analiza cada número nuevo)' : 'OFF (análisis automático pausado)');
     if (trackerAutoBet && trackerHistory.length >= 3) {
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = 'AUTO BET ON: analizando...';
+        if (status) status.innerText = 'IA AUTO ON: analizando...';
         askTrackerAIForAnalysisSilent();
     } else if (trackerAutoBet) {
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = 'AUTO BET ON: esperando 3+ numeros...';
+        if (status) status.innerText = 'IA AUTO ON: esperando 3+ números...';
     } else {
         if (trackerAutoAnalysisTimer) { clearTimeout(trackerAutoAnalysisTimer); trackerAutoAnalysisTimer = null; }
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = 'AUTO BET OFF: IA pausada';
+        if (status) status.innerText = 'IA AUTO OFF: análisis automático pausado';
     }
 }
 
@@ -1740,11 +1849,13 @@ Antes de responder, razona internamente en este orden: 1) detecta el patron de c
     if (userMessage) {
         return {
             system: systemPrompt,
+            memoryText: userMessage,
             messages: [{ role: 'user', content: dataBlock + '\n\n' + userMessage + ' (proyecta UN target especifico con su numero)' }]
         };
     }
     return {
         system: systemPrompt,
+        memoryText: 'Análisis automático del Tracker.',
         messages: [{ role: 'user', content: dataBlock + '\n\nProyecta UN target especifico con su numero. Justifica en una oracion.' }]
     };
 }
@@ -1752,16 +1863,26 @@ Antes de responder, razona internamente en este orden: 1) detecta el patron de c
 async function callTrackerAI(promptObj, isAuto) {
     const status = document.getElementById('tracker-ai-status');
     const predEl = document.getElementById('tracker-prediction');
+    if (!trackerMemoryAvailable) {
+        if (status) status.innerText = 'MongoDB Atlas no conectado; IA pausada.';
+        if (predEl) predEl.innerText = '--';
+        return;
+    }
     if (status) status.innerText = 'Pensando...';
     if (predEl) predEl.innerText = 'ANALIZANDO...';
+    const requestSource = trackerSource;
+    const requestMemory = trackerAiMemory;
+    const requestContext = buildTrackerAIContext();
     console.log('[Tracker AI] Sending request:', trackerConfig.provider, trackerConfig.model);
     try {
         const payload = {
             provider: trackerConfig.provider,
             model: trackerConfig.model,
             apiKey: trackerConfig.apiKey,
-            system: promptObj.system,
-            messages: promptObj.messages
+            messages: [...(requestSource === 'live' ? requestMemory.messages.slice(-8) : []), ...promptObj.messages],
+            system: requestMemory.summary
+                ? `${promptObj.system}\n\nCONTEXTO DE SESIONES ANTERIORES (úsalo como referencia y prioriza los datos actuales):\n${requestMemory.summary}\nNúmeros recientes guardados: ${(requestMemory.context?.recentNumbers || []).join(', ')}. Total guardado: ${requestMemory.context?.totalSpins || 0}.`
+                : promptObj.system
         };
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000);
@@ -1772,12 +1893,21 @@ async function callTrackerAI(promptObj, isAuto) {
             signal: controller.signal
         });
         clearTimeout(timeoutId);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        if (!res.ok) {
+            if (res.status === 503) pauseTrackerForMongo();
+            throw new Error('HTTP ' + res.status);
+        }
         const data = await res.json();
         console.log('[Tracker AI] Response:', data.success, data.response ? data.response.substring(0, 50) : 'no response');
         if (data.success && data.response) {
             addTrackerChatMessage('ai', '&#x1F916; ' + data.response);
             syncPredictionFromAI(data.response);
+            const finalUserMessage = promptObj.memoryText || 'Análisis automático del Tracker.';
+            if (requestSource === 'live') {
+                await saveTrackerAiMemory(finalUserMessage, data.response, requestSource, requestMemory, requestContext);
+            } else if (status) {
+                status.innerText = 'Análisis Manual listo; los datos no se guardaron.';
+            }
         } else if (data.error) {
             addTrackerChatMessage('ai', '&#x26A0; Error del servidor: ' + data.error);
         } else {
@@ -1791,7 +1921,7 @@ async function callTrackerAI(promptObj, isAuto) {
         else if (errMsg.includes('Modelo') || errMsg.includes('not found')) displayErr = '&#x1F4BE; Modelo no encontrado';
         addTrackerChatMessage('ai', displayErr + '<br><small>Provider: <strong>' + trackerConfig.provider + '</strong> | Model: <strong>' + trackerConfig.model + '</strong> | Key: ' + (trackerConfig.apiKey ? '&#x2705;' : '&#x274C;') + '</small>');
     }
-    if (status) status.innerText = 'Esperando datos...';
+    if (status && status.innerText === 'Pensando...') status.innerText = 'Esperando datos...';
 }
 
 function syncPredictionFromAI(responseText) {

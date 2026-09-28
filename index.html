@@ -553,11 +553,41 @@
         70% { box-shadow: 0 0 0 8px rgba(255,59,92,0); }
         100% { box-shadow: 0 0 0 0 rgba(255,59,92,0); }
     }
+    #mongo-connection-alert {
+        position: fixed;
+        inset: 0 0 auto;
+        z-index: 10001;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 10px 14px;
+        background: #4a1717;
+        border-bottom: 1px solid #a84444;
+        color: #fff;
+        font: 600 13px Inter, sans-serif;
+        text-align: center;
+    }
+    #mongo-connection-alert button {
+        border: 1px solid #f1aaaa;
+        border-radius: 4px;
+        background: #702424;
+        color: #fff;
+        padding: 6px 10px;
+        cursor: pointer;
+        font: inherit;
+    }
+    #mongo-connection-alert button:disabled { opacity: 0.65; cursor: wait; }
     @keyframes fadeIn { from { opacity:0; transform: translateY(-4px); } to { opacity:1; transform: translateY(0); } }
 </style>
 
 
 <body>
+
+<div id="mongo-connection-alert" role="alert" aria-live="assertive">
+    <span id="mongo-connection-message">MongoDB Atlas desconectado. Los datos y análisis están pausados.</span>
+    <button id="mongo-reconnect-button" type="button" onclick="reconnectMongo()">Reconectar</button>
+</div>
 
 <!-- â•â•â• LANDING PAGE â•â•â• -->
 <div id="landing-overlay">
@@ -1197,7 +1227,7 @@
                         <button class="tracker-btn tracker-btn-mode" id="tracker-btn-both" onclick="setTrackerPredictionMode('both')">Both</button>
                     </div>
                     <button class="tracker-btn tracker-btn-toggle off" id="tracker-auto-bet-btn" onclick="toggleTrackerAutoBet()">
-                        &#x1F916; AUTO BET: OFF
+                        &#x1F916; IA AUTO: OFF
                     </button>
                     <button class="tracker-btn tracker-btn-primary" id="tracker-neigh-btn" onclick="trackerBetNeighbors()">
                         &#x1F3B2; 9 NEIGHBOURS
@@ -1213,7 +1243,7 @@
 
 <script src="src/engine/predictor.js?v=999"></script>
 <script src="ai_chat.js?v=5"></script>
-<script src="modes.js?v=16"></script>
-<script src="app.js?v=1042"></script>
+<script src="modes.js?v=17"></script>
+<script src="app.js?v=1043"></script>
 </body>
 </html>

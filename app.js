@@ -3,6 +3,66 @@
 // app.js Ã¢ÂÂ SHADOW ROULETTE UI ENGINE
 // ============================================================
 
+let mongoStatusPoll = null;
+let mongoReconnectBusy = false;
+let mongoPreviouslyConnected = null;
+
+function renderMongoConnectionStatus(status) {
+    const banner = document.getElementById('mongo-connection-alert');
+    const message = document.getElementById('mongo-connection-message');
+    if (!banner) return;
+    banner.style.display = status?.connected ? 'none' : 'flex';
+    if (message && !status?.connected) {
+        message.textContent = status?.error || 'MongoDB Atlas desconectado. Los datos y análisis están pausados.';
+    }
+}
+
+async function checkMongoConnection() {
+    try {
+        const response = await fetch('/api/db/status', { cache: 'no-store' });
+        const status = await response.json();
+        renderMongoConnectionStatus(status);
+        if (!status.connected && typeof pauseTrackerForMongo === 'function') pauseTrackerForMongo();
+        if (status.connected && mongoPreviouslyConnected === false && typeof loadTrackerAiMemory === 'function') {
+            loadTrackerAiMemory();
+        }
+        mongoPreviouslyConnected = Boolean(status.connected);
+        return status;
+    } catch (error) {
+        renderMongoConnectionStatus({ error: 'No se puede contactar al servidor para verificar MongoDB.' });
+        return { connected: false };
+    }
+}
+
+async function reconnectMongo() {
+    if (mongoReconnectBusy) return;
+    mongoReconnectBusy = true;
+    const button = document.getElementById('mongo-reconnect-button');
+    if (button) { button.disabled = true; button.textContent = 'Conectando...'; }
+    const message = document.getElementById('mongo-connection-message');
+    if (message) message.textContent = 'Intentando reconectar con MongoDB Atlas...';
+    try {
+        const response = await fetch('/api/db/reconnect', { method: 'POST' });
+        const status = await response.json();
+        renderMongoConnectionStatus(status);
+        if (status.connected) {
+            if (message) message.textContent = 'MongoDB Atlas conectado. Actualizando datos...';
+            setTimeout(() => window.location.reload(), 700);
+        }
+    } catch (error) {
+        renderMongoConnectionStatus({ error: 'Falló la reconexión. Comprueba la configuración de MongoDB Atlas y vuelve a intentarlo.' });
+    } finally {
+        mongoReconnectBusy = false;
+        if (button) { button.disabled = false; button.textContent = 'Reconectar'; }
+    }
+}
+
+window.reconnectMongo = reconnectMongo;
+document.addEventListener('DOMContentLoaded', () => {
+    checkMongoConnection();
+    mongoStatusPoll = setInterval(checkMongoConnection, 10000);
+});
+
 const history = [];
 const cwHistory = [];
 const ccwHistory = [];
@@ -97,6 +157,7 @@ function getLSKey(tableId) {
 }
 
 function saveSessionToLocalStorage() {
+    return;
     try {
         const state = {
             tableId: currentTableId,
@@ -135,6 +196,7 @@ function saveSessionToLocalStorage() {
 }
 
 function loadSessionFromLocalStorage(tableIdOverride) {
+    return false;
     try {
         const tid = tableIdOverride || currentTableId;
         const raw = localStorage.getItem(getLSKey(tid));
@@ -1956,8 +2018,7 @@ function applyUniformScale() {
 document.addEventListener('DOMContentLoaded', async () => {
     if (typeof AIChat !== 'undefined') AIChat.init();
 
-    // El estado de prediccion se guarda solo en localStorage para carga rapida.
-    // El servidor es siempre la fuente de verdad - no se envia estado local al servidor.
+    // MongoDB is the only source of truth for persisted roulette data.
 
     renderShadowPanel();
     renderTravelPanel();
@@ -1968,13 +2029,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
             const r = await fetch('/api/tables');
             if (r.ok) ts = await r.json();
-        } catch(err) { console.warn("Fetch tables failed, using fallback."); }
+        } catch(err) { console.warn('MongoDB tables request failed.', err); }
 
         if (!ts || ts.length === 0) {
-            ts = [
-                { id: 1, name: 'Auto Roulette' },
-                { id: 2, name: 'Inmersive Roulette' }
-            ];
+            renderMongoConnectionStatus({ error: 'No se pudieron cargar las mesas desde MongoDB Atlas. Reconecta para continuar.' });
+            return;
         }
 
         const tableSelect = document.getElementById('table-select');
@@ -1990,6 +2049,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             tableSelect.onchange = async () => {
                 saveSessionToLocalStorage();
                 currentTableId = tableSelect.value;
+                if (typeof loadTrackerAiMemory === 'function') loadTrackerAiMemory();
                 const tImg = document.querySelector('.table-image-container img');
                 if (tImg) tImg.src = currentTableId == "1" ? 'table-1.jpg' : 'table-2.jpg';
 
@@ -2058,6 +2118,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // Force Load Initial
             currentTableId = String(ts[0].id);
+            if (typeof loadTrackerAiMemory === 'function') loadTrackerAiMemory();
             tableSelect.value = currentTableId;
             const tImgInit = document.querySelector('.table-image-container img');
             if (tImgInit) tImgInit.src = currentTableId == "1" ? 'table-1.jpg' : 'table-2.jpg';

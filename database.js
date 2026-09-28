@@ -1,7 +1,5 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
-const fs = require('fs');
-const path = require('path');
 
 const Table = require('./models/Table');
 const Spin = require('./models/Spin');
@@ -13,9 +11,26 @@ const TableStateSnapshot = require('./models/TableStateSnapshot');
 const Pattern = require('./models/Pattern');
 const MetaPattern = require('./models/MetaPattern');
 const DirectionPattern = require('./models/DirectionPattern');
+const TrackerMemory = require('./models/TrackerMemory');
 
-const DB_FILE = path.join(__dirname, 'roulette_db.json');
 let useMongo = false;
+let lastConnectionError = '';
+let reconnectPromise = null;
+
+mongoose.connection.on('connected', () => {
+    useMongo = true;
+    lastConnectionError = '';
+    console.log('[DB] MongoDB connection restored.');
+});
+mongoose.connection.on('disconnected', () => {
+    useMongo = false;
+    console.error('[DB] MongoDB disconnected; database-backed features are paused.');
+});
+mongoose.connection.on('error', error => {
+    useMongo = false;
+    lastConnectionError = error.message;
+    console.error('[DB] MongoDB connection error:', error.message);
+});
 
 // Memory cache for fallback
 let fallbackData = {
@@ -43,36 +58,8 @@ let fallbackData = {
     wipeGeneration: 0
 };
 
-function loadFallback() {
-    if (fs.existsSync(DB_FILE)) {
-        try {
-            const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-            // Merge logic: Preserve tables and expertRules if missing in file
-            if (data.tables && data.tables.length > 0) fallbackData.tables = data.tables;
-            if (data.spins) fallbackData.spins = data.spins;
-            if (data.expertRules) fallbackData.expertRules = data.expertRules;
-            if (data.users) fallbackData.users = data.users;
-            if (data.strategies) fallbackData.strategies = data.strategies;
-            if (data.metricSnapshots) fallbackData.metricSnapshots = data.metricSnapshots;
-            if (data.aiPredictions) fallbackData.aiPredictions = data.aiPredictions;
-            if (data.tableStateSnapshots) fallbackData.tableStateSnapshots = data.tableStateSnapshots;
-            if (data.v1v2History) fallbackData.v1v2History = data.v1v2History;
-            if (data.syncLog) fallbackData.syncLog = data.syncLog;
-            if (data.wipeGeneration !== undefined) fallbackData.wipeGeneration = data.wipeGeneration;
-            
-            console.log('[DB] Loaded JSON fallback data.');
-        } catch (e) {
-            console.error('[DB] JSON Load Error, using defaults.');
-        }
-    }
-}
-
 function saveFallback() {
-    try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(fallbackData, null, 2));
-    } catch (e) {
-        console.error('[DB] Fallback Save Error:', e.message);
-    }
+    console.error('[DB] JSON persistence is disabled; connect MongoDB Atlas.');
 }
 
 async function initDB() {
@@ -107,6 +94,7 @@ async function initDB() {
                 });
                 
                 useMongo = true;
+                lastConnectionError = '';
                 console.log('[DB] Connected to MongoDB Atlas successfully.');
                 break;
             } catch (err) {
@@ -115,6 +103,7 @@ async function initDB() {
                     continue;
                 }
                 console.error('[DB] MongoDB Connection Failed:', err.message);
+                lastConnectionError = err.message;
                 console.log('[DB] Tip: Check if cluster is paused in MongoDB Atlas (free tier auto-pauses).');
                 break;
             }
@@ -148,14 +137,51 @@ async function initDB() {
                 console.error('[DB] Seed error:', seedErr.message);
             }
         } else {
-            console.log('[DB] Falling back to JSON storage.');
-            loadFallback();
+            console.error('[DB] MongoDB unavailable. Waiting for reconnection; JSON storage is disabled.');
         }
     } else {
-        console.warn('[DB] No MONGODB_URI found in .env. Falling back to JSON storage.');
+        console.error('[DB] No MONGODB_URI configured. MongoDB is required; JSON storage is disabled.');
+        lastConnectionError = 'MONGODB_URI no está configurada en el entorno del servidor.';
         useMongo = false;
-        loadFallback();
     }
+}
+
+async function reconnect() {
+    if (reconnectPromise) return reconnectPromise;
+    reconnectPromise = (async () => {
+        if (!process.env.MONGODB_URI) {
+            lastConnectionError = 'MONGODB_URI no está configurada en el entorno del servidor.';
+            return getConnectionStatus();
+        }
+        try {
+            await initDB();
+        } catch (error) {
+            lastConnectionError = error.message;
+            useMongo = false;
+        }
+        return getConnectionStatus();
+    })();
+    try {
+        return await reconnectPromise;
+    } finally {
+        reconnectPromise = null;
+    }
+}
+
+function getConnectionStatus() {
+    const readyState = mongoose.connection.readyState;
+    const connected = useMongo && readyState === 1;
+    return {
+        connected,
+        state: readyState,
+        error: connected ? '' : lastConnectionError.includes('MONGODB_URI')
+            ? lastConnectionError
+            : 'No se pudo conectar a MongoDB Atlas. Verifica la URI, el usuario y la lista de IP permitidas.'
+    };
+}
+
+function isMongoConnected() {
+    return getConnectionStatus().connected;
 }
 
 // --- Tables ---
@@ -1318,9 +1344,38 @@ async function getDirectionPatternStats(tableId, sequence) {
     }
 }
 
+async function getTrackerMemory(tableId, source) {
+    if (!useMongo) throw new Error('MongoDB Atlas no está conectado; memoria del Tracker deshabilitada.');
+    return await TrackerMemory.findOne({ table_id: Number(tableId), source }).lean().exec() || null;
+}
+
+async function saveTrackerMemory(data) {
+    const tableId = Number(data.table_id);
+    if (data.source !== 'live') throw new Error('Solo se persiste la memoria del modo Live.');
+    const source = 'live';
+    if (!useMongo) throw new Error('MongoDB Atlas no está conectado; memoria del Tracker deshabilitada.');
+    const memory = {
+        table_id: tableId,
+        source,
+        summary: String(data.summary || '').slice(-3000),
+        messages: (Array.isArray(data.messages) ? data.messages : []).slice(-20).map(message => ({
+            role: message.role === 'assistant' ? 'assistant' : 'user',
+            content: String(message.content || '').slice(0, 1800),
+            created_at: message.created_at || new Date()
+        })).filter(message => message.content),
+        context: data.context && typeof data.context === 'object' ? data.context : {},
+        updated_at: new Date()
+    };
+    return await TrackerMemory.findOneAndUpdate(
+        { table_id: tableId, source },
+        { $set: memory },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean().exec();
+}
+
 module.exports = { 
-    initDB, getTables, addTable, deleteTable, getHistory, addSpin, 
-    clearHistory, wipeAllSpins, getStats, getUseMongo: () => useMongo,
+    initDB, reconnect, getConnectionStatus, getTables, addTable, deleteTable, getHistory, addSpin,
+    clearHistory, wipeAllSpins, getStats, getUseMongo: isMongoConnected,
     getExpertRule, addExpertRule, getPatternStats,
     findAccessCode, saveAccessCode,
     listStrategies, saveStrategyRecord,
@@ -1329,6 +1384,7 @@ module.exports = {
     addTableStateSnapshot, getTableStateSnapshots,
     saveMetaPattern, updateMetaPatternResult, getMetaPatternStats, getUnresolvedMetaPatterns,
     saveDirectionPattern, findDirectionPatterns, getDirectionPatternStats,
-    getWipeGeneration, saveV1V2History, getV1V2History, appendSyncLog, getSyncLog
+    getWipeGeneration, saveV1V2History, getV1V2History, appendSyncLog, getSyncLog,
+    getTrackerMemory, saveTrackerMemory
 };
 

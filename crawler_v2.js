@@ -93,14 +93,16 @@ function logError(source, message) {
 // ═══════════════════════════════════════════════════════════════
 // API: Post a detected spin to the local server
 // ═══════════════════════════════════════════════════════════════
-async function postSpin(table, number, rawHistory = []) {
+async function postSpin(table, number, rawHistory = [], event = {}) {
     try {
         const payload = {
             table_id: table.id,
             number,
             source: table.source,
             raw_history: rawHistory,
-            observed_at: new Date().toISOString()
+            event_id: event.eventId || undefined,
+            round_key: event.eventId || undefined,
+            observed_at: event.observedAt || new Date().toISOString()
         };
 
         const response = await axios.post(API_URL, payload, {
@@ -128,7 +130,7 @@ async function fetchCasinoOrgApi(table, useInsecure = false) {
         const config = {
             params: {
                 page:     0,
-                size:     20,
+                size:     100,
                 sort:     'data.settledAt,desc',
                 duration: 6
             },
@@ -145,10 +147,14 @@ async function fetchCasinoOrgApi(table, useInsecure = false) {
         const response = await axios.get(table.apiUrl, config);
 
         if (Array.isArray(response.data) && response.data.length > 0) {
-            const numbers = response.data
-                .map(item => item?.data?.result?.outcome?.number)
-                .filter(n => typeof n === 'number' && n >= 0 && n <= 36);
-            if (numbers.length >= 3) return numbers;
+            const records = response.data
+                .map(item => ({
+                    number: item?.data?.result?.outcome?.number,
+                    eventId: item?.id || item?.data?.id || item?.data?.settledAt,
+                    observedAt: item?.data?.settledAt
+                }))
+                .filter(item => typeof item.number === 'number' && item.number >= 0 && item.number <= 36);
+            if (records.length >= 3) return records;
         }
         return null;
     } catch (err) {
@@ -168,34 +174,58 @@ async function runApiCrawler(table) {
     log(table.source, `API: ${table.apiUrl}`);
     log(table.source, `Poll: ${POLL_MS}ms`);
 
-    let lastSent = null;
+    let lastObserved = null;
+    const pendingRecords = [];
+    const pendingIds = new Set();
     let staleCount = 0;
     const MAX_STALE = 40; // 40 * POLL_MS before reconnect attempt
 
     while (true) {
         try {
-            const numbers = await fetchCasinoOrgApi(table);
+            const records = await fetchCasinoOrgApi(table);
 
-            if (numbers && numbers.length > 0) {
-                const current = numbers[0];
-
-                if (current !== lastSent) {
-                    log(table.source, `New number: ${current} | recent: [${numbers.slice(0,8).join(', ')}]`);
-                    const ok = await postSpin(table, current, numbers.slice(0, 15));
-                    if (ok) {
-                        lastSent = current;
-                        staleCount = 0;
-                    }
+            if (records && records.length > 0) {
+                let newlyObserved;
+                const observedIndex = records.findIndex(record => record.eventId === lastObserved);
+                if (lastObserved === null) {
+                    newlyObserved = records.slice(0, 1);
+                } else if (observedIndex >= 0) {
+                    newlyObserved = records.slice(0, observedIndex).reverse();
                 } else {
+                    newlyObserved = records.slice().reverse();
+                    log(table.source, `Last observed round is outside the source window; ${newlyObserved.length} available rounds will be checked.`);
+                }
+                lastObserved = records[0].eventId;
+
+                for (const record of newlyObserved) {
+                    if (record.eventId && !pendingIds.has(record.eventId)) {
+                        pendingRecords.push(record);
+                        pendingIds.add(record.eventId);
+                    }
+                }
+
+                while (pendingRecords.length > 0) {
+                    const record = pendingRecords[0];
+                    const recent = records.map(item => item.number);
+                    log(table.source, `New round ${record.eventId}: #${record.number} | pending=${pendingRecords.length} | recent: [${recent.slice(0,8).join(', ')}]`);
+                    const ok = await postSpin(table, record.number, recent.slice(0, 15), record);
+                    if (!ok) break;
+                    pendingRecords.shift();
+                    pendingIds.delete(record.eventId);
+                    staleCount = 0;
+                }
+
+                if (newlyObserved.length === 0 && pendingRecords.length === 0) {
                     staleCount++;
                     if (staleCount % 10 === 0) {
                         log(table.source, `Waiting for new spin... (stale=${staleCount})`);
                     }
                     if (staleCount >= MAX_STALE) {
                         log(table.source, `No new data for ${MAX_STALE} cycles. Checking connection...`);
-                        lastSent = null;
                         staleCount = 0;
                     }
+                } else if (pendingRecords.length > 0) {
+                    log(table.source, `Mongo/API unavailable; keeping ${pendingRecords.length} round(s) queued in memory.`);
                 }
             } else {
                 log(table.source, 'Empty response. Retrying...');
