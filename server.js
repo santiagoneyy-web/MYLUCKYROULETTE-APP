@@ -8,6 +8,10 @@ const path    = require('path');
 const fs      = require('fs');
 const db      = require('./database');
 const Spin    = require('./models/Spin'); // MongoDB Model
+const mongoose = require('mongoose');
+const TrackerBankrollSession = require('./models/TrackerBankrollSession');
+const TrackerBankrollEntry = require('./models/TrackerBankrollEntry');
+const trackerBankroll = require('./src/engine/tracker_bankroll');
 const predictor = require('./src/engine/predictor'); // Agents 1-4
 const agent5  = require('./src/engine/agent5');      // Autonomous AI & Physics
 const axios   = require('axios');
@@ -1679,6 +1683,208 @@ app.put('/api/tracker/memory/:tableId/:source', async (req, res) => {
     }
 });
 
+// Tracker bankroll records are intentionally MongoDB-only. Manual spins never reach these routes.
+app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    if (!Number.isInteger(tableId)) return res.status(400).json({ error: 'Mesa inválida.' });
+    try {
+        const sessions = await TrackerBankrollSession.find({ table_id: tableId })
+            .sort({ session_no: -1 }).limit(100).lean().exec();
+        const selected = (req.query.session_id
+            ? sessions.find(item => String(item._id) === String(req.query.session_id))
+            : null) || sessions.find(item => item.status === 'active');
+        const entries = selected
+            ? await TrackerBankrollEntry.find({ session_id: selected._id }).sort({ created_at: -1 }).limit(30).lean().exec()
+            : [];
+        res.json({ sessions, selected_session_id: selected?._id || null, entries: entries.reverse(), storage: 'mongodb' });
+    } catch (error) {
+        console.error('[Tracker bankroll] Load failed:', error.message);
+        res.status(500).json({ error: 'No se pudieron cargar las sesiones desde MongoDB.' });
+    }
+});
+
+app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    const sessionNo = Number(req.body.session_no);
+    const capital = Number(req.body.initial_capital);
+    const chipValue = Number(req.body.chip_value);
+    if (!Number.isInteger(tableId) || !Number.isInteger(sessionNo) || sessionNo < 1 ||
+        !Number.isFinite(capital) || capital <= 0 || !Number.isFinite(chipValue) || chipValue <= 0) {
+        return res.status(400).json({ error: 'Ingresa sesión, capital y valor de ficha válidos.' });
+    }
+    try {
+        const mongoSession = await mongoose.startSession();
+        let created;
+        try {
+            await mongoSession.withTransaction(async () => {
+                if (await TrackerBankrollSession.exists({ table_id: tableId, session_no: sessionNo }).session(mongoSession)) {
+                    const error = new Error('Ese número de sesión ya existe.');
+                    error.code = 'SESSION_EXISTS';
+                    throw error;
+                }
+                await TrackerBankrollSession.updateMany(
+                    { table_id: tableId, status: 'active' },
+                    { $set: { status: 'paused', updated_at: new Date() } },
+                    { session: mongoSession }
+                );
+                [created] = await TrackerBankrollSession.create([{
+                    table_id: tableId,
+                    session_no: sessionNo,
+                    initial_capital: capital,
+                    balance: capital,
+                    chip_value: chipValue,
+                    status: 'active'
+                }], { session: mongoSession });
+            });
+        } finally {
+            await mongoSession.endSession();
+        }
+        res.status(201).json({ success: true, session: created, storage: 'mongodb' });
+    } catch (error) {
+        const duplicate = error.code === 'SESSION_EXISTS' || error.code === 11000;
+        if (!duplicate) console.error('[Tracker bankroll] Create failed:', error.message);
+        res.status(duplicate ? 409 : 500).json({ error: duplicate ? 'Ese número de sesión ya existe.' : 'No se pudo crear la sesión en MongoDB.' });
+    }
+});
+
+app.post('/api/tracker/bankroll/:tableId/:sessionId/activate', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    try {
+        const mongoSession = await mongoose.startSession();
+        let selected;
+        try {
+            await mongoSession.withTransaction(async () => {
+                selected = await TrackerBankrollSession.findOne({ _id: req.params.sessionId, table_id: tableId }).session(mongoSession);
+                if (!selected || selected.status === 'closed') return;
+                await TrackerBankrollSession.updateMany(
+                    { table_id: tableId, status: 'active' },
+                    { $set: { status: 'paused', updated_at: new Date() } },
+                    { session: mongoSession }
+                );
+                selected.status = 'active';
+                selected.updated_at = new Date();
+                await selected.save({ session: mongoSession });
+            });
+        } finally {
+            await mongoSession.endSession();
+        }
+        if (!selected || selected.status === 'closed') return res.status(404).json({ error: 'La sesión no existe o ya fue cerrada.' });
+        res.json({ success: true, session: selected, storage: 'mongodb' });
+    } catch (error) {
+        console.error('[Tracker bankroll] Activate failed:', error.message);
+        res.status(500).json({ error: 'No se pudo activar la sesión.' });
+    }
+});
+
+app.post('/api/tracker/bankroll/:tableId/:sessionId/close', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    try {
+        const session = await TrackerBankrollSession.findOne({ _id: req.params.sessionId, table_id: tableId }).exec();
+        if (!session) return res.status(404).json({ error: 'No se encontró la sesión.' });
+        if (session.status !== 'closed') {
+            session.status = 'closed';
+            session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
+            session.closed_at = new Date();
+            session.updated_at = session.closed_at;
+            await session.save();
+        }
+        res.json({ success: true, session, storage: 'mongodb' });
+    } catch (error) {
+        console.error('[Tracker bankroll] Close failed:', error.message);
+        res.status(500).json({ error: 'No se pudo cerrar la sesión en MongoDB.' });
+    }
+});
+
+app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    const spinId = Number(req.body.spin_id);
+    const number = Number(req.body.number);
+    const predictionNumbers = Array.isArray(req.body.prediction_numbers)
+        ? req.body.prediction_numbers.map(Number)
+        : [];
+    const spinKey = `${tableId}:${spinId}`;
+    if (!Number.isInteger(tableId) || !Number.isInteger(spinId) || !Number.isInteger(number) || number < 0 || number > 36 ||
+        predictionNumbers.length !== trackerBankroll.POCKETS_PER_BET ||
+        predictionNumbers.some(value => !Number.isInteger(value) || value < 0 || value > 36) ||
+        new Set(predictionNumbers).size !== trackerBankroll.POCKETS_PER_BET) {
+        return res.status(400).json({ error: 'Tirada o predicción N4 inválida.' });
+    }
+    try {
+        const spin = await Spin.findOne({ id: spinId, table_id: tableId, number, source_quality: 'live' }).lean().exec();
+        if (!spin) return res.status(409).json({ error: 'La tirada Live no está confirmada en MongoDB.' });
+
+        const mongoSession = await mongoose.startSession();
+        let result;
+        try {
+            await mongoSession.withTransaction(async () => {
+                const session = await TrackerBankrollSession.findOne({
+                    _id: req.params.sessionId,
+                    table_id: tableId,
+                    status: 'active'
+                }).session(mongoSession);
+                if (!session) {
+                    result = { error: 'No hay una sesión activa para esta mesa.', status: 409 };
+                    return;
+                }
+                const existing = await TrackerBankrollEntry.findOne({ session_id: session._id, spin_key: spinKey }).session(mongoSession);
+                if (existing) {
+                    result = { session, entry: existing, duplicate: true };
+                    return;
+                }
+                const stake = trackerBankroll.getStake(session.chip_value, session.current_round);
+                if (session.balance + 1e-9 < stake) {
+                    result = { error: 'Capital insuficiente para la siguiente apuesta.', status: 409, insufficient_capital: true };
+                    return;
+                }
+                const settlement = trackerBankroll.calculateSettlement(session, number, predictionNumbers);
+                const [entry] = await TrackerBankrollEntry.create([{
+                    session_id: session._id,
+                    session_no: session.session_no,
+                    table_id: tableId,
+                    spin_key: spinKey,
+                    number,
+                    prediction_numbers: predictionNumbers,
+                    round: settlement.round,
+                    stake: settlement.stake,
+                    cycle_wagered: settlement.cycleWagered,
+                    payout: settlement.payout,
+                    cycle_profit: settlement.cycleProfit,
+                    balance_after: settlement.balanceAfter,
+                    net_profit: settlement.netProfit,
+                    won: settlement.won
+                }], { session: mongoSession });
+                session.balance = settlement.balanceAfter;
+                session.current_round = settlement.nextRound;
+                session.cycle_wagered = settlement.nextCycleWagered;
+                session.total_spins += 1;
+                session.total_wagered = Number((session.total_wagered + settlement.stake).toFixed(2));
+                session.total_payout = Number((session.total_payout + settlement.payout).toFixed(2));
+                if (settlement.won) {
+                    session.wins += 1;
+                    session.completed_cycles += 1;
+                } else {
+                    session.losses += 1;
+                }
+                session.updated_at = new Date();
+                await session.save({ session: mongoSession });
+                result = { session, entry };
+            });
+        } finally {
+            await mongoSession.endSession();
+        }
+        if (result?.error) return res.status(result.status).json(result);
+        res.json({ success: true, ...result, storage: 'mongodb' });
+    } catch (error) {
+        if (error.code === 11000) {
+            const session = await TrackerBankrollSession.findById(req.params.sessionId).lean().exec();
+            const entry = session && await TrackerBankrollEntry.findOne({ session_id: session._id, spin_key: spinKey }).lean().exec();
+            if (session && entry) return res.json({ success: true, session, entry, duplicate: true, storage: 'mongodb' });
+        }
+        console.error('[Tracker bankroll] Settlement failed:', error.message);
+        res.status(500).json({ error: 'No se pudo guardar la liquidación en MongoDB.' });
+    }
+});
+
 // Tracker AI endpoint — OpenRouter
 app.post('/api/ai/tracker', async (req, res) => {
     const { provider, model, apiKey, system, messages } = req.body;
@@ -1930,7 +2136,7 @@ app.post('/api/spin', async (req, res) => {
                             table_code: 'AUTO',
                             number,
                             source: source || 'bot',
-                            source_quality: source === 'casino_org_live' ? 'live' : 'manual',
+                            source_quality: source === 'casino_org_live' || source === 'public_scraper' ? 'live' : 'manual',
                             session_id: req.body.session_id || '',
                             round_key: req.body.round_key || req.body.event_id || '',
                             event_id: req.body.event_id || null,
@@ -1951,7 +2157,7 @@ app.post('/api/spin', async (req, res) => {
                 savedSpinId = await new Promise(resolve => {
                     db.addSpin(table_id, number, source || 'bot', {
                         event_id: req.body.event_id,
-                        source_quality: source === 'casino_org_live' ? 'live' : 'manual',
+                        source_quality: source === 'casino_org_live' || source === 'public_scraper' ? 'live' : 'manual',
                         session_id: req.body.session_id || '',
                         round_key: req.body.round_key || req.body.event_id || '',
                         raw_history: Array.isArray(req.body.raw_history) ? req.body.raw_history : [],
@@ -1970,7 +2176,7 @@ app.post('/api/spin', async (req, res) => {
                 persistDominanceAiPrediction(table_id, savedSpinId, snapshot);
                 if (sseClients[table_id]) {
                     sseClients[table_id].forEach(client => {
-                        client.write(`data: ${JSON.stringify({ type: 'new_spin', number, spin_id: savedSpinId, ready: true })}\n\n`);
+                        client.write(`data: ${JSON.stringify({ type: 'new_spin', number, spin_id: savedSpinId, spin_key: `${table_id}:${savedSpinId}`, ready: true })}\n\n`);
                     });
                 }
                 

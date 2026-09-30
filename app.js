@@ -25,6 +25,7 @@ async function checkMongoConnection() {
         if (!status.connected && typeof pauseTrackerForMongo === 'function') pauseTrackerForMongo();
         if (status.connected && mongoPreviouslyConnected === false && typeof loadTrackerAiMemory === 'function') {
             loadTrackerAiMemory();
+            if (typeof loadTrackerBankSessions === 'function') loadTrackerBankSessions();
         }
         mongoPreviouslyConnected = Boolean(status.connected);
         return status;
@@ -64,6 +65,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 const history = [];
+const processedLiveSpinIds = new Set();
 const cwHistory = [];
 const ccwHistory = [];
 const cwN4History = [];
@@ -1017,14 +1019,19 @@ async function loadForestDiscoveries() {
 }
 
 // Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂ SUBMIT NUMBER Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
-function submitNumber(val, silent = false, batch = false) {
+function submitNumber(val, silent = false, batch = false, spinId = null) {
     const raw = val !== undefined ? val : '';
     const n = parseInt(raw);
     
     if (!isNaN(n) && n >= 0 && n <= 36) {
         // Prevent duplicate: skip if same as the last number in history
         // (e.g. SSE re-sends on reconnect while batch sync already processed it)
-        if (history.length > 0 && history[history.length - 1] === n) {
+        if (spinId != null) {
+            const stableId = String(spinId);
+            if (processedLiveSpinIds.has(stableId)) return;
+            processedLiveSpinIds.add(stableId);
+            if (processedLiveSpinIds.size > 3000) processedLiveSpinIds.delete(processedLiveSpinIds.values().next().value);
+        } else if (history.length > 0 && history[history.length - 1] === n) {
             return;
         }
         // Evaluate previous predictions before pushing to history
@@ -1984,7 +1991,7 @@ function connectSSE(tId) {
             }
             if (data.type === 'new_spin' && data.number !== undefined) {
                 // Instantly react to new live spins
-                submitNumber(data.number, false, false);
+                submitNumber(data.number, false, false, data.spin_id);
             }
         } catch(err) {}
     };
@@ -4906,14 +4913,15 @@ async function fetchMetaPatternStats(type) {
 // Hook into live stream: feed tracker when source is 'live'
 (function() {
     const originalSubmitNumber = submitNumber;
-    submitNumber = function(val, silent, batch) {
-        originalSubmitNumber(val, silent, batch);
+    submitNumber = function(val, silent, batch, spinId) {
+        const historyLength = history.length;
+        originalSubmitNumber(val, silent, batch, spinId);
         const n = parseInt(val);
-        if (!isNaN(n) && n >= 0 && n <= 36) {
+        if (history.length > historyLength && !isNaN(n) && n >= 0 && n <= 36) {
             // Bulk history is copied once by syncTrackerFromLive after sync completes.
             // Forwarding it here prevents that sync from detecting changes and rendering.
             if (!batch && typeof trackerSource !== 'undefined' && trackerSource === 'live') {
-                if (typeof submitTrackerNumber === 'function') submitTrackerNumber(n, batch, 'live');
+                if (typeof submitTrackerNumber === 'function') submitTrackerNumber(n, batch, 'live', spinId);
             }
         }
     };

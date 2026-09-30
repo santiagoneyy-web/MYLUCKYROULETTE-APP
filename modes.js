@@ -64,6 +64,13 @@ let trackerLastDominantDir = null;
 let trackerLastDominantZone = null;
 let trackerLastZigzag = false;
 let trackerManualAvgOffset = 0;
+let trackerBankSessions = [];
+let trackerBankEntries = [];
+let trackerBankSelectedSessionId = null;
+let trackerBankLoadedTableId = null;
+let trackerBankQueue = Promise.resolve();
+const trackerBankPending = [];
+let trackerBankLoading = false;
 
 // ============================================================
 // MODE SWITCHING
@@ -98,6 +105,7 @@ function activateMode(mode) {
         }
         if (mode === 'tracker') {
             renderTracker();
+            loadTrackerBankSessions();
             if (trackerSource === 'live' && typeof history !== 'undefined' && history.length > 0) {
                 // Ensure tracker is in sync with live data
                 syncTrackerFromLive();
@@ -414,7 +422,233 @@ document.addEventListener('DOMContentLoaded', () => {
     if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') processTrackerNumber(); });
     const chatInput = document.getElementById('tracker-chat-input');
     if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendTrackerChat(); });
+    loadTrackerBankSessions();
 });
+
+function trackerBankTableId() {
+    return typeof currentTableId !== 'undefined' && currentTableId ? currentTableId : 1;
+}
+
+function trackerBankActiveSession() {
+    return trackerBankSessions.find(session => session.status === 'active') || null;
+}
+
+function trackerBankSelectedSession() {
+    return trackerBankSessions.find(session => String(session._id) === String(trackerBankSelectedSessionId)) || trackerBankActiveSession();
+}
+
+function trackerBankMoney(value) {
+    return `S/ ${Number(value || 0).toFixed(2)}`;
+}
+
+function trackerBankStake(chip, round) {
+    return Number((chip * 9 * 2 ** Math.floor((round - 1) / 2)).toFixed(2));
+}
+
+function trackerBankPredictionNumbers() {
+    const signal = trackerLastSignal;
+    if (!signal || typeof wheelNeighbors !== 'function') return [];
+    const direction = signal.mainDir || (signal.confidenceCW >= signal.confidenceCCW ? 'CW' : 'CCW');
+    const center = direction === 'CW' ? signal.targetCW : signal.targetCCW;
+    if (center === undefined || center === null || !Number.isInteger(Number(center))) return [];
+    const numbers = wheelNeighbors(Number(center), 4).map(Number);
+    return numbers.length === 9 && new Set(numbers).size === 9 ? numbers : [];
+}
+
+function trackerBankSetMessage(message) {
+    const element = document.getElementById('tracker-bank-message');
+    if (element) element.textContent = message || '';
+}
+
+async function loadTrackerBankSessions() {
+    if (trackerBankLoading) return;
+    trackerBankLoading = true;
+    try {
+        const tableId = trackerBankTableId();
+        if (String(tableId) !== String(trackerBankLoadedTableId)) {
+            trackerBankSelectedSessionId = null;
+            trackerBankLoadedTableId = tableId;
+            const sessionInput = document.getElementById('tracker-bank-session-no');
+            if (sessionInput) sessionInput.value = '';
+        }
+        const url = new URL(`/api/tracker/bankroll/${encodeURIComponent(tableId)}`, location.origin);
+        if (trackerBankSelectedSessionId) url.searchParams.set('session_id', trackerBankSelectedSessionId);
+        const response = await fetch(url, { cache: 'no-store' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
+        trackerBankSessions = Array.isArray(data.sessions) ? data.sessions : [];
+        trackerBankEntries = Array.isArray(data.entries) ? data.entries : [];
+        const active = trackerBankActiveSession();
+        const selected = trackerBankSessions.find(item => String(item._id) === String(trackerBankSelectedSessionId));
+        trackerBankSelectedSessionId = (selected || active || trackerBankSessions[0])?._id || null;
+        const selector = document.getElementById('tracker-bank-session-select');
+        if (selector) {
+            selector.innerHTML = trackerBankSessions.length
+                ? trackerBankSessions.map(item => `<option value="${String(item._id)}">Sesión ${Number(item.session_no)} · ${item.status === 'active' ? 'activa' : item.status === 'closed' ? trackerBankOutcomeLabel(item.final_outcome) : 'pausada'}</option>`).join('')
+                : '<option value="">Sin sesiones</option>';
+            if (trackerBankSelectedSessionId) selector.value = String(trackerBankSelectedSessionId);
+        }
+        const nextNo = trackerBankSessions.reduce((max, item) => Math.max(max, Number(item.session_no) || 0), 0) + 1;
+        const sessionInput = document.getElementById('tracker-bank-session-no');
+        if (sessionInput && !sessionInput.value) sessionInput.value = String(nextNo);
+        trackerBankSetMessage(trackerBankSessions.length ? '' : 'Crea una sesión en MongoDB para comenzar.');
+        renderTrackerBankroll();
+        if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
+    } catch (error) {
+        trackerBankSessions = [];
+        trackerBankEntries = [];
+        renderTrackerBankroll();
+        trackerBankSetMessage(`MongoDB Atlas no conectado: ${error.message}. Reconéctalo para usar la banca.`);
+    } finally {
+        trackerBankLoading = false;
+    }
+}
+
+function trackerBankOutcomeLabel(outcome) {
+    return ({ won: 'GANADA', lost: 'PERDIDA', break_even: 'EMPATE', pending: 'EN CURSO' })[outcome] || 'EN CURSO';
+}
+
+function renderTrackerBankroll() {
+    const session = trackerBankSelectedSession();
+    const active = session?.status === 'active';
+    const capital = Number(session?.initial_capital || 0);
+    const balance = Number(session?.balance || 0);
+    const profit = Number((balance - capital).toFixed(2));
+    const round = Number(session?.current_round || 1);
+    const chip = Number(session?.chip_value || 0);
+    const stake = session ? trackerBankStake(chip, round) : 0;
+    const cycle = Number(session?.cycle_wagered || 0);
+    const possibleProfit = session ? Number((stake * 4 - cycle - stake).toFixed(2)) : 0;
+    const pred = trackerBankPredictionNumbers();
+    const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+    set('tracker-bank-capital-value', session ? trackerBankMoney(capital) : '--');
+    set('tracker-bank-balance', session ? trackerBankMoney(balance) : '--');
+    set('tracker-bank-profit', session ? `${profit > 0 ? '+' : ''}${trackerBankMoney(profit)}` : '--');
+    set('tracker-bank-wins', String(session?.wins || 0));
+    set('tracker-bank-losses', String(session?.losses || 0));
+    set('tracker-bank-outcome', session ? (session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : `${trackerBankOutcomeLabel(profit > 0 ? 'won' : profit < 0 ? 'lost' : 'break_even')} · provisional`) : '--');
+    set('tracker-bank-round', active ? String(round) : '--');
+    set('tracker-bank-stake', active ? trackerBankMoney(stake) : '--');
+    set('tracker-bank-cycle', active ? trackerBankMoney(cycle) : '--');
+    set('tracker-bank-win-profit', active ? trackerBankMoney(possibleProfit) : '--');
+    set('tracker-bank-prediction', active && pred.length ? pred.join(', ') : active ? 'Esperando señal Live' : '--');
+    set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / S/ 0.00');
+    const finish = document.getElementById('tracker-bank-finish');
+    if (finish) finish.style.display = active ? 'block' : 'none';
+    const ledger = document.getElementById('tracker-bank-ledger');
+    if (ledger) ledger.innerHTML = trackerBankEntries.length
+        ? trackerBankEntries.slice(-30).reverse().map(entry => `<tr><td>${entry.round}</td><td>${entry.number} ${entry.won ? '✓' : '×'}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`).join('')
+        : '<tr><td colspan="5" style="text-align:center">Sin resultados Live en esta sesión</td></tr>';
+}
+
+function toggleTrackerBankPanel(open) {
+    const overlay = document.getElementById('tracker-bank-overlay');
+    if (!overlay) return;
+    overlay.style.display = open ? 'flex' : 'none';
+    if (open) loadTrackerBankSessions();
+}
+
+async function createTrackerBankSession() {
+    const sessionNo = Number(document.getElementById('tracker-bank-session-no')?.value);
+    const capital = Number(document.getElementById('tracker-bank-capital')?.value);
+    const chip = Number(document.getElementById('tracker-bank-chip')?.value);
+    if (!Number.isInteger(sessionNo) || sessionNo < 1 || capital <= 0 || chip <= 0) {
+        trackerBankSetMessage('Revisa el número de sesión, el capital y el valor de ficha.');
+        return;
+    }
+    trackerBankSetMessage('Guardando sesión en MongoDB...');
+    try {
+        const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_no: sessionNo, initial_capital: capital, chip_value: chip })
+        });
+        const data = await response.json();
+        if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
+        trackerBankSelectedSessionId = data.session._id;
+        document.getElementById('tracker-bank-session-no').value = String(sessionNo + 1);
+        await loadTrackerBankSessions();
+        trackerBankSetMessage(`Sesión ${sessionNo} creada y guardada en MongoDB.`);
+    } catch (error) {
+        trackerBankSetMessage(`No se guardó la sesión: ${error.message}`);
+    }
+}
+
+async function activateTrackerBankSession(sessionId) {
+    if (!sessionId || String(sessionId) === String(trackerBankActiveSession()?._id)) {
+        trackerBankSelectedSessionId = sessionId || null;
+        await loadTrackerBankSessions();
+        return;
+    }
+    const selected = trackerBankSessions.find(item => String(item._id) === String(sessionId));
+    if (!selected || selected.status === 'closed') {
+        trackerBankSelectedSessionId = sessionId;
+        await loadTrackerBankSessions();
+        return;
+    }
+    try {
+        const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(sessionId)}/activate`, { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
+        trackerBankSelectedSessionId = sessionId;
+        await loadTrackerBankSessions();
+    } catch (error) {
+        trackerBankSetMessage(`No se pudo reanudar la sesión: ${error.message}`);
+    }
+}
+
+async function closeTrackerBankSession() {
+    const session = trackerBankActiveSession();
+    if (!session) return;
+    const confirmed = window.confirm(`¿Cerrar la sesión ${session.session_no} y guardar su resultado final en MongoDB?`);
+    if (!confirmed) return;
+    try {
+        const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(session._id)}/close`, { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
+        trackerBankSelectedSessionId = session._id;
+        await loadTrackerBankSessions();
+        trackerBankSetMessage(`Sesión ${session.session_no}: ${trackerBankOutcomeLabel(data.session.final_outcome)} · ${trackerBankMoney(data.session.balance - data.session.initial_capital)} netos. Resultado guardado.`);
+    } catch (error) {
+        trackerBankSetMessage(`No se pudo cerrar la sesión en MongoDB: ${error.message}`);
+    }
+}
+
+function enqueueTrackerBankSpin(spin) {
+    trackerBankPending.push(spin);
+    flushTrackerBankQueue().catch(() => {});
+}
+
+function flushTrackerBankQueue() {
+    trackerBankQueue = trackerBankQueue.then(async () => {
+        while (trackerBankPending.length) {
+            const spin = trackerBankPending[0];
+            const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(spin.sessionId)}/settle`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ spin_id: spin.spinId, number: spin.number, prediction_numbers: spin.predictionNumbers })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.storage !== 'mongodb') {
+                if (response.status === 503) {
+                    trackerBankSetMessage('MongoDB desconectado: la tirada Live queda pendiente en memoria y la banca se pausa. Reconecta para reintentar.');
+                    throw new Error('MongoDB no disponible');
+                }
+                trackerBankPending.shift();
+                trackerBankSetMessage(data.error || 'No se pudo liquidar la tirada Live.');
+                continue;
+            }
+            trackerBankPending.shift();
+            trackerBankSessions = trackerBankSessions.map(item => String(item._id) === String(data.session._id) ? data.session : item);
+            if (!trackerBankSessions.some(item => String(item._id) === String(data.session._id))) trackerBankSessions.unshift(data.session);
+            if (!data.duplicate) trackerBankEntries.push(data.entry);
+            trackerBankSelectedSessionId = data.session._id;
+            renderTrackerBankroll();
+            trackerBankSetMessage(data.entry.won
+                ? `Acierto en ronda ${data.entry.round}. Ciclo: ${trackerBankMoney(data.entry.cycle_profit)} netos.`
+                : `Falló ronda ${data.entry.round}. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankStake(data.session.chip_value, data.session.current_round))}.`);
+        }
+    });
+    return trackerBankQueue;
+}
 
 async function syncTrackerFromLive() {
     let liveNumbers = null;
@@ -695,12 +929,21 @@ function toggleTrackerVoice() {
 
 let trackerAutoAnalysisTimer = null;
 
-function submitTrackerNumber(n, batch = false, source = trackerSource) {
+function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = null) {
     if (source !== trackerSource || !Number.isInteger(n) || n < 0 || n > 36) return;
     if (source === 'manual' && !trackerMemoryAvailable) {
         const status = document.getElementById('tracker-ai-status');
         if (status) status.innerText = 'MongoDB Atlas no conectado; Manual está pausado.';
         return;
+    }
+    if (source === 'live' && !batch && spinId && trackerBankActiveSession()) {
+        const predictionNumbers = trackerBankPredictionNumbers();
+        if (predictionNumbers.length === 9) enqueueTrackerBankSpin({
+            sessionId: trackerBankActiveSession()._id,
+            spinId: Number(spinId),
+            number: n,
+            predictionNumbers
+        });
     }
     trackerHistory.push(n);
     if (trackerSource === 'live' && !batch) {

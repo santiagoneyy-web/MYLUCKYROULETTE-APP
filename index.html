@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
     <title>ONEMILLON ROULETTE</title>
-    <link rel="stylesheet" href="styles.css?v=1018" />
+    <link rel="stylesheet" href="styles.css?v=1019" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
     <style>
     /* Compact travel table */
@@ -433,6 +433,30 @@
         display: flex; align-items: center; justify-content: center;
     }
     .tracker-cog:hover { background: rgba(255,255,255,0.08); }
+    .tracker-bank-overlay { display:none;position:fixed;inset:0;z-index:10020;background:rgba(3,7,12,.78);align-items:flex-start;justify-content:flex-end;padding:12px; }
+    .tracker-bank-panel { width:min(440px,100%);max-height:calc(100dvh - 24px);overflow:auto;background:#0b111a;border:1px solid #263345;border-radius:8px;padding:12px;color:#dce6f2;box-shadow:0 12px 40px rgba(0,0,0,.5); }
+    .tracker-bank-heading { display:flex;align-items:center;gap:8px;margin-bottom:10px; }
+    .tracker-bank-heading strong { flex:1;color:#fff;font-size:.85rem; }
+    .tracker-bank-close { width:30px;height:30px;background:#151d29;color:#c7d4e3;border:1px solid var(--border);border-radius:5px;cursor:pointer; }
+    .tracker-bank-strategy { padding:8px;margin-bottom:10px;background:rgba(101,221,184,.07);border-left:2px solid #65ddb8;color:#a9c6c1;font-size:.65rem;line-height:1.5; }
+    .tracker-bank-form { display:grid;grid-template-columns:.8fr 1.2fr 1fr;gap:6px;align-items:end; }
+    .tracker-bank-field { min-width:0;display:grid;gap:4px;color:var(--muted);font-size:.6rem; }
+    .tracker-bank-field input,.tracker-bank-select { width:100%;min-width:0;box-sizing:border-box;background:#080d15;color:#fff;border:1px solid var(--border);border-radius:5px;padding:7px 6px;font-size:.68rem; }
+    .tracker-bank-create,.tracker-bank-close-session { width:100%;margin:7px 0 10px;padding:8px;background:#0fc7a5;color:#03110f;border:0;border-radius:5px;font-weight:800;font-size:.68rem;cursor:pointer; }
+    .tracker-bank-close-session { background:#273345;color:#e8edf5;border:1px solid #39475b; }
+    .tracker-bank-stats { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:9px 0; }
+    .tracker-bank-stat { min-width:0;background:#101824;border:1px solid #202b3b;border-radius:5px;padding:7px;text-align:center; }
+    .tracker-bank-stat small { display:block;color:var(--muted);font-size:.56rem;margin-bottom:4px; }
+    .tracker-bank-stat strong { display:block;color:#fff;font:700 .76rem var(--mono);overflow-wrap:anywhere; }
+    .tracker-bank-next { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 10px;padding:8px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);font-size:.63rem; }
+    .tracker-bank-next span { color:var(--muted); }.tracker-bank-next b { color:#fff;text-align:right;font-family:var(--mono); }
+    .tracker-bank-message { min-height:16px;color:#f3c86a;font-size:.62rem;padding:5px 0; }
+    .tracker-bank-table-wrap { max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:5px;margin-top:7px; }
+    .tracker-bank-table { width:100%;border-collapse:collapse;font:.59rem var(--mono);text-align:right; }
+    .tracker-bank-table th { position:sticky;top:0;background:#172130;color:#adc0d4;padding:5px 4px; }
+    .tracker-bank-table td { padding:5px 4px;border-top:1px solid rgba(255,255,255,.05); }
+    .tracker-bank-foot { color:var(--muted);font-size:.58rem;line-height:1.45;margin-top:8px; }
+    @media(max-width:480px) { .tracker-bank-overlay { padding:8px; }.tracker-bank-panel { max-height:calc(100dvh - 16px); } }
 
     /* â•â• CONFIG PANEL â•â• */
     .tracker-config-panel {
@@ -1120,7 +1144,49 @@
                         <button class="tgl-btn active" id="tracker-src-manual" onclick="setTrackerSource('manual')">&#x270F;&#xFE0F; MANUAL</button>
                         <button class="tgl-btn" id="tracker-src-live" onclick="setTrackerSource('live')">&#x1F534; LIVE</button>
                     </div>
+                    <button class="tracker-cog" id="tracker-bank-open" onclick="toggleTrackerBankPanel(true)" title="Gestor de banca" aria-label="Abrir gestor de banca">&#x1F4B0;</button>
                     <button class="tracker-cog" onclick="toggleTrackerConfig()" title="Configurar IA">&#x2699;&#xFE0F;</button>
+                </div>
+
+                <div class="tracker-bank-overlay" id="tracker-bank-overlay" onclick="if(event.target===this)toggleTrackerBankPanel(false)">
+                    <aside class="tracker-bank-panel" role="dialog" aria-modal="true" aria-labelledby="tracker-bank-title">
+                        <div class="tracker-bank-heading">
+                            <strong id="tracker-bank-title">&#x1F4B0; Gestor de banca</strong>
+                            <button class="tracker-bank-close" onclick="toggleTrackerBankPanel(false)" title="Cerrar" aria-label="Cerrar gestor">&#x2715;</button>
+                        </div>
+                        <div class="tracker-bank-strategy">Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. El resultado compara saldo final e inicial de la sesión.</div>
+                        <div class="tracker-bank-form">
+                            <label class="tracker-bank-field">Sesión<input id="tracker-bank-session-no" type="number" min="1" step="1" inputmode="numeric"></label>
+                            <label class="tracker-bank-field">Capital inicial<input id="tracker-bank-capital" type="number" min="0.01" step="0.01" value="100" inputmode="decimal"></label>
+                            <label class="tracker-bank-field">Valor ficha<input id="tracker-bank-chip" type="number" min="0.01" step="0.01" value="0.50" inputmode="decimal"></label>
+                        </div>
+                        <button class="tracker-bank-create" onclick="createTrackerBankSession()">Crear sesión</button>
+                        <label class="tracker-bank-field">Sesiones<select class="tracker-bank-select" id="tracker-bank-session-select" onchange="activateTrackerBankSession(this.value)"><option value="">Sin sesiones</option></select></label>
+                        <div class="tracker-bank-stats">
+                            <div class="tracker-bank-stat"><small>Capital inicial</small><strong id="tracker-bank-capital-value">--</strong></div>
+                            <div class="tracker-bank-stat"><small>Saldo actual</small><strong id="tracker-bank-balance">--</strong></div>
+                            <div class="tracker-bank-stat"><small>Resultado neto</small><strong id="tracker-bank-profit">--</strong></div>
+                            <div class="tracker-bank-stat"><small>Aciertos</small><strong id="tracker-bank-wins">0</strong></div>
+                            <div class="tracker-bank-stat"><small>Fallos</small><strong id="tracker-bank-losses">0</strong></div>
+                            <div class="tracker-bank-stat"><small>Estado final</small><strong id="tracker-bank-outcome">--</strong></div>
+                        </div>
+                        <div class="tracker-bank-next">
+                            <span>Ronda siguiente</span><b id="tracker-bank-round">--</b>
+                            <span>Monto N4</span><b id="tracker-bank-stake">--</b>
+                            <span>Acumulado del ciclo</span><b id="tracker-bank-cycle">--</b>
+                            <span>Ganancia si acierta</span><b id="tracker-bank-win-profit">--</b>
+                            <span>Predicción N4 (9 casillas)</span><b id="tracker-bank-prediction">Esperando</b>
+                            <span>Tiradas / apuestas</span><b id="tracker-bank-totals">0 / 0</b>
+                        </div>
+                        <div class="tracker-bank-message" id="tracker-bank-message" role="status" aria-live="polite">Conectando con MongoDB...</div>
+                        <button class="tracker-bank-close-session" id="tracker-bank-finish" onclick="closeTrackerBankSession()" style="display:none">Cerrar sesión y guardar resultado</button>
+                        <div class="tracker-bank-table-wrap">
+                            <table class="tracker-bank-table"><thead><tr><th>Ronda</th><th>Tirada</th><th>Apuesta</th><th>Pago</th><th>Saldo</th></tr></thead>
+                                <tbody id="tracker-bank-ledger"><tr><td colspan="5" style="text-align:center">Sin resultados</td></tr></tbody>
+                            </table>
+                        </div>
+                        <div class="tracker-bank-foot">Sesiones y resultados Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
+                    </aside>
                 </div>
 
                 <!-- Input MANUAL (condicional) -->
@@ -1243,7 +1309,7 @@
 
 <script src="src/engine/predictor.js?v=999"></script>
 <script src="ai_chat.js?v=5"></script>
-<script src="modes.js?v=17"></script>
-<script src="app.js?v=1043"></script>
+<script src="modes.js?v=18"></script>
+<script src="app.js?v=1044"></script>
 </body>
 </html>
