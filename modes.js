@@ -71,6 +71,9 @@ let trackerBankLoadedTableId = null;
 let trackerBankQueue = Promise.resolve();
 const trackerBankPending = [];
 let trackerBankLoading = false;
+let trackerLiveSyncTimer = null;
+let trackerLiveSyncInFlight = false;
+let trackerLiveEventRevision = 0;
 
 // ============================================================
 // MODE SWITCHING
@@ -89,6 +92,7 @@ function activateMode(mode) {
         if (manual) manual.classList.remove('active');
         if (tracker) tracker.classList.remove('active');
         currentMode = 'landing';
+        updateTrackerLiveSync();
     } else {
         landing.style.display = 'none';
         if (live) live.classList.remove('active');
@@ -119,6 +123,7 @@ function activateMode(mode) {
             renderManualHistoryStrip();
         }
     }
+    updateTrackerLiveSync();
 }
 
 // ============================================================
@@ -437,6 +442,12 @@ function trackerBankSelectedSession() {
     return trackerBankSessions.find(session => String(session._id) === String(trackerBankSelectedSessionId)) || trackerBankActiveSession();
 }
 
+function trackerBankDate(value) {
+    if (!value) return '--';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '--' : date.toLocaleString('es-PE', { dateStyle: 'short', timeStyle: 'short' });
+}
+
 function trackerBankMoney(value) {
     return `S/ ${Number(value || 0).toFixed(2)}`;
 }
@@ -484,14 +495,14 @@ async function loadTrackerBankSessions() {
         const selector = document.getElementById('tracker-bank-session-select');
         if (selector) {
             selector.innerHTML = trackerBankSessions.length
-                ? trackerBankSessions.map(item => `<option value="${String(item._id)}">Sesión ${Number(item.session_no)} · ${item.status === 'active' ? 'activa' : item.status === 'closed' ? trackerBankOutcomeLabel(item.final_outcome) : 'pausada'}</option>`).join('')
-                : '<option value="">Sin sesiones</option>';
+                ? trackerBankSessions.map(item => `<option value="${String(item._id)}">Season ${Number(item.session_no)} · ${item.status === 'active' ? 'activa' : item.status === 'closed' ? trackerBankOutcomeLabel(item.final_outcome) : item.status === 'draft' ? 'lista' : 'pausada'}</option>`).join('')
+                : '<option value="">Sin seasons</option>';
             if (trackerBankSelectedSessionId) selector.value = String(trackerBankSelectedSessionId);
         }
         const nextNo = trackerBankSessions.reduce((max, item) => Math.max(max, Number(item.session_no) || 0), 0) + 1;
         const sessionInput = document.getElementById('tracker-bank-session-no');
         if (sessionInput && !sessionInput.value) sessionInput.value = String(nextNo);
-        trackerBankSetMessage(trackerBankSessions.length ? '' : 'Crea una sesión en MongoDB para comenzar.');
+        trackerBankSetMessage(trackerBankSessions.length ? '' : 'Crea una season en MongoDB para comenzar.');
         renderTrackerBankroll();
         if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
     } catch (error) {
@@ -511,6 +522,7 @@ function trackerBankOutcomeLabel(outcome) {
 function renderTrackerBankroll() {
     const session = trackerBankSelectedSession();
     const active = session?.status === 'active';
+    const canStart = session && ['draft', 'paused'].includes(session.status);
     const capital = Number(session?.initial_capital || 0);
     const balance = Number(session?.balance || 0);
     const profit = Number((balance - capital).toFixed(2));
@@ -518,6 +530,7 @@ function renderTrackerBankroll() {
     const chip = Number(session?.chip_value || 0);
     const stake = session ? trackerBankStake(chip, round) : 0;
     const cycle = Number(session?.cycle_wagered || 0);
+    const roundTotal = session ? Number((cycle + stake).toFixed(2)) : 0;
     const possibleProfit = session ? Number((stake * 4 - cycle - stake).toFixed(2)) : 0;
     const pred = trackerBankPredictionNumbers();
     const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
@@ -529,16 +542,30 @@ function renderTrackerBankroll() {
     set('tracker-bank-outcome', session ? (session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : `${trackerBankOutcomeLabel(profit > 0 ? 'won' : profit < 0 ? 'lost' : 'break_even')} · provisional`) : '--');
     set('tracker-bank-round', active ? String(round) : '--');
     set('tracker-bank-stake', active ? trackerBankMoney(stake) : '--');
-    set('tracker-bank-cycle', active ? trackerBankMoney(cycle) : '--');
+    set('tracker-bank-cycle', active ? trackerBankMoney(roundTotal) : '--');
     set('tracker-bank-win-profit', active ? trackerBankMoney(possibleProfit) : '--');
-    set('tracker-bank-prediction', active && pred.length ? pred.join(', ') : active ? 'Esperando señal Live' : '--');
+    set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? pred.join(', ') : active ? 'Esperando señal Live' : '--');
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / S/ 0.00');
+    set('tracker-bank-started', session ? trackerBankDate(session.starts_at || session.created_at) : '--');
+    set('tracker-bank-ended', session?.closed_at ? trackerBankDate(session.closed_at) : session ? (session.status === 'draft' ? 'Sin iniciar' : 'En curso') : '--');
+    const start = document.getElementById('tracker-bank-start');
+    if (start) start.style.display = canStart ? 'block' : 'none';
     const finish = document.getElementById('tracker-bank-finish');
     if (finish) finish.style.display = active ? 'block' : 'none';
+    const inline = document.getElementById('tracker-bank-inline');
+    if (inline) {
+        const direction = trackerLastSignal?.mainDir || (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
+        const center = direction === 'CW' ? trackerLastSignal?.targetCW : trackerLastSignal?.targetCCW;
+        const hasCenter = center !== undefined && center !== null && Number.isInteger(Number(center));
+        inline.textContent = active && trackerSource === 'live'
+            ? `${hasCenter ? `${Number(center)} ` : ''}N4 · ${trackerBankMoney(roundTotal)}`
+            : '';
+        inline.title = active ? 'Apuesta acumulada del ciclo al jugar la ronda siguiente; se reinicia al acertar.' : '';
+    }
     const ledger = document.getElementById('tracker-bank-ledger');
     if (ledger) ledger.innerHTML = trackerBankEntries.length
-        ? trackerBankEntries.slice(-30).reverse().map(entry => `<tr><td>${entry.round}</td><td>${entry.number} ${entry.won ? '✓' : '×'}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`).join('')
-        : '<tr><td colspan="5" style="text-align:center">Sin resultados Live en esta sesión</td></tr>';
+        ? trackerBankEntries.slice(-30).reverse().map(entry => `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td>${entry.number} ${entry.won ? '✓' : '×'}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`).join('')
+        : '<tr><td colspan="6" style="text-align:center">Sin resultados Live en esta season</td></tr>';
 }
 
 function toggleTrackerBankPanel(open) {
@@ -553,10 +580,10 @@ async function createTrackerBankSession() {
     const capital = Number(document.getElementById('tracker-bank-capital')?.value);
     const chip = Number(document.getElementById('tracker-bank-chip')?.value);
     if (!Number.isInteger(sessionNo) || sessionNo < 1 || capital <= 0 || chip <= 0) {
-        trackerBankSetMessage('Revisa el número de sesión, el capital y el valor de ficha.');
+        trackerBankSetMessage('Revisa el número de season, el capital y el valor de ficha.');
         return;
     }
-    trackerBankSetMessage('Guardando sesión en MongoDB...');
+    trackerBankSetMessage('Guardando season en MongoDB...');
     try {
         const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -567,39 +594,36 @@ async function createTrackerBankSession() {
         trackerBankSelectedSessionId = data.session._id;
         document.getElementById('tracker-bank-session-no').value = String(sessionNo + 1);
         await loadTrackerBankSessions();
-        trackerBankSetMessage(`Sesión ${sessionNo} creada y guardada en MongoDB.`);
+        trackerBankSetMessage(`Season ${sessionNo} creada en MongoDB. Iníciala cuando quieras comenzar el seguimiento.`);
     } catch (error) {
-        trackerBankSetMessage(`No se guardó la sesión: ${error.message}`);
+        trackerBankSetMessage(`No se guardó la season: ${error.message}`);
     }
 }
 
-async function activateTrackerBankSession(sessionId) {
-    if (!sessionId || String(sessionId) === String(trackerBankActiveSession()?._id)) {
-        trackerBankSelectedSessionId = sessionId || null;
-        await loadTrackerBankSessions();
-        return;
-    }
-    const selected = trackerBankSessions.find(item => String(item._id) === String(sessionId));
-    if (!selected || selected.status === 'closed') {
-        trackerBankSelectedSessionId = sessionId;
-        await loadTrackerBankSessions();
-        return;
-    }
+async function selectTrackerBankSession(sessionId) {
+    trackerBankSelectedSessionId = sessionId || null;
+    await loadTrackerBankSessions();
+}
+
+async function startTrackerBankSession() {
+    const session = trackerBankSelectedSession();
+    if (!session || !['draft', 'paused'].includes(session.status)) return;
     try {
-        const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(sessionId)}/activate`, { method: 'POST' });
+        const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(session._id)}/activate`, { method: 'POST' });
         const data = await response.json();
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
-        trackerBankSelectedSessionId = sessionId;
+        trackerBankSelectedSessionId = session._id;
         await loadTrackerBankSessions();
+        trackerBankSetMessage(`Season ${session.session_no} iniciada. Las tiradas Live se registrarán en MongoDB.`);
     } catch (error) {
-        trackerBankSetMessage(`No se pudo reanudar la sesión: ${error.message}`);
+        trackerBankSetMessage(`No se pudo iniciar la season: ${error.message}`);
     }
 }
 
 async function closeTrackerBankSession() {
     const session = trackerBankActiveSession();
     if (!session) return;
-    const confirmed = window.confirm(`¿Cerrar la sesión ${session.session_no} y guardar su resultado final en MongoDB?`);
+    const confirmed = window.confirm(`¿Finalizar la season ${session.session_no} y guardar su resultado final en MongoDB?`);
     if (!confirmed) return;
     try {
         const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(session._id)}/close`, { method: 'POST' });
@@ -607,7 +631,7 @@ async function closeTrackerBankSession() {
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
         trackerBankSelectedSessionId = session._id;
         await loadTrackerBankSessions();
-        trackerBankSetMessage(`Sesión ${session.session_no}: ${trackerBankOutcomeLabel(data.session.final_outcome)} · ${trackerBankMoney(data.session.balance - data.session.initial_capital)} netos. Resultado guardado.`);
+        trackerBankSetMessage(`Season ${session.session_no}: ${trackerBankOutcomeLabel(data.session.final_outcome)} · ${trackerBankMoney(data.session.balance - data.session.initial_capital)} netos. Resultado guardado.`);
     } catch (error) {
         trackerBankSetMessage(`No se pudo cerrar la sesión en MongoDB: ${error.message}`);
     }
@@ -651,6 +675,9 @@ function flushTrackerBankQueue() {
 }
 
 async function syncTrackerFromLive() {
+    if (trackerLiveSyncInFlight) return;
+    trackerLiveSyncInFlight = true;
+    const revisionAtStart = trackerLiveEventRevision;
     let liveNumbers = null;
     try {
         const tableId = typeof currentTableId !== 'undefined' && currentTableId ? currentTableId : 1;
@@ -667,7 +694,10 @@ async function syncTrackerFromLive() {
     } catch (error) {
         console.warn('[Tracker] No se pudo leer historial Live desde MongoDB.', error);
         return;
+    } finally {
+        trackerLiveSyncInFlight = false;
     }
+    if (revisionAtStart !== trackerLiveEventRevision || !Array.isArray(liveNumbers)) return;
     const changed = liveNumbers.length !== trackerLiveHistory.length ||
         liveNumbers.some((number, index) => number !== trackerLiveHistory[index]);
     if (changed) {
@@ -792,10 +822,22 @@ function setTrackerSource(source) {
     if (source === 'live') {
         syncTrackerFromLive();
     }
+    updateTrackerLiveSync();
     loadTrackerAiMemory();
     trackerConfig.source = source;
     try { localStorage.setItem('tracker_ai_config', JSON.stringify(trackerConfig)); } catch(e) {}
     renderTracker();
+}
+
+function updateTrackerLiveSync() {
+    if (trackerLiveSyncTimer) {
+        clearInterval(trackerLiveSyncTimer);
+        trackerLiveSyncTimer = null;
+    }
+    if (currentMode !== 'tracker' || trackerSource !== 'live') return;
+    trackerLiveSyncTimer = setInterval(() => {
+        syncTrackerFromLive();
+    }, 5000);
 }
 
 function toggleTrackerConfig() {
@@ -945,6 +987,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
             predictionNumbers
         });
     }
+    if (source === 'live' && !batch) trackerLiveEventRevision++;
     trackerHistory.push(n);
     if (trackerSource === 'live' && !batch) {
         console.log('[Tracker Live] NÃºmero recibido:', n, '| Total:', trackerHistory.length);

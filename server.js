@@ -1722,18 +1722,13 @@ app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
                     error.code = 'SESSION_EXISTS';
                     throw error;
                 }
-                await TrackerBankrollSession.updateMany(
-                    { table_id: tableId, status: 'active' },
-                    { $set: { status: 'paused', updated_at: new Date() } },
-                    { session: mongoSession }
-                );
                 [created] = await TrackerBankrollSession.create([{
                     table_id: tableId,
                     session_no: sessionNo,
                     initial_capital: capital,
                     balance: capital,
                     chip_value: chipValue,
-                    status: 'active'
+                    status: 'draft'
                 }], { session: mongoSession });
             });
         } finally {
@@ -1762,6 +1757,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/activate', async (req, res) 
                     { session: mongoSession }
                 );
                 selected.status = 'active';
+                selected.starts_at = selected.starts_at || new Date();
                 selected.updated_at = new Date();
                 await selected.save({ session: mongoSession });
             });
@@ -1840,6 +1836,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 const [entry] = await TrackerBankrollEntry.create([{
                     session_id: session._id,
                     session_no: session.session_no,
+                    cycle_no: session.completed_cycles + 1,
                     table_id: tableId,
                     spin_key: spinKey,
                     number,

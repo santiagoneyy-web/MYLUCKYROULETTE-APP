@@ -284,6 +284,7 @@
         color: #fff;
         font-weight: 600;
     }
+    .tracker-bank-inline { color: #65ddb8; font-size: .62rem; margin-left: 6px; white-space: normal; }
     .tracker-status-active { color: var(--green); }
     .tracker-control-hint {
         color: var(--muted);
@@ -1154,14 +1155,18 @@
                             <strong id="tracker-bank-title">&#x1F4B0; Gestor de banca</strong>
                             <button class="tracker-bank-close" onclick="toggleTrackerBankPanel(false)" title="Cerrar" aria-label="Cerrar gestor">&#x2715;</button>
                         </div>
-                        <div class="tracker-bank-strategy">Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. El resultado compara saldo final e inicial de la sesión.</div>
+                        <div class="tracker-bank-strategy">Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. Cada season admite varias rondas; un acierto reinicia el ciclo.</div>
                         <div class="tracker-bank-form">
-                            <label class="tracker-bank-field">Sesión<input id="tracker-bank-session-no" type="number" min="1" step="1" inputmode="numeric"></label>
+                            <label class="tracker-bank-field">Season<input id="tracker-bank-session-no" type="number" min="1" step="1" inputmode="numeric"></label>
                             <label class="tracker-bank-field">Capital inicial<input id="tracker-bank-capital" type="number" min="0.01" step="0.01" value="100" inputmode="decimal"></label>
                             <label class="tracker-bank-field">Valor ficha<input id="tracker-bank-chip" type="number" min="0.01" step="0.01" value="0.50" inputmode="decimal"></label>
                         </div>
-                        <button class="tracker-bank-create" onclick="createTrackerBankSession()">Crear sesión</button>
-                        <label class="tracker-bank-field">Sesiones<select class="tracker-bank-select" id="tracker-bank-session-select" onchange="activateTrackerBankSession(this.value)"><option value="">Sin sesiones</option></select></label>
+                        <button class="tracker-bank-create" onclick="createTrackerBankSession()">Crear season</button>
+                        <label class="tracker-bank-field">Seasons<select class="tracker-bank-select" id="tracker-bank-session-select" onchange="selectTrackerBankSession(this.value)"><option value="">Sin seasons</option></select></label>
+                        <div class="tracker-bank-next">
+                            <span>Inicio</span><b id="tracker-bank-started">--</b>
+                            <span>Final</span><b id="tracker-bank-ended">--</b>
+                        </div>
                         <div class="tracker-bank-stats">
                             <div class="tracker-bank-stat"><small>Capital inicial</small><strong id="tracker-bank-capital-value">--</strong></div>
                             <div class="tracker-bank-stat"><small>Saldo actual</small><strong id="tracker-bank-balance">--</strong></div>
@@ -1173,19 +1178,20 @@
                         <div class="tracker-bank-next">
                             <span>Ronda siguiente</span><b id="tracker-bank-round">--</b>
                             <span>Monto N4</span><b id="tracker-bank-stake">--</b>
-                            <span>Acumulado del ciclo</span><b id="tracker-bank-cycle">--</b>
+                            <span>Apuesta acumulada del ciclo</span><b id="tracker-bank-cycle">--</b>
                             <span>Ganancia si acierta</span><b id="tracker-bank-win-profit">--</b>
                             <span>Predicción N4 (9 casillas)</span><b id="tracker-bank-prediction">Esperando</b>
                             <span>Tiradas / apuestas</span><b id="tracker-bank-totals">0 / 0</b>
                         </div>
                         <div class="tracker-bank-message" id="tracker-bank-message" role="status" aria-live="polite">Conectando con MongoDB...</div>
-                        <button class="tracker-bank-close-session" id="tracker-bank-finish" onclick="closeTrackerBankSession()" style="display:none">Cerrar sesión y guardar resultado</button>
+                        <button class="tracker-bank-create" id="tracker-bank-start" onclick="startTrackerBankSession()" style="display:none">Iniciar season</button>
+                        <button class="tracker-bank-close-session" id="tracker-bank-finish" onclick="closeTrackerBankSession()" style="display:none">Finalizar season y guardar resultado</button>
                         <div class="tracker-bank-table-wrap">
-                            <table class="tracker-bank-table"><thead><tr><th>Ronda</th><th>Tirada</th><th>Apuesta</th><th>Pago</th><th>Saldo</th></tr></thead>
-                                <tbody id="tracker-bank-ledger"><tr><td colspan="5" style="text-align:center">Sin resultados</td></tr></tbody>
+                            <table class="tracker-bank-table"><thead><tr><th>Ciclo</th><th>Ronda</th><th>Tirada</th><th>Apuesta</th><th>Pago</th><th>Saldo</th></tr></thead>
+                                <tbody id="tracker-bank-ledger"><tr><td colspan="6" style="text-align:center">Sin resultados</td></tr></tbody>
                             </table>
                         </div>
-                        <div class="tracker-bank-foot">Sesiones y resultados Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
+                        <div class="tracker-bank-foot">Las seasons y cada resultado Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
                     </aside>
                 </div>
 
@@ -1259,7 +1265,7 @@
                         <div class="tracker-status-badge status-placed" id="tracker-placed-badge">Placed</div>
                     </div>
                     <div class="tracker-control-row"><span class="tracker-control-label">Status:</span> <span class="tracker-control-value tracker-status-active" id="tracker-status-text">Active</span></div>
-                    <div class="tracker-control-row"><span class="tracker-control-label">Prediction:</span> <span class="tracker-control-value" id="tracker-prediction">--</span></div>
+                    <div class="tracker-control-row"><span class="tracker-control-label">Prediction:</span> <span class="tracker-control-value" id="tracker-prediction">--</span><span class="tracker-bank-inline" id="tracker-bank-inline"></span></div>
                 </div>
 
                 <!-- Travel Chart (same style as Live) -->
@@ -1309,7 +1315,7 @@
 
 <script src="src/engine/predictor.js?v=999"></script>
 <script src="ai_chat.js?v=5"></script>
-<script src="modes.js?v=18"></script>
+<script src="modes.js?v=19"></script>
 <script src="app.js?v=1044"></script>
 </body>
 </html>

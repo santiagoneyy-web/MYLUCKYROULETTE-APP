@@ -11,6 +11,13 @@ assert.deepEqual(
 );
 assert.equal(getStake(0.4, 1), 3.6);
 
+let cycleSpend = 0;
+for (let round = 1; round <= 2; round++) {
+    const stake = getStake(0.4, round);
+    cycleSpend = Number((cycleSpend + stake).toFixed(2));
+}
+assert.equal(Number((cycleSpend + getStake(0.4, 3)).toFixed(2)), 14.4);
+
 const base = { initial_capital: 100, balance: 100, chip_value: 0.5, current_round: 1, cycle_wagered: 0 };
 const miss = calculateSettlement(base, 0, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 assert.equal(miss.won, false);

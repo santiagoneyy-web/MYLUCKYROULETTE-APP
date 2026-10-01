@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const TrackerBankrollEntrySchema = new mongoose.Schema({
     session_id: { type: mongoose.Schema.Types.ObjectId, required: true, ref: 'TrackerBankrollSession' },
     session_no: { type: Number, required: true },
+    cycle_no: { type: Number, required: true, min: 1 },
     table_id: { type: Number, required: true },
     spin_key: { type: String, required: true },
     number: { type: Number, required: true, min: 0, max: 36 },
