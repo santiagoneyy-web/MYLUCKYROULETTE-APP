@@ -1706,18 +1706,23 @@ app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
 
 app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
     const tableId = Number(req.params.tableId);
-    const sessionNo = Number(req.body.session_no);
+    let sessionNo = req.body.session_no === undefined ? null : Number(req.body.session_no);
     const capital = Number(req.body.initial_capital);
     const chipValue = Number(req.body.chip_value);
-    if (!Number.isInteger(tableId) || !Number.isInteger(sessionNo) || sessionNo < 1 ||
+    if (!Number.isInteger(tableId) || (sessionNo !== null && (!Number.isInteger(sessionNo) || sessionNo < 1)) ||
         !Number.isFinite(capital) || capital <= 0 || !Number.isFinite(chipValue) || chipValue <= 0) {
-        return res.status(400).json({ error: 'Ingresa sesión, capital y valor de ficha válidos.' });
+        return res.status(400).json({ error: 'Ingresa un capital y valor de ficha válidos.' });
     }
     try {
         const mongoSession = await mongoose.startSession();
         let created;
         try {
             await mongoSession.withTransaction(async () => {
+                if (sessionNo === null) {
+                    const latest = await TrackerBankrollSession.findOne({ table_id: tableId })
+                        .sort({ session_no: -1 }).select('session_no').session(mongoSession).lean().exec();
+                    sessionNo = Number(latest?.session_no || 0) + 1;
+                }
                 if (await TrackerBankrollSession.exists({ table_id: tableId, session_no: sessionNo }).session(mongoSession)) {
                     const error = new Error('Ese número de sesión ya existe.');
                     error.code = 'SESSION_EXISTS';
@@ -1770,6 +1775,40 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/activate', async (req, res) 
     } catch (error) {
         console.error('[Tracker bankroll] Activate failed:', error.message);
         res.status(500).json({ error: 'No se pudo activar la sesión.' });
+    }
+});
+
+app.post('/api/tracker/bankroll/:tableId/stop-active', async (req, res) => {
+    const tableId = Number(req.params.tableId);
+    if (!Number.isInteger(tableId)) return res.status(400).json({ error: 'Mesa inválida.' });
+    let mongoSession;
+    let closed = [];
+    try {
+        mongoSession = await mongoose.startSession();
+        await mongoSession.withTransaction(async () => {
+            const activeSessions = await TrackerBankrollSession.find({ table_id: tableId, status: 'active' })
+                .session(mongoSession).exec();
+            const now = new Date();
+            for (const session of activeSessions) {
+                session.status = 'closed';
+                session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
+                session.closed_at = now;
+                session.updated_at = now;
+                await session.save({ session: mongoSession });
+            }
+            closed = activeSessions;
+        });
+        res.json({
+            success: true,
+            closed_count: closed.length,
+            session: closed[0] || null,
+            storage: 'mongodb'
+        });
+    } catch (error) {
+        console.error('[Tracker bankroll] Stop active failed:', error.message);
+        res.status(500).json({ error: 'No se pudo detener y guardar la sesión en MongoDB.' });
+    } finally {
+        if (mongoSession) await mongoSession.endSession();
     }
 });
 

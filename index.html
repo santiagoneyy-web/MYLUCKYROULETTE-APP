@@ -440,7 +440,7 @@
     .tracker-bank-heading strong { flex:1;color:#fff;font-size:.85rem; }
     .tracker-bank-close { width:30px;height:30px;background:#151d29;color:#c7d4e3;border:1px solid var(--border);border-radius:5px;cursor:pointer; }
     .tracker-bank-strategy { padding:8px;margin-bottom:10px;background:rgba(101,221,184,.07);border-left:2px solid #65ddb8;color:#a9c6c1;font-size:.65rem;line-height:1.5; }
-    .tracker-bank-form { display:grid;grid-template-columns:.8fr 1.2fr 1fr;gap:6px;align-items:end; }
+    .tracker-bank-form { display:grid;grid-template-columns:1.2fr 1fr;gap:6px;align-items:end; }
     .tracker-bank-field { min-width:0;display:grid;gap:4px;color:var(--muted);font-size:.6rem; }
     .tracker-bank-field input,.tracker-bank-select { width:100%;min-width:0;box-sizing:border-box;background:#080d15;color:#fff;border:1px solid var(--border);border-radius:5px;padding:7px 6px;font-size:.68rem; }
     .tracker-bank-create,.tracker-bank-close-session { width:100%;margin:7px 0 10px;padding:8px;background:#0fc7a5;color:#03110f;border:0;border-radius:5px;font-weight:800;font-size:.68rem;cursor:pointer; }
@@ -1155,14 +1155,12 @@
                             <strong id="tracker-bank-title">&#x1F4B0; Gestor de banca</strong>
                             <button class="tracker-bank-close" onclick="toggleTrackerBankPanel(false)" title="Cerrar" aria-label="Cerrar gestor">&#x2715;</button>
                         </div>
-                        <div class="tracker-bank-strategy">Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. Cada season admite varias rondas; un acierto reinicia el ciclo.</div>
+                        <div class="tracker-bank-strategy">Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. Un acierto reinicia el ciclo.</div>
                         <div class="tracker-bank-form">
-                            <label class="tracker-bank-field">Season<input id="tracker-bank-session-no" type="number" min="1" step="1" inputmode="numeric"></label>
                             <label class="tracker-bank-field">Capital inicial<input id="tracker-bank-capital" type="number" min="0.01" step="0.01" placeholder="Ingresa capital" autocomplete="off" inputmode="decimal"></label>
                             <label class="tracker-bank-field">Valor ficha<input id="tracker-bank-chip" type="number" min="0.01" step="0.01" value="0.50" inputmode="decimal"></label>
                         </div>
-                        <button class="tracker-bank-create" onclick="createTrackerBankSession()">Crear season</button>
-                        <label class="tracker-bank-field">Seasons<select class="tracker-bank-select" id="tracker-bank-session-select" onchange="selectTrackerBankSession(this.value)"><option value="">Sin seasons</option></select></label>
+                        <button class="tracker-bank-create" id="tracker-bank-start" onclick="startTrackerBankSession()" style="display:none">Iniciar sesión</button>
                         <div class="tracker-bank-next">
                             <span>Inicio</span><b id="tracker-bank-started">--</b>
                             <span>Final</span><b id="tracker-bank-ended">--</b>
@@ -1184,14 +1182,13 @@
                             <span>Tiradas / apuestas</span><b id="tracker-bank-totals">0 / 0</b>
                         </div>
                         <div class="tracker-bank-message" id="tracker-bank-message" role="status" aria-live="polite">Conectando con MongoDB...</div>
-                        <button class="tracker-bank-create" id="tracker-bank-start" onclick="startTrackerBankSession()" style="display:none">Iniciar season</button>
-                        <button class="tracker-bank-close-session" id="tracker-bank-finish" onclick="closeTrackerBankSession()" style="display:none">Finalizar season y guardar resultado</button>
+                        <button class="tracker-bank-close-session" id="tracker-bank-finish" onclick="closeTrackerBankSession()" style="display:none">Finalizar sesión y guardar resultado</button>
                         <div class="tracker-bank-table-wrap">
                             <table class="tracker-bank-table"><thead><tr><th>Ciclo</th><th>Ronda</th><th>N4 → real</th><th>Apuesta</th><th>Pago</th><th>Saldo</th></tr></thead>
                                 <tbody id="tracker-bank-ledger"><tr><td colspan="6" style="text-align:center">Sin resultados</td></tr></tbody>
                             </table>
                         </div>
-                        <div class="tracker-bank-foot">Las seasons y cada resultado Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
+                        <div class="tracker-bank-foot">La sesión y cada resultado Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
                     </aside>
                 </div>
 
