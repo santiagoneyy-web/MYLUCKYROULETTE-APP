@@ -1757,6 +1757,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/activate', async (req, res) 
             await mongoSession.withTransaction(async () => {
                 selected = await TrackerBankrollSession.findOne({ _id: req.params.sessionId, table_id: tableId }).session(mongoSession);
                 if (!selected || selected.status === 'closed') return;
+                if (selected.start_spin_id == null) {
+                    const latestSpin = await Spin.findOne({ table_id: tableId })
+                        .sort({ id: -1 }).select('id').session(mongoSession).lean().exec();
+                    selected.start_spin_id = Number(latestSpin?.id || 0);
+                    selected.last_settled_spin_id = selected.start_spin_id;
+                }
                 await TrackerBankrollSession.updateMany(
                     { table_id: tableId, status: 'active' },
                     { $set: { status: 'paused', updated_at: new Date() } },
@@ -1869,6 +1875,33 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { session, entry: existing, duplicate: true };
                     return;
                 }
+                if (session.last_settled_spin_id == null) {
+                    const latestEntry = await TrackerBankrollEntry.findOne({ session_id: session._id })
+                        .sort({ created_at: -1 }).select('spin_key').session(mongoSession).lean().exec();
+                    const priorId = Number(String(latestEntry?.spin_key || '').split(':').pop());
+                    session.last_settled_spin_id = Number.isFinite(priorId)
+                        ? priorId
+                        : Number(session.start_spin_id || 0);
+                }
+                const earlierLiveSpins = await Spin.find({
+                    table_id: tableId,
+                    source_quality: 'live',
+                    id: { $gt: session.last_settled_spin_id, $lt: spinId }
+                }).sort({ id: 1 }).select('id').session(mongoSession).lean().exec();
+                let missingEarlierSpin = null;
+                for (const earlierLiveSpin of earlierLiveSpins) {
+                    const earlierKey = `${tableId}:${earlierLiveSpin.id}`;
+                    const earlierEntry = await TrackerBankrollEntry.findOne({ session_id: session._id, spin_key: earlierKey })
+                        .session(mongoSession).select('_id').lean().exec();
+                    if (!earlierEntry) {
+                        missingEarlierSpin = earlierLiveSpin;
+                        break;
+                    }
+                }
+                if (missingEarlierSpin) {
+                    result = { error: 'Hay una tirada Live anterior pendiente de liquidar.', status: 409, retryable: true };
+                    return;
+                }
                 const stake = trackerBankroll.getStake(session.chip_value, session.current_round);
                 if (session.balance + 1e-9 < stake) {
                     result = { error: 'Capital insuficiente para la siguiente apuesta.', status: 409, insufficient_capital: true };
@@ -1906,6 +1939,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     session.losses += 1;
                 }
                 session.updated_at = new Date();
+                session.last_settled_spin_id = spinId;
                 await session.save({ session: mongoSession });
                 result = { session, entry };
             });

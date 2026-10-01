@@ -14,6 +14,8 @@ const TrackerBankrollSessionSchema = new mongoose.Schema({
     total_wagered: { type: Number, default: 0, min: 0 },
     total_payout: { type: Number, default: 0, min: 0 },
     completed_cycles: { type: Number, default: 0, min: 0 },
+    start_spin_id: { type: Number, default: null, min: 0 },
+    last_settled_spin_id: { type: Number, default: null, min: 0 },
     status: { type: String, enum: ['draft', 'active', 'paused', 'closed'], default: 'draft', index: true },
     final_outcome: { type: String, enum: ['pending', 'won', 'lost', 'break_even'], default: 'pending' },
     starts_at: { type: Date, default: null },

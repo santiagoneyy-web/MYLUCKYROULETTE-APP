@@ -72,6 +72,7 @@ let trackerBankEntriesSessionId = null;
 let trackerBankLoadedTableId = null;
 let trackerBankQueue = Promise.resolve();
 const trackerBankPending = [];
+const trackerBankPendingKeys = new Set();
 let trackerBankLoading = false;
 let trackerLiveSyncTimer = null;
 let trackerLiveSyncInFlight = false;
@@ -536,6 +537,71 @@ function trackerBankPredictionCenter() {
     return Number(center);
 }
 
+function trackerCenterForHistory(history) {
+    if (!Array.isArray(history) || history.length < 3 || typeof computeDealerSignature !== 'function' ||
+        typeof projectNextRound !== 'function' || typeof getIAMasterSignals !== 'function') return null;
+    try {
+        const travels = [];
+        for (let i = 1; i < history.length; i++) travels.push(calcDist(history[i - 1], history[i]));
+        const cwTravels = travels.filter(distance => distance > 0);
+        const ccwTravels = travels.filter(distance => distance < 0);
+        const avgCW = cwTravels.length ? cwTravels.reduce((sum, distance) => sum + distance, 0) / cwTravels.length : 9;
+        const avgCCW = ccwTravels.length ? ccwTravels.reduce((sum, distance) => sum + distance, 0) / ccwTravels.length : -9;
+        const signature = computeDealerSignature(history);
+        const projected = projectNextRound(history, {});
+        const signals = getIAMasterSignals(projected, signature, history, {
+            cw: avgCW, ccw: avgCCW, offset: trackerPredictorOffset
+        });
+        const signal = signals?.[0];
+        if (!signal) return null;
+        const wave = typeof analyzeTravelWave === 'function' && travels.length >= 8
+            ? analyzeTravelWave(travels.slice(-12))
+            : null;
+        let cwVotes = 0, ccwVotes = 0, voteCount = 0;
+        const signalDir = signal.mainDir || (signal.confidenceCW > signal.confidenceCCW ? 'CW' : 'CCW');
+        if (signalDir === 'CW') { cwVotes += 2; voteCount += 2; }
+        else { ccwVotes += 2; voteCount += 2; }
+        if (wave?.targetDir === 'CW') { cwVotes++; voteCount++; }
+        else if (wave?.targetDir === 'CCW') { ccwVotes++; voteCount++; }
+        if (signature?.avgTravel > 1) { cwVotes++; voteCount++; }
+        else if (signature?.avgTravel < -1) { ccwVotes++; voteCount++; }
+        const direction = cwVotes >= ccwVotes ? 'CW' : 'CCW';
+        const center = direction === 'CW' ? signal.targetCW : signal.targetCCW;
+        return Number.isInteger(Number(center)) && Number(center) >= 0 && Number(center) <= 36 ? Number(center) : null;
+    } catch (error) {
+        console.warn('[Tracker bankroll] No se pudo reconstruir la señal histórica.', error.message);
+        return null;
+    }
+}
+
+function reconcileTrackerBankSpins(liveSpins) {
+    if (trackerSource !== 'live' || !Array.isArray(liveSpins)) return;
+    const session = trackerBankActiveSession();
+    if (!session) return;
+    let startSpinId = session.start_spin_id == null ? NaN : Number(session.start_spin_id);
+    if (!Number.isFinite(startSpinId)) {
+        const entryIds = trackerBankEntries
+            .filter(entry => String(entry.session_id) === String(session._id))
+            .map(entry => Number(String(entry.spin_key || '').split(':').pop()))
+            .filter(Number.isFinite);
+        startSpinId = entryIds.length ? Math.max(...entryIds) : Math.max(0, ...liveSpins.map(spin => Number(spin.id) || 0));
+    }
+    const recorded = new Set(trackerBankEntries.map(entry => String(entry.spin_key || '')));
+    const queued = new Set(trackerBankPending.map(spin => `${trackerBankTableId()}:${spin.spinId}`));
+    for (let index = 0; index < liveSpins.length; index++) {
+        const spin = liveSpins[index];
+        const spinId = Number(spin.id);
+        if (!Number.isInteger(spinId) || spinId <= startSpinId) continue;
+        const spinKey = `${trackerBankTableId()}:${spinId}`;
+        if (recorded.has(spinKey) || queued.has(spinKey)) continue;
+        const historyBeforeSpin = liveSpins.slice(0, index).map(item => Number(item.number));
+        const predictionCenter = trackerCenterForHistory(historyBeforeSpin);
+        if (predictionCenter === null) continue;
+        enqueueTrackerBankSpin({ sessionId: session._id, spinId, number: Number(spin.number), predictionCenter });
+        queued.add(spinKey);
+    }
+}
+
 function trackerBankSetMessage(message) {
     const element = document.getElementById('tracker-bank-message');
     if (element) element.textContent = message || '';
@@ -727,29 +793,45 @@ async function closeTrackerBankSession() {
 }
 
 function enqueueTrackerBankSpin(spin) {
-    trackerBankPending.push(spin);
+    const pendingKey = `${spin.sessionId}:${spin.spinId}`;
+    if (trackerBankPendingKeys.has(pendingKey)) return;
+    trackerBankPendingKeys.add(pendingKey);
+    const insertAt = trackerBankPending.findIndex(item =>
+        String(item.sessionId) === String(spin.sessionId) && Number(item.spinId) > Number(spin.spinId)
+    );
+    if (insertAt === -1) trackerBankPending.push(spin);
+    else trackerBankPending.splice(insertAt, 0, spin);
     flushTrackerBankQueue().catch(() => {});
 }
 
 function flushTrackerBankQueue() {
-    trackerBankQueue = trackerBankQueue.then(async () => {
+    trackerBankQueue = trackerBankQueue.catch(() => {}).then(async () => {
         while (trackerBankPending.length) {
             const spin = trackerBankPending[0];
-            const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(spin.sessionId)}/settle`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spin_id: spin.spinId, number: spin.number, prediction_center: spin.predictionCenter })
-            });
-            const data = await response.json().catch(() => ({}));
+            const pendingKey = `${spin.sessionId}:${spin.spinId}`;
+            let response, data;
+            try {
+                response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(spin.sessionId)}/settle`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ spin_id: spin.spinId, number: spin.number, prediction_center: spin.predictionCenter })
+                });
+                data = await response.json().catch(() => ({}));
+            } catch (error) {
+                trackerBankSetMessage('No hay conexión con MongoDB. La liquidación Live queda pendiente y se reintentará automáticamente.');
+                break;
+            }
             if (!response.ok || data.storage !== 'mongodb') {
-                if (response.status === 503) {
-                    trackerBankSetMessage('MongoDB desconectado: la tirada Live queda pendiente en memoria y la banca se pausa. Reconecta para reintentar.');
-                    throw new Error('MongoDB no disponible');
+                const retryable = data.retryable === true || String(data.error || '').includes('no está confirmada');
+                if (response.status === 503 || response.status >= 500 || retryable) {
+                    spin.retries = Number(spin.retries || 0) + 1;
+                    trackerBankSetMessage(`Tirada Live pendiente (${spin.retries} intentos). No se avanzó la ronda; se reintentará.`);
+                    break;
                 }
-                trackerBankPending.shift();
-                trackerBankSetMessage(data.error || 'No se pudo liquidar la tirada Live.');
-                continue;
+                trackerBankSetMessage(`${data.error || 'No se pudo liquidar la tirada Live.'} Se conserva pendiente y se detuvo la banca para no alterar el conteo.`);
+                break;
             }
             trackerBankPending.shift();
+            trackerBankPendingKeys.delete(pendingKey);
             trackerBankSessions = trackerBankMergeSessions(trackerBankSessions, [data.session]);
             if (String(trackerBankEntriesSessionId || '') !== String(data.session._id)) {
                 trackerBankEntries = [];
@@ -770,17 +852,18 @@ async function syncTrackerFromLive() {
     if (trackerLiveSyncInFlight) return;
     trackerLiveSyncInFlight = true;
     const revisionAtStart = trackerLiveEventRevision;
-    let liveNumbers = null;
+    let liveSpins = null;
     try {
         const tableId = typeof currentTableId !== 'undefined' && currentTableId ? currentTableId : 1;
         const response = await fetch(`/api/history/${encodeURIComponent(tableId)}?limit=400`);
         if (response.ok) {
             const spins = await response.json();
             if (Array.isArray(spins)) {
-                liveNumbers = spins
+                liveSpins = spins
                     .filter(spin => spin && (spin.source === 'casino_org_live' || spin.source === 'public_scraper'))
-                    .map(spin => Number(spin.number))
-                    .filter(number => Number.isInteger(number) && number >= 0 && number <= 36);
+                    .filter(spin => Number.isInteger(Number(spin.id)) && Number(spin.id) > 0 &&
+                        Number.isInteger(Number(spin.number)) && Number(spin.number) >= 0 && Number(spin.number) <= 36)
+                    .map(spin => ({ id: Number(spin.id), number: Number(spin.number) }));
             }
         } else return;
     } catch (error) {
@@ -789,7 +872,9 @@ async function syncTrackerFromLive() {
     } finally {
         trackerLiveSyncInFlight = false;
     }
-    if (revisionAtStart !== trackerLiveEventRevision || !Array.isArray(liveNumbers)) return;
+    if (revisionAtStart !== trackerLiveEventRevision || !Array.isArray(liveSpins)) return;
+    reconcileTrackerBankSpins(liveSpins);
+    const liveNumbers = liveSpins.map(spin => spin.number);
     const changed = liveNumbers.length !== trackerLiveHistory.length ||
         liveNumbers.some((number, index) => number !== trackerLiveHistory[index]);
     if (changed) {
@@ -798,6 +883,7 @@ async function syncTrackerFromLive() {
         renderTracker();
         console.log('[Tracker] Synced ' + trackerLiveHistory.length + ' spins from Live mode');
     }
+    if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
 }
 
 async function loadTrackerAiMemory() {
@@ -930,7 +1016,9 @@ function updateTrackerLiveSync() {
     }
     if (currentMode !== 'tracker' || trackerSource !== 'live') return;
     trackerLiveSyncTimer = setInterval(() => {
-        syncTrackerFromLive();
+        syncTrackerFromLive().finally(() => {
+            if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
+        });
     }, 5000);
 }
 
