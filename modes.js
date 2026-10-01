@@ -499,18 +499,21 @@ async function loadTrackerBankSessions() {
         trackerBankEntries = Array.isArray(data.entries) ? data.entries : [];
         const active = trackerBankActiveSession();
         const selected = trackerBankSessions.find(item => String(item._id) === String(trackerBankSelectedSessionId));
-        trackerBankSelectedSessionId = (selected || active || trackerBankSessions[0])?._id || null;
+        trackerBankSelectedSessionId = (active || selected)?._id || null;
         const selector = document.getElementById('tracker-bank-session-select');
         if (selector) {
-            selector.innerHTML = trackerBankSessions.length
-                ? trackerBankSessions.map(item => `<option value="${String(item._id)}">Season ${Number(item.session_no)} · ${item.status === 'active' ? 'activa' : item.status === 'closed' ? trackerBankOutcomeLabel(item.final_outcome) : item.status === 'draft' ? 'lista' : 'pausada'}</option>`).join('')
-                : '<option value="">Sin seasons</option>';
-            if (trackerBankSelectedSessionId) selector.value = String(trackerBankSelectedSessionId);
+            selector.innerHTML = `<option value="">${active ? 'Sin selección · activa en curso' : 'Sin sesión activa · elige una season'}</option>` +
+                trackerBankSessions.map(item => `<option value="${String(item._id)}">Season ${Number(item.session_no)} · ${item.status === 'active' ? 'activa' : item.status === 'closed' ? trackerBankOutcomeLabel(item.final_outcome) : item.status === 'draft' ? 'lista' : 'pausada'}</option>`).join('');
+            selector.value = trackerBankSelectedSessionId ? String(trackerBankSelectedSessionId) : '';
         }
         const nextNo = trackerBankSessions.reduce((max, item) => Math.max(max, Number(item.session_no) || 0), 0) + 1;
         const sessionInput = document.getElementById('tracker-bank-session-no');
         if (sessionInput && !sessionInput.value) sessionInput.value = String(nextNo);
-        trackerBankSetMessage(trackerBankSessions.length ? '' : 'Crea una season en MongoDB para comenzar.');
+        trackerBankSetMessage(active
+            ? ''
+            : trackerBankSessions.length
+                ? 'No hay una season activa. Selecciona una guardada o crea una nueva.'
+                : 'Crea una season en MongoDB para comenzar.');
         renderTrackerBankroll();
         if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
     } catch (error) {
@@ -549,10 +552,10 @@ function renderTrackerBankroll() {
     set('tracker-bank-wins', String(session?.wins || 0));
     set('tracker-bank-losses', String(session?.losses || 0));
     set('tracker-bank-outcome', session ? (session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : `${trackerBankOutcomeLabel(profit > 0 ? 'won' : profit < 0 ? 'lost' : 'break_even')} · provisional`) : '--');
-    set('tracker-bank-round', String(round));
-    set('tracker-bank-stake', trackerBankMoney(stake));
-    set('tracker-bank-cycle', trackerBankMoney(roundTotal));
-    set('tracker-bank-win-profit', trackerBankMoney(possibleProfit));
+    set('tracker-bank-round', session ? String(round) : '--');
+    set('tracker-bank-stake', session ? trackerBankMoney(stake) : '--');
+    set('tracker-bank-cycle', session ? trackerBankMoney(roundTotal) : '--');
+    set('tracker-bank-win-profit', session ? trackerBankMoney(possibleProfit) : '--');
     set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? pred.join(', ') : active ? 'Esperando señal Live' : '--');
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / S/ 0.00');
     set('tracker-bank-started', session ? trackerBankDate(session.starts_at || session.created_at) : '--');
@@ -565,12 +568,10 @@ function renderTrackerBankroll() {
     if (inline) {
         const center = trackerBankPredictionCenter();
         const hasCenter = center !== null && Number.isInteger(Number(center));
-        inline.textContent = trackerSource === 'live' && hasCenter
+        inline.textContent = active && trackerSource === 'live' && hasCenter
             ? `${Number(center)} N4 · ${trackerBankMoney(roundTotal)}`
             : '';
-        inline.title = active
-            ? 'Exposición acumulada si juegas la próxima ronda; se reinicia al acertar.'
-            : 'Importe estimado de la ronda 1. Inicia una season para llevar el saldo y acumular rondas.';
+        inline.title = active ? 'Exposición acumulada si juegas la próxima ronda; se reinicia al acertar.' : '';
     }
     const ledger = document.getElementById('tracker-bank-ledger');
     if (ledger) ledger.innerHTML = trackerBankEntries.length
