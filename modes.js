@@ -436,6 +436,10 @@ function trackerBankTableId() {
 }
 
 function trackerBankActiveSession() {
+    if (trackerBankSelectedSessionId) {
+        const selected = trackerBankSessions.find(session => String(session._id) === String(trackerBankSelectedSessionId));
+        return selected?.status === 'active' ? selected : null;
+    }
     return trackerBankSessions.find(session => session.status === 'active') || null;
 }
 
@@ -497,9 +501,24 @@ async function loadTrackerBankSessions() {
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
         trackerBankSessions = Array.isArray(data.sessions) ? data.sessions : [];
         trackerBankEntries = Array.isArray(data.entries) ? data.entries : [];
-        const active = trackerBankActiveSession();
+        const active = trackerBankSessions.find(item => item.status === 'active') || null;
         const selected = trackerBankSessions.find(item => String(item._id) === String(trackerBankSelectedSessionId));
-        trackerBankSelectedSessionId = (active || selected)?._id || null;
+        const newestDraft = trackerBankSessions
+            .filter(item => item.status === 'draft')
+            .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
+        const draftIsNewerThanActive = newestDraft && (!active ||
+            new Date(newestDraft.created_at || 0) >= new Date(active.starts_at || active.created_at || 0));
+        trackerBankSelectedSessionId = (selected || (draftIsNewerThanActive ? newestDraft : active))?._id || null;
+        if (trackerBankSelectedSessionId && String(data.selected_session_id || '') !== String(trackerBankSelectedSessionId)) {
+            trackerBankEntries = [];
+            const selectedUrl = new URL(url);
+            selectedUrl.searchParams.set('session_id', String(trackerBankSelectedSessionId));
+            const selectedResponse = await fetch(selectedUrl, { cache: 'no-store' });
+            const selectedData = await selectedResponse.json().catch(() => ({}));
+            if (selectedResponse.ok && selectedData.storage === 'mongodb') {
+                trackerBankEntries = Array.isArray(selectedData.entries) ? selectedData.entries : [];
+            }
+        }
         const selector = document.getElementById('tracker-bank-session-select');
         if (selector) {
             selector.innerHTML = `<option value="">${active ? 'Sin selección · activa en curso' : 'Sin sesión activa · elige una season'}</option>` +
@@ -509,8 +528,10 @@ async function loadTrackerBankSessions() {
         const nextNo = trackerBankSessions.reduce((max, item) => Math.max(max, Number(item.session_no) || 0), 0) + 1;
         const sessionInput = document.getElementById('tracker-bank-session-no');
         if (sessionInput && !sessionInput.value) sessionInput.value = String(nextNo);
-        trackerBankSetMessage(active
-            ? ''
+        trackerBankSetMessage(active && String(trackerBankSelectedSessionId) !== String(active._id)
+            ? 'Season nueva seleccionada. Al iniciarla, la anterior quedará pausada.'
+            : active
+                ? ''
             : trackerBankSessions.length
                 ? 'No hay una season activa. Selecciona una guardada o crea una nueva.'
                 : 'Crea una season en MongoDB para comenzar.');
