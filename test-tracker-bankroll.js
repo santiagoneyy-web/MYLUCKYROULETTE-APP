@@ -4,12 +4,28 @@ const {
     calculateSettlement,
     getSessionOutcome
 } = require('./src/engine/tracker_bankroll');
+const { wheelNeighbors } = require('./src/engine/analytics_snapshot');
 
 assert.deepEqual(
     Array.from({ length: 10 }, (_, index) => getStake(0.5, index + 1)),
     [4.5, 4.5, 9, 9, 18, 18, 36, 36, 72, 72]
 );
 assert.equal(getStake(0.4, 1), 3.6);
+
+const n4 = wheelNeighbors(8, 4);
+const predictionSession = { initial_capital: 100, balance: 100, chip_value: 0.5, current_round: 1, cycle_wagered: 0 };
+assert.equal(n4.length, 9);
+assert.equal(new Set(n4).size, 9);
+assert.ok(n4.includes(8));
+for (let center = 0; center <= 36; center++) {
+    const prediction = wheelNeighbors(center, 4);
+    assert.equal(prediction.length, 9);
+    assert.equal(new Set(prediction).size, 9);
+    assert.ok(prediction.includes(center));
+}
+assert.equal(calculateSettlement(predictionSession, n4[0], n4).won, true);
+const outsideN4 = Array.from({ length: 37 }, (_, number) => number).find(number => !n4.includes(number));
+assert.equal(calculateSettlement(predictionSession, outsideN4, n4).won, false);
 
 let cycleSpend = 0;
 for (let round = 1; round <= 2; round++) {

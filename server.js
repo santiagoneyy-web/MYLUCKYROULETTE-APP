@@ -21,7 +21,8 @@ const {
     buildMetricSnapshot,
     buildTableStateSnapshot,
     chooseDominancePrediction,
-    evaluatePredictionHit
+    evaluatePredictionHit,
+    wheelNeighbors
 } = require('./src/engine/analytics_snapshot');
 
 const forest = require('./src/engine/forest_engine');
@@ -1795,11 +1796,13 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     const tableId = Number(req.params.tableId);
     const spinId = Number(req.body.spin_id);
     const number = Number(req.body.number);
-    const predictionNumbers = Array.isArray(req.body.prediction_numbers)
-        ? req.body.prediction_numbers.map(Number)
+    const predictionCenter = Number(req.body.prediction_center);
+    const predictionNumbers = Number.isInteger(predictionCenter) && predictionCenter >= 0 && predictionCenter <= 36
+        ? wheelNeighbors(predictionCenter, 4)
         : [];
     const spinKey = `${tableId}:${spinId}`;
     if (!Number.isInteger(tableId) || !Number.isInteger(spinId) || !Number.isInteger(number) || number < 0 || number > 36 ||
+        !Number.isInteger(predictionCenter) || predictionCenter < 0 || predictionCenter > 36 ||
         predictionNumbers.length !== trackerBankroll.POCKETS_PER_BET ||
         predictionNumbers.some(value => !Number.isInteger(value) || value < 0 || value > 36) ||
         new Set(predictionNumbers).size !== trackerBankroll.POCKETS_PER_BET) {
@@ -1840,6 +1843,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     table_id: tableId,
                     spin_key: spinKey,
                     number,
+                    prediction_center: predictionCenter,
                     prediction_numbers: predictionNumbers,
                     round: settlement.round,
                     stake: settlement.stake,

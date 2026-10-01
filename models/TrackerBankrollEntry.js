@@ -7,6 +7,7 @@ const TrackerBankrollEntrySchema = new mongoose.Schema({
     table_id: { type: Number, required: true },
     spin_key: { type: String, required: true },
     number: { type: Number, required: true, min: 0, max: 36 },
+    prediction_center: { type: Number, min: 0, max: 36 },
     prediction_numbers: { type: [Number], required: true, validate: values => values.length === 9 },
     round: { type: Number, required: true, min: 1 },
     stake: { type: Number, required: true, min: 0 },

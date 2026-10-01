@@ -35,6 +35,7 @@ const trackerManualHistory = [];
 const trackerLiveHistory = [];
 let trackerHistory = trackerManualHistory;
 let trackerLastSignal = null;
+let trackerAiN4Center = null;
 let trackerPredictorOffset = 0;
 let trackerCurrentAvgCW = 9;
 let trackerCurrentAvgCCW = -9;
@@ -457,13 +458,20 @@ function trackerBankStake(chip, round) {
 }
 
 function trackerBankPredictionNumbers() {
+    const center = trackerBankPredictionCenter();
+    if (center === null || typeof wheelNeighbors !== 'function') return [];
+    const numbers = wheelNeighbors(center, 4).map(Number);
+    return numbers.length === 9 && new Set(numbers).size === 9 ? numbers : [];
+}
+
+function trackerBankPredictionCenter() {
+    if (trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center)) return trackerAiN4Center;
     const signal = trackerLastSignal;
-    if (!signal || typeof wheelNeighbors !== 'function') return [];
+    if (!signal) return null;
     const direction = signal.mainDir || (signal.confidenceCW >= signal.confidenceCCW ? 'CW' : 'CCW');
     const center = direction === 'CW' ? signal.targetCW : signal.targetCCW;
-    if (center === undefined || center === null || !Number.isInteger(Number(center))) return [];
-    const numbers = wheelNeighbors(Number(center), 4).map(Number);
-    return numbers.length === 9 && new Set(numbers).size === 9 ? numbers : [];
+    if (center === undefined || center === null || !Number.isInteger(Number(center))) return null;
+    return Number(center);
 }
 
 function trackerBankSetMessage(message) {
@@ -526,12 +534,13 @@ function renderTrackerBankroll() {
     const capital = Number(session?.initial_capital || 0);
     const balance = Number(session?.balance || 0);
     const profit = Number((balance - capital).toFixed(2));
-    const round = Number(session?.current_round || 1);
-    const chip = Number(session?.chip_value || 0);
-    const stake = session ? trackerBankStake(chip, round) : 0;
-    const cycle = Number(session?.cycle_wagered || 0);
-    const roundTotal = session ? Number((cycle + stake).toFixed(2)) : 0;
-    const possibleProfit = session ? Number((stake * 4 - cycle - stake).toFixed(2)) : 0;
+    const chipInput = Number(document.getElementById('tracker-bank-chip')?.value);
+    const chip = Number(active ? session.chip_value : session?.chip_value || chipInput || 0.5);
+    const round = active ? Number(session.current_round || 1) : 1;
+    const stake = trackerBankStake(chip, round);
+    const cycle = active ? Number(session.cycle_wagered || 0) : 0;
+    const roundTotal = Number((cycle + stake).toFixed(2));
+    const possibleProfit = Number((stake * 4 - cycle - stake).toFixed(2));
     const pred = trackerBankPredictionNumbers();
     const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     set('tracker-bank-capital-value', session ? trackerBankMoney(capital) : '--');
@@ -540,10 +549,10 @@ function renderTrackerBankroll() {
     set('tracker-bank-wins', String(session?.wins || 0));
     set('tracker-bank-losses', String(session?.losses || 0));
     set('tracker-bank-outcome', session ? (session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : `${trackerBankOutcomeLabel(profit > 0 ? 'won' : profit < 0 ? 'lost' : 'break_even')} · provisional`) : '--');
-    set('tracker-bank-round', active ? String(round) : '--');
-    set('tracker-bank-stake', active ? trackerBankMoney(stake) : '--');
-    set('tracker-bank-cycle', active ? trackerBankMoney(roundTotal) : '--');
-    set('tracker-bank-win-profit', active ? trackerBankMoney(possibleProfit) : '--');
+    set('tracker-bank-round', String(round));
+    set('tracker-bank-stake', trackerBankMoney(stake));
+    set('tracker-bank-cycle', trackerBankMoney(roundTotal));
+    set('tracker-bank-win-profit', trackerBankMoney(possibleProfit));
     set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? pred.join(', ') : active ? 'Esperando señal Live' : '--');
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / S/ 0.00');
     set('tracker-bank-started', session ? trackerBankDate(session.starts_at || session.created_at) : '--');
@@ -554,17 +563,22 @@ function renderTrackerBankroll() {
     if (finish) finish.style.display = active ? 'block' : 'none';
     const inline = document.getElementById('tracker-bank-inline');
     if (inline) {
-        const direction = trackerLastSignal?.mainDir || (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
-        const center = direction === 'CW' ? trackerLastSignal?.targetCW : trackerLastSignal?.targetCCW;
-        const hasCenter = center !== undefined && center !== null && Number.isInteger(Number(center));
-        inline.textContent = active && trackerSource === 'live'
-            ? `${hasCenter ? `${Number(center)} ` : ''}N4 · ${trackerBankMoney(roundTotal)}`
+        const center = trackerBankPredictionCenter();
+        const hasCenter = center !== null && Number.isInteger(Number(center));
+        inline.textContent = trackerSource === 'live' && hasCenter
+            ? `${Number(center)} N4 · ${trackerBankMoney(roundTotal)}`
             : '';
-        inline.title = active ? 'Apuesta acumulada del ciclo al jugar la ronda siguiente; se reinicia al acertar.' : '';
+        inline.title = active
+            ? 'Exposición acumulada si juegas la próxima ronda; se reinicia al acertar.'
+            : 'Importe estimado de la ronda 1. Inicia una season para llevar el saldo y acumular rondas.';
     }
     const ledger = document.getElementById('tracker-bank-ledger');
     if (ledger) ledger.innerHTML = trackerBankEntries.length
-        ? trackerBankEntries.slice(-30).reverse().map(entry => `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td>${entry.number} ${entry.won ? '✓' : '×'}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`).join('')
+        ? trackerBankEntries.slice(-30).reverse().map(entry => {
+            const prediction = Array.isArray(entry.prediction_numbers) ? entry.prediction_numbers.join(', ') : '';
+            const center = Number.isInteger(Number(entry.prediction_center)) ? Number(entry.prediction_center) : '--';
+            return `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td title="N4 ${center}: ${prediction}">${center} → ${entry.number} ${entry.won ? '✓' : '×'}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`;
+        }).join('')
         : '<tr><td colspan="6" style="text-align:center">Sin resultados Live en esta season</td></tr>';
 }
 
@@ -648,7 +662,7 @@ function flushTrackerBankQueue() {
             const spin = trackerBankPending[0];
             const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(spin.sessionId)}/settle`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spin_id: spin.spinId, number: spin.number, prediction_numbers: spin.predictionNumbers })
+                body: JSON.stringify({ spin_id: spin.spinId, number: spin.number, prediction_center: spin.predictionCenter })
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok || data.storage !== 'mongodb') {
@@ -802,9 +816,11 @@ async function saveTrackerAiMemory(userText, assistantText, source = trackerSour
 
 function setTrackerSource(source) {
     if (source !== 'manual' && source !== 'live') return;
+    if (trackerSource !== source) trackerLiveEventRevision++;
     trackerSource = source;
     trackerHistory = source === 'live' ? trackerLiveHistory : trackerManualHistory;
     trackerLastSignal = null;
+    trackerAiN4Center = null;
     trackerTriggerCounter = 0;
     trackerLastDominantDir = null;
     trackerLastDominantZone = null;
@@ -979,14 +995,15 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
         return;
     }
     if (source === 'live' && !batch && spinId && trackerBankActiveSession()) {
-        const predictionNumbers = trackerBankPredictionNumbers();
-        if (predictionNumbers.length === 9) enqueueTrackerBankSpin({
+        const predictionCenter = trackerBankPredictionCenter();
+        if (Number.isInteger(predictionCenter) && trackerBankPredictionNumbers().length === 9) enqueueTrackerBankSpin({
             sessionId: trackerBankActiveSession()._id,
             spinId: Number(spinId),
             number: n,
-            predictionNumbers
+            predictionCenter
         });
     }
+    if (source === 'live' && !batch) trackerAiN4Center = null;
     if (source === 'live' && !batch) trackerLiveEventRevision++;
     trackerHistory.push(n);
     if (trackerSource === 'live' && !batch) {
@@ -1023,6 +1040,7 @@ async function callTrackerAISilent(promptObj) {
     if (status) status.innerText = 'Pensando...';
     if (predEl) predEl.innerText = 'ANALIZANDO...';
     const requestSource = trackerSource;
+    const requestRevision = trackerLiveEventRevision;
     const requestMemory = trackerAiMemory;
     const requestContext = buildTrackerAIContext();
     try {
@@ -1050,7 +1068,11 @@ async function callTrackerAISilent(promptObj) {
         }
         const data = await res.json();
         if (data.success && data.response) {
-            syncPredictionFromAI(data.response);
+            if (requestSource === trackerSource && requestRevision === trackerLiveEventRevision) {
+                syncPredictionFromAI(data.response);
+            } else if (status) {
+                status.innerText = 'Análisis anterior descartado; hay tiradas más recientes.';
+            }
             const finalUserMessage = promptObj.memoryText || 'Análisis automático del Tracker.';
             if (requestSource === 'live') {
                 await saveTrackerAiMemory(finalUserMessage, data.response, requestSource, requestMemory, requestContext);
@@ -1251,6 +1273,7 @@ function renderTracker() {
     const chartRes = renderModeTravelChart('trackerChart', trackerHistory, trackerManualAvgOffset);
     if (chartRes) { trackerCurrentAvgCW = chartRes.avgCW; trackerCurrentAvgCCW = chartRes.avgCCW; }
     renderTravelTable('tracker-travel-tbody', trackerHistory, 'Esperando datos...');
+    renderTrackerBankroll();
 }
 
 // â”€â”€ Render Travel Chart (identical visual style for Tracker and Manual) â”€â”€
@@ -2157,6 +2180,7 @@ async function callTrackerAI(promptObj, isAuto) {
     if (status) status.innerText = 'Pensando...';
     if (predEl) predEl.innerText = 'ANALIZANDO...';
     const requestSource = trackerSource;
+    const requestRevision = trackerLiveEventRevision;
     const requestMemory = trackerAiMemory;
     const requestContext = buildTrackerAIContext();
     console.log('[Tracker AI] Sending request:', trackerConfig.provider, trackerConfig.model);
@@ -2187,7 +2211,11 @@ async function callTrackerAI(promptObj, isAuto) {
         console.log('[Tracker AI] Response:', data.success, data.response ? data.response.substring(0, 50) : 'no response');
         if (data.success && data.response) {
             addTrackerChatMessage('ai', '&#x1F916; ' + data.response);
-            syncPredictionFromAI(data.response);
+            if (requestSource === trackerSource && requestRevision === trackerLiveEventRevision) {
+                syncPredictionFromAI(data.response);
+            } else if (status) {
+                status.innerText = 'Análisis anterior descartado; hay tiradas más recientes.';
+            }
             const finalUserMessage = promptObj.memoryText || 'Análisis automático del Tracker.';
             if (requestSource === 'live') {
                 await saveTrackerAiMemory(finalUserMessage, data.response, requestSource, requestMemory, requestContext);
@@ -2238,11 +2266,15 @@ function syncPredictionFromAI(responseText) {
 
     if (nums.length > 0) {
         predEl.innerText = nums[0] + ' ' + type;
+        if (type === 'N4' && trackerSource === 'live') trackerAiN4Center = nums[0];
     } else if (type) {
         predEl.innerText = type;
+        if (trackerSource === 'live') trackerAiN4Center = null;
     } else {
         predEl.innerText = '--';
+        if (trackerSource === 'live') trackerAiN4Center = null;
     }
+    renderTrackerBankroll();
 }
 
 // â”€â”€ Auto Triggers â”€â”€ (DISABLED â€” AI only speaks when user asks)
