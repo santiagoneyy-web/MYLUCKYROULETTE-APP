@@ -68,6 +68,7 @@ let trackerManualAvgOffset = 0;
 let trackerBankSessions = [];
 let trackerBankEntries = [];
 let trackerBankSelectedSessionId = null;
+let trackerBankEntriesSessionId = null;
 let trackerBankLoadedTableId = null;
 let trackerBankQueue = Promise.resolve();
 const trackerBankPending = [];
@@ -451,6 +452,37 @@ function trackerBankCloseUrl(sessionId) {
     return `/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(sessionId)}/close`;
 }
 
+function trackerBankMergeSessions(current, incoming) {
+    const sessions = new Map(current.map(session => [String(session._id), session]));
+    for (const candidate of incoming) {
+        const key = String(candidate._id);
+        const existing = sessions.get(key);
+        if (!existing) {
+            sessions.set(key, candidate);
+            continue;
+        }
+        const oldSpins = Number(existing.total_spins || 0);
+        const newSpins = Number(candidate.total_spins || 0);
+        const oldTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
+        const newTime = new Date(candidate.updated_at || candidate.created_at || 0).getTime();
+        const newer = newSpins > oldSpins || (newSpins === oldSpins && (
+            newTime > oldTime || (newTime === oldTime && candidate.status === 'closed' && existing.status !== 'closed')
+        ));
+        if (newer) sessions.set(key, candidate);
+    }
+    return Array.from(sessions.values())
+        .sort((a, b) => Number(b.session_no) - Number(a.session_no))
+        .slice(0, 100);
+}
+
+function trackerBankMergeEntries(current, incoming) {
+    const entries = new Map();
+    for (const entry of [...incoming, ...current]) entries.set(String(entry.spin_key || entry._id), entry);
+    return Array.from(entries.values())
+        .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
+        .slice(-30);
+}
+
 async function closeTrackerBankSessionOnReload() {
     const navigation = performance.getEntriesByType('navigation')[0];
     if (navigation?.type !== 'reload') return;
@@ -516,18 +548,25 @@ async function loadTrackerBankSessions() {
         const tableId = trackerBankTableId();
         if (String(tableId) !== String(trackerBankLoadedTableId)) {
             trackerBankSelectedSessionId = null;
+            trackerBankSessions = [];
+            trackerBankEntries = [];
+            trackerBankEntriesSessionId = null;
             trackerBankLoadedTableId = tableId;
         }
         const url = new URL(`/api/tracker/bankroll/${encodeURIComponent(tableId)}`, location.origin);
         const response = await fetch(url, { cache: 'no-store' });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
-        trackerBankSessions = Array.isArray(data.sessions) ? data.sessions : [];
+        trackerBankSessions = trackerBankMergeSessions(
+            trackerBankSessions,
+            Array.isArray(data.sessions) ? data.sessions : []
+        );
         const active = trackerBankSessions.find(item => item.status === 'active') || null;
         const latestClosed = trackerBankSessions.find(item => item.status === 'closed') || null;
         const selected = active || latestClosed;
         trackerBankSelectedSessionId = selected?._id || null;
-        trackerBankEntries = selected && String(data.selected_session_id || '') === String(selected._id)
+        if (String(trackerBankEntriesSessionId || '') !== String(selected?._id || '')) trackerBankEntries = [];
+        let incomingEntries = selected && String(data.selected_session_id || '') === String(selected._id)
             ? (Array.isArray(data.entries) ? data.entries : [])
             : [];
         if (selected && String(data.selected_session_id || '') !== String(selected._id)) {
@@ -536,9 +575,13 @@ async function loadTrackerBankSessions() {
             const selectedResponse = await fetch(selectedUrl, { cache: 'no-store' });
             const selectedData = await selectedResponse.json().catch(() => ({}));
             if (selectedResponse.ok && selectedData.storage === 'mongodb') {
-                trackerBankEntries = Array.isArray(selectedData.entries) ? selectedData.entries : [];
+                incomingEntries = Array.isArray(selectedData.entries) ? selectedData.entries : [];
             }
         }
+        trackerBankEntries = selected
+            ? trackerBankMergeEntries(trackerBankEntries, incomingEntries)
+            : [];
+        trackerBankEntriesSessionId = selected?._id || null;
         trackerBankSetMessage(active
             ? 'Sesión activa. Las tiradas Live se guardan en MongoDB.'
             : selected
@@ -547,10 +590,6 @@ async function loadTrackerBankSessions() {
         renderTrackerBankroll();
         if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
     } catch (error) {
-        trackerBankSessions = [];
-        trackerBankEntries = [];
-        trackerBankSelectedSessionId = null;
-        renderTrackerBankroll();
         trackerBankSetMessage(`MongoDB Atlas no conectado: ${error.message}. Reconéctalo para usar la banca.`);
     } finally {
         trackerBankLoading = false;
@@ -574,8 +613,10 @@ function renderTrackerBankroll() {
     const stake = trackerBankStake(chip, round);
     const cycle = active ? Number(session.cycle_wagered || 0) : 0;
     const roundTotal = Number((cycle + stake).toFixed(2));
+    const grossReturn = Number((stake * 4).toFixed(2));
     const possibleProfit = Number((stake * 4 - cycle - stake).toFixed(2));
     const pred = trackerBankPredictionNumbers();
+    const predictionSource = trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) ? 'IA' : 'Tracker';
     const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     set('tracker-bank-capital-value', session ? trackerBankMoney(capital) : '--');
     set('tracker-bank-balance', session ? trackerBankMoney(balance) : '--');
@@ -586,8 +627,9 @@ function renderTrackerBankroll() {
     set('tracker-bank-round', active ? String(round) : '--');
     set('tracker-bank-stake', active ? trackerBankMoney(stake) : '--');
     set('tracker-bank-cycle', active ? trackerBankMoney(roundTotal) : '--');
+    set('tracker-bank-gross-return', active ? trackerBankMoney(grossReturn) : '--');
     set('tracker-bank-win-profit', active ? trackerBankMoney(possibleProfit) : '--');
-    set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? pred.join(', ') : active ? 'Esperando señal Live' : '--');
+    set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? `${predictionSource} · ${pred.join(', ')}` : active ? 'Esperando señal Live' : '--');
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / --');
     set('tracker-bank-started', session ? trackerBankDate(session.starts_at || session.created_at) : '--');
     set('tracker-bank-ended', session?.closed_at ? trackerBankDate(session.closed_at) : session ? (session.status === 'draft' ? 'Sin iniciar' : 'En curso') : '--');
@@ -604,9 +646,9 @@ function renderTrackerBankroll() {
         const center = trackerBankPredictionCenter();
         const hasCenter = center !== null && Number.isInteger(Number(center));
         inline.textContent = active && trackerSource === 'live' && hasCenter
-            ? `${Number(center)} N4 · ${trackerBankMoney(roundTotal)}`
+            ? `${Number(center)} N4 · ${trackerBankMoney(stake)}`
             : '';
-        inline.title = active ? 'Exposición acumulada si juegas la próxima ronda; se reinicia al acertar.' : '';
+        inline.title = active ? `Apuesta de la ronda ${round}, no el acumulado del ciclo.` : '';
     }
     const ledger = document.getElementById('tracker-bank-ledger');
     if (ledger) ledger.innerHTML = trackerBankEntries.length
@@ -708,9 +750,12 @@ function flushTrackerBankQueue() {
                 continue;
             }
             trackerBankPending.shift();
-            trackerBankSessions = trackerBankSessions.map(item => String(item._id) === String(data.session._id) ? data.session : item);
-            if (!trackerBankSessions.some(item => String(item._id) === String(data.session._id))) trackerBankSessions.unshift(data.session);
-            if (!data.duplicate) trackerBankEntries.push(data.entry);
+            trackerBankSessions = trackerBankMergeSessions(trackerBankSessions, [data.session]);
+            if (String(trackerBankEntriesSessionId || '') !== String(data.session._id)) {
+                trackerBankEntries = [];
+                trackerBankEntriesSessionId = data.session._id;
+            }
+            if (!data.duplicate) trackerBankEntries = trackerBankMergeEntries(trackerBankEntries, [data.entry]);
             trackerBankSelectedSessionId = data.session._id;
             renderTrackerBankroll();
             trackerBankSetMessage(data.entry.won

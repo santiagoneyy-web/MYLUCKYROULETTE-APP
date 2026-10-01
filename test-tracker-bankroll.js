@@ -34,6 +34,33 @@ for (let round = 1; round <= 2; round++) {
 }
 assert.equal(Number((cycleSpend + getStake(0.4, 3)).toFixed(2)), 14.4);
 
+let threeMisses = { initial_capital: 200, balance: 200, chip_value: 0.5, current_round: 1, cycle_wagered: 0, losses: 0 };
+let threeMissesTotal = 0;
+for (let spin = 0; spin < 3; spin++) {
+    const settled = calculateSettlement(threeMisses, 0, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    threeMissesTotal = Number((threeMissesTotal + settled.stake).toFixed(2));
+    threeMisses = {
+        ...threeMisses,
+        balance: settled.balanceAfter,
+        current_round: settled.nextRound,
+        cycle_wagered: settled.nextCycleWagered,
+        total_spins: spin + 1,
+        total_wagered: threeMissesTotal,
+        losses: threeMisses.losses + (settled.won ? 0 : 1)
+    };
+}
+const nextStake = getStake(threeMisses.chip_value, threeMisses.current_round);
+assert.equal(threeMisses.current_round, 4);
+assert.equal(threeMisses.total_spins, 3);
+assert.equal(threeMisses.losses, 3);
+assert.equal(threeMisses.cycle_wagered, 18);
+assert.equal(threeMisses.total_wagered, 18);
+assert.equal(threeMisses.balance, 182);
+assert.equal(nextStake, 9);
+assert.equal(Number((threeMisses.cycle_wagered + nextStake).toFixed(2)), 27);
+assert.equal(nextStake * 4, 36);
+assert.equal(Number((nextStake * 4 - threeMisses.cycle_wagered - nextStake).toFixed(2)), 9);
+
 const base = { initial_capital: 100, balance: 100, chip_value: 0.5, current_round: 1, cycle_wagered: 0 };
 const miss = calculateSettlement(base, 0, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 assert.equal(miss.won, false);
