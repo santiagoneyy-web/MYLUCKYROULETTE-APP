@@ -548,6 +548,23 @@ function trackerBankPredictionCenter() {
     return trackerSystemPredictionCenter();
 }
 
+function trackerPredictionMetricCandidates(mode = trackerConfig.prediction) {
+    const signal = trackerLastSignal;
+    if (!signal) return [];
+    const n9 = [
+        { label: 'CW_N9', number: Number(signal.targetCW), family: 'n9' },
+        { label: 'CCW_N9', number: Number(signal.targetCCW), family: 'n9' }
+    ];
+    const n4 = [
+        { label: 'CW_N4S', number: Number(signal.targetUnderCW), family: 'n4' },
+        { label: 'CW_N4B', number: Number(signal.targetOverCW), family: 'n4' },
+        { label: 'CCW_N4S', number: Number(signal.targetOverCCW), family: 'n4' },
+        { label: 'CCW_N4B', number: Number(signal.targetUnderCCW), family: 'n4' }
+    ];
+    const selected = mode === 'n9' ? n9 : n4;
+    return selected.filter(metric => Number.isInteger(metric.number) && metric.number >= 0 && metric.number <= 36);
+}
+
 function trackerSystemPredictionCenter() {
     const direction = trackerLastSignal?.mainDir ||
         (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
@@ -1657,7 +1674,8 @@ function renderTracker() {
     const predEl = document.getElementById('tracker-prediction');
     const center = trackerBankPredictionCenter();
     if (predEl) {
-        if (center !== null) predEl.innerText = `${trackerPredictionSource === 'ai' ? 'IA' : 'SISTEMA'} · N4: ${center}`;
+        const metricLabel = trackerPredictionSource === 'ai' && trackerConfig.prediction === 'n9' ? 'N9' : 'N4';
+        if (center !== null) predEl.innerText = `${trackerPredictionSource === 'ai' ? 'IA' : 'SISTEMA'} · ${metricLabel}: ${center}`;
         else predEl.innerText = trackerBankActiveSession() && trackerHistory.length >= 3 && trackerPredictionSource === 'ai' ? 'ANALIZANDO IA ?' : '--';
     }
     document.getElementById('tracker-source-system')?.classList.toggle('active', trackerPredictionSource === 'system');
@@ -2377,6 +2395,9 @@ function checkTripleConsistency(dir, zone, level) {
 }
 
 function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
+    const aiPrediction = (trackerPredictionSource === 'ai' || forceAiPrediction) && !userMessage;
+    const outputMetricLabel = trackerConfig.prediction === 'n9' ? 'N9' : 'N4';
+    const allowedMetrics = aiPrediction ? trackerPredictionMetricCandidates(trackerConfig.prediction) : [];
     // Pattern-focused data block
     const lines = [
         `DATOS:`,
@@ -2466,6 +2487,9 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
             'Definiciones: salto positivo = derecha y negativo = izquierda según el orden de la ruleta europea; BIG = salto absoluto de 10 o más, SMALL = menor que 10.'
         ].join('\n');
     }
+    if (aiPrediction) {
+        dataBlock += `\nFILTRO ACTIVO ${outputMetricLabel}: elige únicamente una de estas métricas exactas: ${allowedMetrics.map(metric => `${metric.label}=${metric.number}`).join(' | ') || 'ninguna disponible'}. No uses valores de la otra familia ni inventes centros.`;
+    }
 
     const systemPrompt = `Sos experta en sistemas cilindricos rotacionales. Analiza con criterio propio y proyecta. No solo mires la dominancia: analiza DIRECCION y ZONA como dos sistemas separados que pueden estar en distintos regimenes. Habla SOLO de direccion (derecha/izquierda) y zona (BIG/SMALL). No uses la palabra "sector".
 
@@ -2532,12 +2556,11 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
-    const aiPrediction = (trackerPredictionSource === 'ai' || forceAiPrediction) && !userMessage;
     const finalSystemPrompt = aiPrediction
-        ? 'Metodología N4: analiza la serie cronológica de saltos firmados y compárala en las ventanas de 20, 50, 100 y hasta 400 giros. Da mayor atención al comportamiento reciente, pero contrástalo con las ventanas mayores; observa continuidad, alternancia y cambios de magnitud sin asumir que un patrón garantiza el siguiente resultado. Usa los números y estadísticas como evidencia, no como candidatos ni predicciones del sistema. Elige por criterio propio un centro de 0 a 36. Devuelve únicamente N4: seguido de un número real entre 0 y 36. Sin explicación ni texto adicional.'
+        ? `Metodología ${outputMetricLabel}: analiza la serie y compara ventanas recientes con las amplias. Usa los datos como evidencia, pero elige exclusivamente una de las métricas ${outputMetricLabel} enumeradas en el mensaje del usuario. No selecciones métricas de la otra familia ni inventes un centro. Devuelve únicamente ${outputMetricLabel}: seguido del número exacto de la métrica elegida. Sin explicación ni texto adicional.`
         : systemPrompt;
     const predictionRequest = aiPrediction
-        ? 'Analiza solo estos datos y devuelve únicamente N4: seguido del número real que elegiste (0 a 36). No escribas un marcador como NN.'
+        ? `Analiza solo estos datos y devuelve únicamente ${outputMetricLabel}: seguido del número exacto de una métrica ${outputMetricLabel} permitida. No escribas un marcador como NN.`
         : 'Proyecta UN target específico con su número. Justifica en una oración.';
     if (userMessage) {
         return {
@@ -2642,15 +2665,17 @@ async function callTrackerAI(promptObj, isAuto) {
 function syncPredictionFromAI(responseText, backgroundPrediction = false) {
     const predEl = document.getElementById('tracker-prediction');
     if (!predEl || (trackerPredictionSource !== 'ai' && !backgroundPrediction)) return;
-    const match = String(responseText || '').match(/\bN4\s*:\s*(3[0-6]|[0-2]?\d)\b/i);
-    const center = match ? Number(match[1]) : null;
-    trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 ? center : null;
+    const expectedLabel = trackerConfig.prediction === 'n9' ? 'N9' : 'N4';
+    const match = String(responseText || '').match(/\bN([49])\s*:\s*(3[0-6]|[0-2]?\d)\b/i);
+    const center = match && `N${match[1]}`.toUpperCase() === expectedLabel ? Number(match[2]) : null;
+    const allowedCenters = trackerPredictionMetricCandidates(trackerConfig.prediction).map(metric => metric.number);
+    trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 && allowedCenters.includes(center) ? center : null;
     trackerAiPredictionHistoryLength = trackerAiN4Center === null ? -1 : trackerHistory.length;
     if (trackerPredictionSource === 'ai') {
-        predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · N4: ${trackerAiN4Center}`;
-        trackerAiDisplayStatus = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · N4: ${trackerAiN4Center}`;
+        predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${expectedLabel}: ${trackerAiN4Center}`;
+        trackerAiDisplayStatus = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${expectedLabel}: ${trackerAiN4Center}`;
     }
-    if (trackerAiN4Center === null) console.warn('[Tracker AI] Response did not contain a valid N4 center.');
+    if (trackerAiN4Center === null) console.warn(`[Tracker AI] Response did not match an allowed ${expectedLabel} metric.`, responseText);
     renderTrackerBankroll();
 }
 

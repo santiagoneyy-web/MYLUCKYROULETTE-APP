@@ -1277,9 +1277,7 @@ function normalizeAutoAiResponse(parsed, context, fallback) {
     const big = context.routes.big || {};
     const isRouletteNumber = (v) => String(v).match(/^\d+$/) && parseInt(v) >= 0 && parseInt(v) <= 36;
     const allowedN9 = [
-        String(cw.n9), String(ccw.n9),
-        String(cw.n4Small), String(cw.n4Big),
-        String(ccw.n4Small), String(ccw.n4Big)
+        String(cw.n9), String(ccw.n9)
     ].filter(v => v && v !== 'undefined' && v !== 'null');
     const allowedN4 = [
         String(cw.n4Small), String(cw.n4Big),
