@@ -1847,16 +1847,45 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     const rawContext = req.body.context_snapshot && typeof req.body.context_snapshot === 'object' ? req.body.context_snapshot : {};
     const systemCenter = rawContext.system_center == null ? null : Number(rawContext.system_center);
     const aiCenter = rawContext.ai_center == null ? null : Number(rawContext.ai_center);
+    const validSystemCenter = Number.isInteger(systemCenter) && systemCenter >= 0 && systemCenter <= 36 ? systemCenter : null;
+    const validAiCenter = Number.isInteger(aiCenter) && aiCenter >= 0 && aiCenter <= 36 ? aiCenter : null;
+    const systemWon = validSystemCenter !== null ? wheelNeighbors(validSystemCenter, 4).includes(number) : null;
+    const aiWon = validAiCenter !== null ? wheelNeighbors(validAiCenter, 4).includes(number) : null;
+    const rawSystemReasoning = rawContext.system_reasoning && typeof rawContext.system_reasoning === 'object'
+        ? rawContext.system_reasoning : {};
+    const safeNumber = value => value == null || value === '' ? null : Number.isFinite(Number(value)) ? Number(value) : null;
+    const systemReasoning = validSystemCenter === null ? null : {
+        signal: String(rawSystemReasoning.signal || '').slice(0, 80),
+        rule: String(rawSystemReasoning.rule || '').slice(0, 80),
+        direction: ['CW', 'CCW'].includes(rawSystemReasoning.direction) ? rawSystemReasoning.direction : '',
+        selected_target: validSystemCenter,
+        target_cw: Number.isInteger(Number(rawSystemReasoning.target_cw)) ? Number(rawSystemReasoning.target_cw) : null,
+        target_ccw: Number.isInteger(Number(rawSystemReasoning.target_ccw)) ? Number(rawSystemReasoning.target_ccw) : null,
+        confidence_cw: safeNumber(rawSystemReasoning.confidence_cw),
+        confidence_ccw: safeNumber(rawSystemReasoning.confidence_ccw),
+        consensus_confidence: safeNumber(rawSystemReasoning.consensus_confidence),
+        direction_state: String(rawSystemReasoning.direction_state || '').slice(0, 80),
+        average_travel: safeNumber(rawSystemReasoning.average_travel),
+        standard_deviation: safeNumber(rawSystemReasoning.standard_deviation),
+        last_numbers: Array.isArray(rawSystemReasoning.last_numbers)
+            ? rawSystemReasoning.last_numbers.slice(-21).map(Number).filter(value => Number.isInteger(value) && value >= 0 && value <= 36)
+            : [],
+        last_signed_distances: Array.isArray(rawSystemReasoning.last_signed_distances)
+            ? rawSystemReasoning.last_signed_distances.slice(-20).map(Number).filter(Number.isFinite)
+            : []
+    };
     const contextSnapshot = {
         history: Array.isArray(rawContext.history)
             ? rawContext.history.slice(-80).map(Number).filter(value => Number.isInteger(value) && value >= 0 && value <= 36)
             : [],
         prediction_source: rawContext.prediction_source === 'ai' ? 'ai' : 'system',
-        system_center: Number.isInteger(systemCenter) && systemCenter >= 0 && systemCenter <= 36 ? systemCenter : null,
-        ai_center: Number.isInteger(aiCenter) && aiCenter >= 0 && aiCenter <= 36 ? aiCenter : null,
-        ai_won: Number.isInteger(aiCenter) && aiCenter >= 0 && aiCenter <= 36
-            ? wheelNeighbors(aiCenter, 4).includes(number)
-            : null
+        system_center: validSystemCenter,
+        system_reasoning: systemReasoning,
+        system_won: systemWon,
+        system_reward: systemWon === null ? null : systemWon ? 1 : -1,
+        ai_center: validAiCenter,
+        ai_won: aiWon,
+        ai_reward: aiWon === null ? null : aiWon ? 1 : -1
     };
     const predictionNumbers = Number.isInteger(predictionCenter) && predictionCenter >= 0 && predictionCenter <= 36
         ? wheelNeighbors(predictionCenter, 4)
@@ -2210,8 +2239,52 @@ app.post('/api/ai/tracker', async (req, res) => {
                     return `centro IA ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto' : 'fallo'}${history ? ` (previos ${history})` : ''}`;
                 });
                 const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Son datos de referencia; decide libremente según el análisis actual.`;
+                const systemEntries = await TrackerBankrollEntry.find({
+                    table_id: Number(tableId),
+                    'context_snapshot.system_center': { $gte: 0, $lte: 36 }
+                }).sort({ created_at: -1 }).limit(120)
+                    .select('number context_snapshot.system_center context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.history round created_at')
+                    .lean().exec();
+                const systemBackfills = [];
+                systemEntries.forEach(entry => {
+                    if (typeof entry.context_snapshot?.system_won === 'boolean') return;
+                    const auditedHit = wheelNeighbors(Number(entry.context_snapshot.system_center), 4).includes(Number(entry.number));
+                    entry.context_snapshot.system_won = auditedHit;
+                    entry.context_snapshot.system_reward = auditedHit ? 1 : -1;
+                    systemBackfills.push({
+                        updateOne: {
+                            filter: { _id: entry._id },
+                            update: { $set: {
+                                'context_snapshot.system_won': auditedHit,
+                                'context_snapshot.system_reward': auditedHit ? 1 : -1
+                            } }
+                        }
+                    });
+                });
+                if (systemBackfills.length) {
+                    try {
+                        await TrackerBankrollEntry.bulkWrite(systemBackfills, { ordered: false });
+                        console.log('[Tracker AI] Backfilled system audit outcomes:', systemBackfills.length);
+                    } catch (backfillError) {
+                        console.warn('[Tracker AI] Could not persist legacy system audit backfill:', backfillError.message);
+                    }
+                }
+                const systemWins = systemEntries.filter(entry => entry.context_snapshot?.system_won === true).length;
+                const systemLosses = systemEntries.filter(entry => entry.context_snapshot?.system_won === false).length;
+                const systemReward = systemEntries.reduce((sum, entry) => sum + Number(entry.context_snapshot?.system_reward || 0), 0);
+                const systemSamples = systemEntries.slice(0, 8).reverse().map(entry => {
+                    const reasoning = entry.context_snapshot?.system_reasoning || {};
+                    const history = Array.isArray(entry.context_snapshot?.history)
+                        ? entry.context_snapshot.history.slice(-8).join(',') : '';
+                    const direction = reasoning.direction || '?';
+                    const confidence = Number.isFinite(Number(reasoning.consensus_confidence))
+                        ? ` conf ${Math.round(Number(reasoning.consensus_confidence))}%` : '';
+                    const state = reasoning.direction_state ? ` estado ${reasoning.direction_state}` : '';
+                    return `centro sistema ${entry.context_snapshot.system_center}: ${entry.context_snapshot.system_won ? 'acierto (+1)' : 'fallo (-1)'}, ${direction}${confidence}${state}${history ? ` (previos ${history})` : ''}`;
+                });
+                const systemFeedback = `AUDITORÍA Y RECOMPENSA DEL SISTEMA: ${systemEntries.length} señales evaluadas (${systemWins} aciertos, ${systemLosses} fallos; recompensa acumulada ${systemReward >= 0 ? '+' : ''}${systemReward}, +1 acierto/-1 fallo). ${systemSamples.length ? `Muestras recientes con dirección, confianza y contexto: ${systemSamples.join(' | ')}.` : 'Aún no hay auditorías guardadas.'} Úsalo como evidencia secundaria para calibrar tu análisis; no copies automáticamente la señal del sistema ni trates la muestra como garantía.`;
                 const lastMessage = requestMessages[requestMessages.length - 1];
-                if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}`;
+                if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}\n\n${systemFeedback}`;
             } catch (learningError) {
                 console.warn('[Tracker AI] No se pudo cargar aprendizaje de banca:', learningError.message);
             }

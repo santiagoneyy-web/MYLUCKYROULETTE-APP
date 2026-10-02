@@ -555,6 +555,32 @@ function trackerSystemPredictionCenter() {
     return Number.isInteger(center) && center >= 0 && center <= 36 ? center : null;
 }
 
+function trackerSystemReasoningSnapshot() {
+    if (!trackerLastSignal) return null;
+    const direction = trackerLastSignal.mainDir ||
+        (trackerLastSignal.confidenceCW >= trackerLastSignal.confidenceCCW ? 'CW' : 'CCW');
+    const center = trackerSystemPredictionCenter();
+    const recentHistory = trackerHistory.slice(-21);
+    const recentDistances = [];
+    for (let i = 1; i < recentHistory.length; i++) recentDistances.push(calcDist(recentHistory[i - 1], recentHistory[i]));
+    return {
+        signal: String(trackerLastSignal.name || 'System'),
+        rule: String(trackerLastSignal.rule || 'N9'),
+        direction,
+        selected_target: center,
+        target_cw: Number(trackerLastSignal.targetCW),
+        target_ccw: Number(trackerLastSignal.targetCCW),
+        confidence_cw: Number(trackerLastSignal.confidenceCW),
+        confidence_ccw: Number(trackerLastSignal.confidenceCCW),
+        consensus_confidence: Number(trackerLastSignal.confidence),
+        direction_state: String(trackerLastSignal.directionState || ''),
+        average_travel: Number(trackerLastSignal.avgTravel),
+        standard_deviation: Number(trackerLastSignal.stdDev),
+        last_numbers: recentHistory,
+        last_signed_distances: recentDistances
+    };
+}
+
 function trackerBankSetMessage(message) {
     const element = document.getElementById('tracker-bank-message');
     if (element) element.textContent = message || '';
@@ -894,6 +920,7 @@ async function syncTrackerFromLive() {
                             history: trackerHistory.slice(-80),
                             prediction_source: trackerPredictionSource,
                             system_center: trackerSystemPredictionCenter(),
+                            system_reasoning: trackerSystemReasoningSnapshot(),
                             ai_center: trackerAiN4Center
                         }
                     });
@@ -1228,6 +1255,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
                 history: trackerHistory.slice(-80),
                 prediction_source: trackerPredictionSource,
                 system_center: trackerSystemPredictionCenter(),
+                system_reasoning: trackerSystemReasoningSnapshot(),
                 ai_center: trackerAiN4Center
             }
         });
