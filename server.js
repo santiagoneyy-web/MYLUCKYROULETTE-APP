@@ -1962,10 +1962,15 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
 // Tracker AI endpoint — OpenRouter
 app.post('/api/ai/tracker', async (req, res) => {
     const requestStartedAt = Date.now();
-    const { provider, model, apiKey, system, messages, purpose, tableId } = req.body;
+    const { provider, model, apiKey, system, messages, purpose, tableId, prediction_context: predictionContext } = req.body;
     let requestTimeout = null;
     let requestTimedOut = false;
-    console.log('[Tracker AI] Request:', { provider, model, hasKey: !!apiKey, msgCount: messages?.length });
+    console.log('[Tracker AI] Request:', {
+        provider, model, hasKey: !!apiKey, msgCount: messages?.length,
+        revision: predictionContext?.revision,
+        historyLength: predictionContext?.history_length,
+        latestSpin: predictionContext?.latest_spin
+    });
     if (!db.getUseMongo()) {
         return res.status(503).json({ success: false, error: 'MongoDB Atlas no está conectado. La IA del Tracker permanece pausada.' });
     }
@@ -2052,7 +2057,11 @@ app.post('/api/ai/tracker', async (req, res) => {
                 : `El modelo no generó texto (finish_reason: ${finishReason}). Prueba de nuevo o selecciona otro modelo.`;
             throw new Error(detail);
         }
-        console.log('[Tracker AI] OpenRouter success:', orModel, 'response length:', responseText.length, 'duration_ms:', Date.now() - requestStartedAt);
+        const predictedCenter = responseText.match(/\bN4\s*:\s*(3[0-6]|[0-2]?\d)\b/i)?.[1] || 'invalid';
+        console.log('[Tracker AI] OpenRouter success:', orModel, 'N4:', predictedCenter,
+            'historyLength:', predictionContext?.history_length,
+            'latestSpin:', predictionContext?.latest_spin,
+            'response length:', responseText.length, 'duration_ms:', Date.now() - requestStartedAt);
         res.json({ success: true, response: responseText });
     } catch (err) {
         clearTimeout(requestTimeout);

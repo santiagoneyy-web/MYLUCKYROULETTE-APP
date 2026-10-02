@@ -38,6 +38,7 @@ let trackerLiveIdsTableId = null;
 let trackerHistory = trackerManualHistory;
 let trackerLastSignal = null;
 let trackerAiN4Center = null;
+let trackerAiPredictionHistoryLength = -1;
 let trackerPredictionSource = 'ai';
 let trackerPredictorOffset = 0;
 let trackerCurrentAvgCW = 9;
@@ -541,7 +542,8 @@ function trackerBankPredictionNumbers() {
 function trackerBankPredictionCenter() {
     if (!trackerBankActiveSession()) return null;
     if (trackerPredictionSource === 'ai') {
-        return trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) ? trackerAiN4Center : null;
+        return trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) &&
+            trackerAiPredictionHistoryLength === trackerHistory.length ? trackerAiN4Center : null;
     }
     return trackerSystemPredictionCenter();
 }
@@ -720,6 +722,7 @@ async function startTrackerBankSession() {
         trackerBankSelectedSessionId = session._id;
         await loadTrackerBankSessions();
         trackerAiN4Center = null;
+        trackerAiPredictionHistoryLength = -1;
         trackerAiDisplayStatus = 'ANALIZANDO IA ?';
         document.getElementById('tracker-chat-messages')?.replaceChildren();
         const aiStatus = document.getElementById('tracker-ai-status');
@@ -896,6 +899,7 @@ async function syncTrackerFromLive() {
                     });
                 }
                 trackerAiN4Center = null;
+                trackerAiPredictionHistoryLength = -1;
                 trackerAiDisplayStatus = 'ANALIZANDO IA ?';
                 trackerLiveEventRevision++;
             }
@@ -1019,6 +1023,7 @@ function setTrackerSource(source) {
     trackerHistory = source === 'live' ? trackerLiveHistory : trackerManualHistory;
     trackerLastSignal = null;
     trackerAiN4Center = null;
+    trackerAiPredictionHistoryLength = -1;
     trackerTriggerCounter = 0;
     trackerLastDominantDir = null;
     trackerLastDominantZone = null;
@@ -1220,6 +1225,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
     }
     if (!batch && (source === 'live' || trackerPredictionSource === 'ai')) {
         trackerAiN4Center = null;
+        trackerAiPredictionHistoryLength = -1;
         if (trackerBankActiveSession()) trackerAiDisplayStatus = 'ANALIZANDO IA ?';
     }
     if (source === 'live' && !batch) trackerLiveEventRevision++;
@@ -1319,6 +1325,11 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
             apiKey: trackerConfig.apiKey,
             purpose: aiPrediction ? 'prediction' : 'chat',
             tableId: trackerBankTableId(),
+            prediction_context: aiPrediction ? {
+                revision: requestRevision,
+                history_length: trackerHistory.length,
+                latest_spin: trackerHistory[trackerHistory.length - 1]
+            } : undefined,
             spinHistory: aiPrediction ? trackerHistory.slice(-80) : undefined,
             messages: aiPrediction
                 ? promptObj.messages
@@ -1476,6 +1487,7 @@ function setTrackerPredictionSource(source) {
     trackerPredictionSource = source;
     trackerConfig.predictionSource = source;
     trackerAiN4Center = null;
+    trackerAiPredictionHistoryLength = -1;
     trackerAiDisplayStatus = 'ANALIZANDO IA ?';
     if (trackerAiRetryTimer) clearTimeout(trackerAiRetryTimer);
     trackerAiRetryTimer = null;
@@ -2595,6 +2607,7 @@ function syncPredictionFromAI(responseText, backgroundPrediction = false) {
     const match = String(responseText || '').match(/\bN4\s*:\s*(3[0-6]|[0-2]?\d)\b/i);
     const center = match ? Number(match[1]) : null;
     trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 ? center : null;
+    trackerAiPredictionHistoryLength = trackerAiN4Center === null ? -1 : trackerHistory.length;
     if (trackerPredictionSource === 'ai') {
         predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · N4: ${trackerAiN4Center}`;
         trackerAiDisplayStatus = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · N4: ${trackerAiN4Center}`;
