@@ -647,7 +647,7 @@ function renderTrackerBankroll() {
         const hasCenter = center !== null && Number.isInteger(Number(center));
         inline.textContent = active && trackerSource === 'live' && hasCenter
             ? trackerBankMoney(stake)
-            : active && trackerSource === 'live' ? 'ANALIZANDO...' : '';
+            : '';
         inline.title = active ? `Apuesta de la ronda ${round}, no el acumulado del ciclo.` : '';
     }
     const ledger = document.getElementById('tracker-bank-ledger');
@@ -1157,7 +1157,9 @@ let trackerAutoAnalysisTimer = null;
 function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = null) {
     if (source !== trackerSource || !Number.isInteger(n) || n < 0 || n > 36) return;
     if (source === 'live' && Number.isInteger(Number(spinId)) && Number(spinId) > 0) {
-        trackerLiveSpinIds.add(Number(spinId));
+        const normalizedSpinId = Number(spinId);
+        if (trackerLiveSpinIds.has(normalizedSpinId)) return;
+        trackerLiveSpinIds.add(normalizedSpinId);
         trackerLiveIdsTableId = String(trackerBankTableId());
     }
     if (source === 'manual' && !trackerMemoryAvailable) {
@@ -1232,9 +1234,11 @@ async function callTrackerAISilent(promptObj) {
     const requestContext = buildTrackerAIContext();
     const aiOnlyBankroll = requestSource === 'live' && Boolean(trackerBankActiveSession());
     try {
-        const memoryContext = requestMemory.summary
-            ? `CONTEXTO HISTÓRICO DE MONGODB (referencia secundaria; prioriza los datos actuales):\n${requestMemory.summary}\nNúmeros recientes guardados: ${(requestMemory.context?.recentNumbers || []).join(', ')}. Total guardado: ${requestMemory.context?.totalSpins || 0}.`
-            : '';
+        const memoryContext = aiOnlyBankroll && requestMemory.context
+            ? `Referencia MongoDB: últimos números guardados ${(requestMemory.context.recentNumbers || []).slice(-12).join(', ')}; total ${requestMemory.context.totalSpins || 0}.`
+            : requestMemory.summary
+                ? `CONTEXTO HISTÓRICO DE MONGODB (referencia secundaria; prioriza los datos actuales):\n${requestMemory.summary}\nNúmeros recientes guardados: ${(requestMemory.context?.recentNumbers || []).join(', ')}. Total guardado: ${requestMemory.context?.totalSpins || 0}.`
+                : '';
         const payload = {
             provider: trackerConfig.provider,
             model: trackerConfig.model,
@@ -2268,7 +2272,15 @@ function buildTrackerPrompt(ctx, userMessage) {
     if (ctx.sig) {
         lines.push(`Media salto: ${ctx.sig.avgTravel} | Desviacion: ${ctx.sig.stdDev}`);
     }
-    const dataBlock = lines.join('\n');
+    const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
+    const dataBlock = aiOnlyBankroll
+        ? [
+            `Live reciente (${ctx.totalSpins} tiradas): ${ctx.spins.slice(-20).join(', ')}`,
+            `Saltos recientes: ${ctx.travels.slice(-15).map(t => (t > 0 ? '+' : '') + t).join(', ')}`,
+            `Dirección derecha: ${ctx.stats.cw}% / izquierda: ${100 - ctx.stats.cw}%`,
+            `Dominancia dirección: ${ctx.stats.domDir}% / zona: ${ctx.stats.domZone}%`
+        ].join('\n')
+        : lines.join('\n');
 
     const systemPrompt = `Sos experta en sistemas cilindricos rotacionales. Analiza con criterio propio y proyecta. No solo mires la dominancia: analiza DIRECCION y ZONA como dos sistemas separados que pueden estar en distintos regimenes. Habla SOLO de direccion (derecha/izquierda) y zona (BIG/SMALL). No uses la palabra "sector".
 
@@ -2335,7 +2347,6 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
-    const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
     const finalSystemPrompt = aiOnlyBankroll
         ? 'Analiza internamente los números Live y sus saltos para elegir una predicción propia. No uses predicciones heurísticas, targets ni candidatos generados por el sistema. Devuelve únicamente una línea con este formato exacto: N4: NN, donde NN es un entero de 0 a 36. No incluyas explicación, etiquetas adicionales ni bloques de texto.'
         : systemPrompt;

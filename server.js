@@ -1946,6 +1946,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
 
 // Tracker AI endpoint — OpenRouter
 app.post('/api/ai/tracker', async (req, res) => {
+    const requestStartedAt = Date.now();
     const { provider, model, apiKey, system, messages } = req.body;
     console.log('[Tracker AI] Request:', { provider, model, hasKey: !!apiKey, msgCount: messages?.length });
     if (!db.getUseMongo()) {
@@ -2004,10 +2005,10 @@ app.post('/api/ai/tracker', async (req, res) => {
                 : `El modelo no generó texto (finish_reason: ${finishReason}). Prueba de nuevo o selecciona otro modelo.`;
             throw new Error(detail);
         }
-        console.log('[Tracker AI] OpenRouter success:', orModel, 'response length:', responseText.length);
+        console.log('[Tracker AI] OpenRouter success:', orModel, 'response length:', responseText.length, 'duration_ms:', Date.now() - requestStartedAt);
         res.json({ success: true, response: responseText });
     } catch (err) {
-        console.error('[Tracker AI] ERROR:', err.message);
+        console.error('[Tracker AI] ERROR:', err.message, 'duration_ms:', Date.now() - requestStartedAt);
         res.json({ success: false, error: err.message, provider: provider || 'openrouter' });
     }
 });
