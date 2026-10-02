@@ -51,7 +51,7 @@ let trackerSource = 'manual'; // 'manual' | 'live'
 // â”€â”€ Tracker Config IA â”€â”€
 let trackerConfig = {
     provider: 'openrouter',
-    model: 'openai/gpt-oss-120b',
+    model: 'openai/gpt-oss-20b',
     apiKey: '',
     prediction: 'both', // 'n9' | 'n4' | 'both'
     predictionSource: 'ai', // 'system' | 'ai'
@@ -1078,6 +1078,7 @@ function onTrackerProviderChange() {
     if (modelSelect) {
         const optionsByProvider = {
             openrouter: [
+                ['openai/gpt-oss-20b', 'GPT OSS 20B · rápido'],
                 ['openai/gpt-oss-120b', 'GPT OSS 120B'],
                 ['openai/gpt-5.5', 'GPT 5.5']
             ]
@@ -1106,7 +1107,7 @@ const DEPRECATED_GROQ_MODELS = {
 };
 
 function migrateGroqModel(model) {
-    if (!model) return 'openai/gpt-oss-120b';
+    if (!model) return 'openai/gpt-oss-20b';
     return DEPRECATED_GROQ_MODELS[model] || model;
 }
 
@@ -1114,7 +1115,7 @@ function saveTrackerConfig() {
     trackerConfig.provider = document.getElementById('tracker-ai-provider')?.value || 'ollama';
     let model = document.getElementById('tracker-ai-model')?.value || '';
     // Auto-fix model if empty
-    if (!model) model = 'openai/gpt-oss-120b';
+    if (!model) model = 'openai/gpt-oss-20b';
     model = model.trim();
     if (trackerConfig.provider === 'groq') model = migrateGroqModel(model);
     trackerConfig.model = model.trim();
@@ -1151,7 +1152,11 @@ function loadTrackerConfig() {
             trackerConfig = { ...trackerConfig, ...cfg };
             trackerPredictionSource = cfg.predictionSource === 'system' ? 'system' : 'ai';
             // Force model if empty
-            if (!trackerConfig.model) trackerConfig.model = 'openai/gpt-oss-120b';
+            // Migrate the previous default so the Tracker actually starts with
+            // the faster model instead of silently keeping GPT-OSS 120B.
+            if (!trackerConfig.model || trackerConfig.model === 'openai/gpt-oss-120b') {
+                trackerConfig.model = 'openai/gpt-oss-20b';
+            }
             trackerVoiceEnabled = trackerConfig.voice || false;
             if (cfg.source === 'live' || cfg.source === 'manual') {
                 setTrackerSource(cfg.source);
@@ -1297,12 +1302,10 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
     if (trackerPredictionSource !== 'ai' && !backgroundPrediction) return;
     const status = document.getElementById('tracker-ai-status');
     const predEl = document.getElementById('tracker-prediction');
+    // A live bankroll session is already confirmed in MongoDB. Do not block its
+    // prediction while the optional long-term AI memory is still loading.
     if (!trackerMemoryAvailable) {
-        if (status) status.innerText = '';
-        if (trackerPredictionSource === 'ai' && predEl) predEl.innerText = 'ANALIZANDO IA ?';
-        trackerAiDisplayStatus = 'ANALIZANDO IA ?';
-        renderTrackerBankroll();
-        return;
+        console.warn('[Tracker AI] Memory unavailable; requesting prediction without saved memory context.');
     }
     saveTrackerConfig();
     const requestId = ++trackerAiRequestId;

@@ -1979,7 +1979,7 @@ app.post('/api/ai/tracker', async (req, res) => {
         const rawKey = (apiKey || process.env.OPENROUTER_API_KEY || '').trim();
         const key = rawKey.replace(/[^\x00-\x7F]/g, '');
         if (!key) throw new Error('API key de OpenRouter faltante. Pegala en Config IA o configura OPENROUTER_API_KEY.');
-        const orModel = (model || 'openai/gpt-oss-120b').trim();
+        const orModel = (model || 'openai/gpt-oss-20b').trim();
         const requestMessages = Array.isArray(messages) ? messages.map(message => ({ ...message })) : [];
         if (purpose === 'prediction' && requestMessages.length && Number.isInteger(Number(tableId))) {
             try {
