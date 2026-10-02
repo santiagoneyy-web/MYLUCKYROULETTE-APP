@@ -82,6 +82,9 @@ let trackerLiveEventRevision = 0;
 let trackerAiRequestController = null;
 let trackerAiRequestId = 0;
 let trackerAiLastRequestedRevision = -1;
+let trackerAiRetryTimer = null;
+let trackerAiRetryRevision = -1;
+let trackerAiRetryCount = 0;
 let trackerAiDisplayStatus = 'ANALIZANDO...';
 
 // ============================================================
@@ -1199,14 +1202,44 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
     }
 }
 
-async function askTrackerAIForAnalysisSilent() {
+async function askTrackerAIForAnalysisSilent(isRetry = false) {
+    if (isRetry && (trackerSource !== 'live' || !trackerBankActiveSession() || trackerAiRetryRevision !== trackerLiveEventRevision)) return;
     if (trackerSource === 'live') {
-        if (trackerAiLastRequestedRevision === trackerLiveEventRevision) return;
-        trackerAiLastRequestedRevision = trackerLiveEventRevision;
+        if (!isRetry && trackerAiLastRequestedRevision === trackerLiveEventRevision) return;
+        if (!isRetry) {
+            trackerAiLastRequestedRevision = trackerLiveEventRevision;
+            trackerAiRetryRevision = trackerLiveEventRevision;
+            trackerAiRetryCount = 0;
+            if (trackerAiRetryTimer) clearTimeout(trackerAiRetryTimer);
+            trackerAiRetryTimer = null;
+        }
     }
     const ctx = buildTrackerAIContext();
     const prompt = buildTrackerPrompt(ctx, null);
     await callTrackerAISilent(prompt);
+}
+
+function scheduleTrackerAiRetry(revision) {
+    if (trackerSource !== 'live' || !trackerBankActiveSession() || revision !== trackerLiveEventRevision) return;
+    if (trackerAiRetryRevision !== revision) {
+        trackerAiRetryRevision = revision;
+        trackerAiRetryCount = 0;
+    }
+    if (trackerAiRetryCount >= 1) {
+        trackerAiDisplayStatus = 'ERROR IA';
+        const predEl = document.getElementById('tracker-prediction');
+        const status = document.getElementById('tracker-ai-status');
+        if (predEl) predEl.innerText = trackerAiDisplayStatus;
+        if (status) status.innerText = trackerAiDisplayStatus;
+        renderTrackerBankroll();
+        return;
+    }
+    trackerAiRetryCount++;
+    if (trackerAiRetryTimer) clearTimeout(trackerAiRetryTimer);
+    trackerAiRetryTimer = setTimeout(() => {
+        trackerAiRetryTimer = null;
+        askTrackerAIForAnalysisSilent(true);
+    }, 1200);
 }
 
 async function callTrackerAISilent(promptObj) {
@@ -1271,6 +1304,14 @@ async function callTrackerAISilent(promptObj) {
         if (data.success && data.response) {
             if (requestSource === trackerSource && requestRevision === trackerLiveEventRevision) {
                 syncPredictionFromAI(data.response);
+                if (aiOnlyBankroll && trackerAiN4Center === null) {
+                    scheduleTrackerAiRetry(requestRevision);
+                } else if (aiOnlyBankroll) {
+                    trackerAiRetryCount = 0;
+                    trackerAiRetryRevision = requestRevision;
+                    if (trackerAiRetryTimer) clearTimeout(trackerAiRetryTimer);
+                    trackerAiRetryTimer = null;
+                }
             } else if (status) {
                 status.innerText = trackerBankActiveSession() ? 'ANALIZANDO...' : 'Análisis anterior descartado; hay tiradas más recientes.';
                 trackerAiDisplayStatus = 'ANALIZANDO...';
@@ -1280,21 +1321,23 @@ async function callTrackerAISilent(promptObj) {
                 }
             }
             const finalUserMessage = promptObj.memoryText || 'Análisis automático del Tracker.';
-            if (requestSource === 'live') {
+            if (requestSource === 'live' && (!aiOnlyBankroll || trackerAiN4Center !== null)) {
                 await saveTrackerAiMemory(finalUserMessage, data.response, requestSource, requestMemory, requestContext);
             } else if (status) {
-                status.innerText = 'Análisis Manual listo; los datos no se guardaron.';
+                if (!aiOnlyBankroll) status.innerText = 'Análisis Manual listo; los datos no se guardaron.';
             }
         } else {
             console.warn('[Tracker AI Silent] Empty/error response:', data.error || 'empty response');
             trackerAiDisplayStatus = 'ANALIZANDO...';
             if (predEl && trackerBankActiveSession()) predEl.innerText = trackerAiDisplayStatus;
+            scheduleTrackerAiRetry(requestRevision);
         }
     } catch (err) {
         if (requestId !== trackerAiRequestId) return;
         console.error('[Tracker AI Silent] ERROR:', err.name, err.message);
         trackerAiDisplayStatus = 'ANALIZANDO...';
         if (predEl) predEl.innerText = trackerBankActiveSession() ? trackerAiDisplayStatus : '--';
+        scheduleTrackerAiRetry(requestRevision);
     }
     if (requestId === trackerAiRequestId) trackerAiRequestController = null;
     if (status && status.innerText === 'Pensando...') status.innerText = 'Esperando datos...';
