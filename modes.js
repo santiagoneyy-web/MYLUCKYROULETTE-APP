@@ -79,6 +79,7 @@ let trackerLiveSyncInFlight = false;
 let trackerLiveEventRevision = 0;
 let trackerAiRequestController = null;
 let trackerAiRequestId = 0;
+let trackerAiLastRequestedRevision = -1;
 let trackerAiDisplayStatus = 'ANALIZANDO...';
 
 // ============================================================
@@ -643,7 +644,7 @@ function renderTrackerBankroll() {
         const center = trackerBankPredictionCenter();
         const hasCenter = center !== null && Number.isInteger(Number(center));
         inline.textContent = active && trackerSource === 'live' && hasCenter
-            ? `${Number(center)} N4 · ${trackerBankMoney(stake)}`
+            ? trackerBankMoney(stake)
             : active && trackerSource === 'live' ? 'ANALIZANDO...' : '';
         inline.title = active ? `Apuesta de la ronda ${round}, no el acumulado del ciclo.` : '';
     }
@@ -701,6 +702,9 @@ async function startTrackerBankSession() {
         await loadTrackerBankSessions();
         trackerAiN4Center = null;
         trackerAiDisplayStatus = 'ANALIZANDO...';
+        document.getElementById('tracker-chat-messages')?.replaceChildren();
+        const aiStatus = document.getElementById('tracker-ai-status');
+        if (aiStatus) aiStatus.innerText = 'ANALIZANDO...';
         trackerLiveEventRevision++;
         setTrackerPredictionMode('n4');
         trackerAutoBet = true;
@@ -861,7 +865,8 @@ async function loadTrackerAiMemory() {
         const box = document.getElementById('tracker-chat-messages');
         if (box) {
             box.replaceChildren();
-            (trackerSource === 'live' ? trackerAiMemory.messages.slice(-10) : []).forEach(message => {
+            const showHistory = !(trackerSource === 'live' && trackerBankActiveSession());
+            (showHistory ? trackerAiMemory.messages.slice(-10) : []).forEach(message => {
                 const div = document.createElement('div');
                 div.className = 'tracker-msg ' + (message.role === 'user' ? 'user-msg' : 'ai-msg');
                 div.textContent = String(message.content || '');
@@ -871,13 +876,15 @@ async function loadTrackerAiMemory() {
         }
         const status = document.getElementById('tracker-ai-status');
         if (status) {
-            status.innerText = trackerSource === 'manual'
+            status.innerText = trackerBankActiveSession() ? 'ANALIZANDO...' : trackerSource === 'manual'
                 ? 'MongoDB conectado. Manual usa conocimiento Live; no se guarda.'
                 : trackerAiMemory.messages.length
                     ? `Memoria MongoDB restaurada: ${trackerAiMemory.messages.length} mensajes`
                     : 'MongoDB conectado. Memoria IA lista.';
         }
-        if (trackerAutoBet && trackerHistory.length >= 3) askTrackerAIForAnalysisSilent();
+        if (trackerAutoBet && trackerHistory.length >= 3 && (trackerSource !== 'live' || trackerBankActiveSession())) {
+            askTrackerAIForAnalysisSilent();
+        }
     } catch (error) {
         if (loadId === trackerMemoryLoadId) trackerMemoryAvailable = false;
         console.warn('[Tracker] No se pudo cargar la memoria guardada:', error.message);
@@ -922,9 +929,7 @@ async function saveTrackerAiMemory(userText, assistantText, source = trackerSour
         if (result.storage !== 'mongodb') throw new Error('El servidor no confirmó guardado en MongoDB Atlas.');
         if (source === trackerSource) trackerAiMemory = { summary, messages: nextMessages, context: savedContext };
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = trackerBankActiveSession() && trackerAiN4Center !== null
-            ? `N4: ${trackerAiN4Center}`
-            : trackerBankActiveSession() ? 'ANALIZANDO...' : 'Análisis y memoria guardados en MongoDB';
+        if (status) status.innerText = trackerBankActiveSession() ? 'ANALIZANDO...' : 'Análisis y memoria guardados en MongoDB';
     } catch (error) {
         if (source === trackerSource) pauseTrackerForMongo();
         console.error('[Tracker] No se pudo guardar la memoria de IA:', error.message);
@@ -1138,12 +1143,12 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
     if (trackerSource === 'live' && !batch) {
         console.log('[Tracker Live] NÃºmero recibido:', n, '| Total:', trackerHistory.length);
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = 'Dato live recibido: ' + n;
+        if (status) status.innerText = trackerBankActiveSession() ? 'ANALIZANDO...' : 'Dato live recibido: ' + n;
     }
     if (!batch) {
         renderTracker();
         // El análisis automático solo se ejecuta cuando IA AUTO está activado.
-        if (trackerAutoBet && trackerHistory.length > 0) {
+        if (trackerAutoBet && trackerHistory.length > 0 && (trackerSource !== 'live' || trackerBankActiveSession())) {
             if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
             trackerAutoAnalysisTimer = setTimeout(() => {
                 askTrackerAIForAnalysisSilent();
@@ -1153,6 +1158,10 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
 }
 
 async function askTrackerAIForAnalysisSilent() {
+    if (trackerSource === 'live') {
+        if (trackerAiLastRequestedRevision === trackerLiveEventRevision) return;
+        trackerAiLastRequestedRevision = trackerLiveEventRevision;
+    }
     const ctx = buildTrackerAIContext();
     const prompt = buildTrackerPrompt(ctx, null);
     await callTrackerAISilent(prompt);
