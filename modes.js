@@ -1972,6 +1972,19 @@ function buildTrackerAIContext() {
     };
 }
 
+function getTrackerAiKeyTargets() {
+    const signal = trackerLastSignal;
+    if (!signal) return [];
+    return [
+        { key: 'CW_N9', number: Number(signal.targetCW) },
+        { key: 'CCW_N9', number: Number(signal.targetCCW) },
+        { key: 'CW_N4_UNDER', number: Number(signal.targetUnderCW) },
+        { key: 'CW_N4_OVER', number: Number(signal.targetOverCW) },
+        { key: 'CCW_N4_UNDER', number: Number(signal.targetUnderCCW) },
+        { key: 'CCW_N4_OVER', number: Number(signal.targetOverCCW) }
+    ].filter(target => Number.isInteger(target.number) && target.number >= 0 && target.number <= 36);
+}
+
 function detectTrackerTurbulence(travels, kind = 'dir') {
     if (travels.length < 6) return null;
     const symbols = [];
@@ -2431,11 +2444,13 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
                 : '0.0';
             return `Ventana ${spins.length}/${size}: derecha ${right}/${directional.length}, izquierda ${left}/${directional.length}; BIG ${big}/${jumps.length}, SMALL ${small}/${jumps.length}; salto medio ${avgDistance}.`;
         });
+        const keyTargets = getTrackerAiKeyTargets();
         dataBlock = [
             `Historial Live disponible: ${history.length} giros (máximo 400; serie antigua a reciente).`,
             `Últimos ${recent.length} giros: ${recent.join(', ')}`,
             `Saltos firmados de esa serie: ${recentJumps.map(jump => (jump > 0 ? '+' : '') + jump).join(', ')}`,
             ...windowStats,
+            `Seis predicciones clave a evaluar: ${keyTargets.map(target => `${target.key}=${target.number}`).join(' | ') || 'no disponibles'}.`,
             'Definiciones: salto positivo = derecha y negativo = izquierda según el orden de la ruleta europea; BIG = salto absoluto de 10 o más, SMALL = menor que 10.'
         ].join('\n');
     }
@@ -2507,10 +2522,10 @@ Antes de responder, razona internamente en este orden: 1) detecta el patron de c
 
     const aiPrediction = (trackerPredictionSource === 'ai' || forceAiPrediction) && !userMessage;
     const finalSystemPrompt = aiPrediction
-        ? 'Metodología N4: analiza la serie cronológica de saltos firmados y compárala en las ventanas de 20, 50, 100 y hasta 400 giros. Da mayor atención al comportamiento reciente, pero contrástalo con las ventanas mayores; observa continuidad, alternancia y cambios de magnitud sin asumir que un patrón garantiza el siguiente resultado. Usa los números y estadísticas como evidencia, no como candidatos ni predicciones del sistema. Elige por criterio propio un centro de 0 a 36. Devuelve únicamente: N4: NN. Sin explicación ni texto adicional.'
+        ? 'Metodología N4: analiza la serie cronológica de saltos firmados y compárala en las ventanas de 20, 50, 100 y hasta 400 giros. Evalúa las seis predicciones clave recibidas con esas señales y elige la que tenga mejor respaldo en los datos. La lista de seis es el conjunto cerrado de opciones: no inventes ni generes un número fuera de ella. La IA decide cuál opción encaja mejor; no tiene que repetir la última elección y tampoco está obligada a cambiarla si sigue siendo la mejor. Devuelve únicamente N4: seguido del número real de la opción elegida. Nunca devuelvas NN ni texto adicional.'
         : systemPrompt;
     const predictionRequest = aiPrediction
-        ? 'Analiza solo estos datos y devuelve únicamente N4: NN.'
+        ? 'Evalúa las seis predicciones clave contra el historial y las cuatro ventanas. Escoge una de las seis y responde exactamente N4: <número elegido>, reemplazando el marcador por el número real.'
         : 'Proyecta UN target específico con su número. Justifica en una oración.';
     if (userMessage) {
         return {
@@ -2617,13 +2632,14 @@ function syncPredictionFromAI(responseText, backgroundPrediction = false) {
     if (!predEl || (trackerPredictionSource !== 'ai' && !backgroundPrediction)) return;
     const match = String(responseText || '').match(/\bN4\s*:\s*(3[0-6]|[0-2]?\d)\b/i);
     const center = match ? Number(match[1]) : null;
-    trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 ? center : null;
+    const allowedCenters = new Set(getTrackerAiKeyTargets().map(target => target.number));
+    trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 && allowedCenters.has(center) ? center : null;
     trackerAiPredictionHistoryLength = trackerAiN4Center === null ? -1 : trackerHistory.length;
     if (trackerPredictionSource === 'ai') {
         predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · N4: ${trackerAiN4Center}`;
         trackerAiDisplayStatus = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · N4: ${trackerAiN4Center}`;
     }
-    if (trackerAiN4Center === null) console.warn('[Tracker AI] Response did not contain a valid N4 center.');
+    if (trackerAiN4Center === null) console.warn('[Tracker AI] Response did not contain a valid N4 center from the six key targets.');
     renderTrackerBankroll();
 }
 
