@@ -1989,22 +1989,12 @@ app.post('/api/ai/tracker', async (req, res) => {
                 }).sort({ created_at: -1 }).limit(120).select('context_snapshot.ai_center context_snapshot.ai_won context_snapshot.history round created_at').lean().exec();
                 const wins = aiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
                 const losses = aiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
-                const latestAiOutcomes = aiEntries.slice(0, 2).map(entry => entry.context_snapshot || {});
-                const repeatedFailedCenter = latestAiOutcomes.length === 2 &&
-                    latestAiOutcomes.every(outcome => outcome.ai_won === false) &&
-                    Number.isInteger(Number(latestAiOutcomes[0].ai_center)) &&
-                    Number(latestAiOutcomes[0].ai_center) === Number(latestAiOutcomes[1].ai_center)
-                    ? Number(latestAiOutcomes[0].ai_center)
-                    : null;
                 const samples = aiEntries.slice(0, 12).reverse().map(entry => {
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-10).join(',') : '';
                     return `centro IA ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto' : 'fallo'}${history ? ` (previos ${history})` : ''}`;
                 });
-                const repeatedFailureGuidance = repeatedFailedCenter === null
-                    ? ''
-                    : ` En las dos evaluaciones más recientes, el centro ${repeatedFailedCenter} falló consecutivamente; reanaliza el historial nuevo y elige para esta predicción un centro distinto de ${repeatedFailedCenter}.`;
-                const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Úsalos como referencia breve, sin asumir que se repetirá un resultado.${repeatedFailureGuidance}`;
+                const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Son datos de referencia; decide libremente según el análisis actual.`;
                 const lastMessage = requestMessages[requestMessages.length - 1];
                 if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}`;
             } catch (learningError) {
@@ -2014,10 +2004,10 @@ app.post('/api/ai/tracker', async (req, res) => {
         const orBody = {
             model: orModel,
             messages: [{ role: 'system', content: system }, ...requestMessages],
-            temperature: purpose === 'prediction' ? 0.2 : 0.7,
-            reasoning_effort: purpose === 'prediction' ? 'low' : 'medium',
-            // GPT-OSS may spend hidden reasoning tokens before emitting its short N4 answer.
-            max_tokens: purpose === 'prediction' ? 512 : 1024
+            temperature: 0.7,
+            reasoning_effort: purpose === 'prediction' ? 'high' : 'medium',
+            // Allow GPT-OSS enough completion budget for reasoning plus its concise N4 answer.
+            max_completion_tokens: purpose === 'prediction' ? 4096 : 1024
         };
         const orHeaders = {
             'Content-Type': 'application/json',
@@ -2029,7 +2019,7 @@ app.post('/api/ai/tracker', async (req, res) => {
         requestTimeout = setTimeout(() => {
             requestTimedOut = true;
             requestController.abort();
-        }, purpose === 'prediction' ? 12500 : 60000);
+        }, purpose === 'prediction' ? 30000 : 60000);
         const orResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: orHeaders,
