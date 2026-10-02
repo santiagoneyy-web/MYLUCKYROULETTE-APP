@@ -1976,7 +1976,8 @@ app.post('/api/ai/tracker', async (req, res) => {
             model: orModel,
             messages: [{ role: 'system', content: system }, ...messages],
             temperature: 0.7,
-            max_tokens: 1024
+            max_tokens: 2048,
+            reasoning: { effort: 'low' }
         };
         const orHeaders = {
             'Content-Type': 'application/json',
@@ -2003,7 +2004,22 @@ app.post('/api/ai/tracker', async (req, res) => {
             throw new Error(orFriendly);
         }
         const orData = await orResp.json();
-        const responseText = orData.choices?.[0]?.message?.content || '';
+        const choice = orData.choices?.[0];
+        const message = choice?.message || {};
+        const content = message.content;
+        const responseText = typeof content === 'string'
+            ? content.trim()
+            : Array.isArray(content)
+                ? content.map(part => typeof part === 'string' ? part : (part?.text || part?.content || '')).join('\n').trim()
+                : typeof message.output_text === 'string' ? message.output_text.trim() : '';
+        if (!responseText) {
+            const finishReason = choice?.finish_reason || 'sin detalle';
+            const refusal = String(message.refusal || '').trim();
+            const detail = refusal
+                ? `El proveedor rechazó la respuesta: ${refusal.slice(0, 180)}`
+                : `El modelo no generó texto (finish_reason: ${finishReason}). Prueba de nuevo o selecciona otro modelo.`;
+            throw new Error(detail);
+        }
         console.log('[Tracker AI] OpenRouter success:', orModel, 'response length:', responseText.length);
         res.json({ success: true, response: responseText });
     } catch (err) {
