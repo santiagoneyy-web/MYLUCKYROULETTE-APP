@@ -779,14 +779,14 @@ async function closeTrackerBankSession() {
 
 function enqueueTrackerBankSpin(spin) {
     const pendingKey = `${spin.sessionId}:${spin.spinId}`;
-    if (trackerBankPendingKeys.has(pendingKey)) return;
+    if (trackerBankPendingKeys.has(pendingKey)) return trackerBankQueue;
     trackerBankPendingKeys.add(pendingKey);
     const insertAt = trackerBankPending.findIndex(item =>
         String(item.sessionId) === String(spin.sessionId) && Number(item.spinId) > Number(spin.spinId)
     );
     if (insertAt === -1) trackerBankPending.push(spin);
     else trackerBankPending.splice(insertAt, 0, spin);
-    flushTrackerBankQueue().catch(() => {});
+    return flushTrackerBankQueue();
 }
 
 function flushTrackerBankQueue() {
@@ -910,7 +910,12 @@ async function syncTrackerFromLive() {
         console.log('[Tracker] Synced ' + trackerLiveHistory.length + ' spins from Live mode');
         if (activeSession && hasEligibleNewSpin && trackerAutoBet) {
             if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
-            trackerAutoAnalysisTimer = setTimeout(() => askTrackerAIForAnalysisSilent(false, trackerPredictionSource === 'system'), 500);
+            const predictionRevision = trackerLiveEventRevision;
+            trackerAutoAnalysisTimer = setTimeout(async () => {
+                await trackerBankQueue.catch(() => {});
+                if (predictionRevision !== trackerLiveEventRevision) return;
+                askTrackerAIForAnalysisSilent(false, trackerPredictionSource === 'system');
+            }, 500);
         }
     }
     if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
@@ -1241,7 +1246,10 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
         const requestAiPrediction = trackerAutoBet && trackerHistory.length >= 3 && Boolean(trackerBankActiveSession());
         if (requestAiPrediction) {
             if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
-            trackerAutoAnalysisTimer = setTimeout(() => {
+            const predictionRevision = trackerLiveEventRevision;
+            trackerAutoAnalysisTimer = setTimeout(async () => {
+                await trackerBankQueue.catch(() => {});
+                if (source === 'live' && predictionRevision !== trackerLiveEventRevision) return;
                 askTrackerAIForAnalysisSilent(false, trackerPredictionSource === 'system');
             }, 500);
         }

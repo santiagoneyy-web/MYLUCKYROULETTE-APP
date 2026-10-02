@@ -1989,12 +1989,22 @@ app.post('/api/ai/tracker', async (req, res) => {
                 }).sort({ created_at: -1 }).limit(120).select('context_snapshot.ai_center context_snapshot.ai_won context_snapshot.history round created_at').lean().exec();
                 const wins = aiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
                 const losses = aiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
+                const latestAiOutcomes = aiEntries.slice(0, 2).map(entry => entry.context_snapshot || {});
+                const repeatedFailedCenter = latestAiOutcomes.length === 2 &&
+                    latestAiOutcomes.every(outcome => outcome.ai_won === false) &&
+                    Number.isInteger(Number(latestAiOutcomes[0].ai_center)) &&
+                    Number(latestAiOutcomes[0].ai_center) === Number(latestAiOutcomes[1].ai_center)
+                    ? Number(latestAiOutcomes[0].ai_center)
+                    : null;
                 const samples = aiEntries.slice(0, 12).reverse().map(entry => {
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-10).join(',') : '';
                     return `centro IA ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto' : 'fallo'}${history ? ` (previos ${history})` : ''}`;
                 });
-                const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Úsalos como referencia breve, sin asumir que se repetirá un resultado.`;
+                const repeatedFailureGuidance = repeatedFailedCenter === null
+                    ? ''
+                    : ` En las dos evaluaciones más recientes, el centro ${repeatedFailedCenter} falló consecutivamente; reanaliza el historial nuevo y elige para esta predicción un centro distinto de ${repeatedFailedCenter}.`;
+                const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Úsalos como referencia breve, sin asumir que se repetirá un resultado.${repeatedFailureGuidance}`;
                 const lastMessage = requestMessages[requestMessages.length - 1];
                 if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}`;
             } catch (learningError) {
