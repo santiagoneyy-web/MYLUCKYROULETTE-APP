@@ -1350,7 +1350,7 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
                     ? `${promptObj.system}\n\n${memoryContext}`
                     : promptObj.system
         };
-        const timeoutId = setTimeout(() => controller.abort(), aiPrediction ? 32000 : 30000);
+        const timeoutId = setTimeout(() => controller.abort(), aiPrediction ? 15000 : 30000);
         let res;
         try {
             res = await fetch('/api/ai/tracker', {
@@ -2561,7 +2561,7 @@ async function callTrackerAI(promptObj, isAuto) {
                 : promptObj.system
         };
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), isAuto && trackerPredictionSource === 'ai' ? 32000 : 30000);
+        const timeoutId = setTimeout(() => controller.abort(), isAuto && trackerPredictionSource === 'ai' ? 15000 : 30000);
         const res = await fetch('/api/ai/tracker', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

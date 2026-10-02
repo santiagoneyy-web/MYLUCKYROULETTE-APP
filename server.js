@@ -2005,9 +2005,10 @@ app.post('/api/ai/tracker', async (req, res) => {
             model: orModel,
             messages: [{ role: 'system', content: system }, ...requestMessages],
             temperature: 0.7,
-            reasoning_effort: purpose === 'prediction' ? 'high' : 'medium',
-            // Allow GPT-OSS enough completion budget for reasoning plus its concise N4 answer.
-            max_completion_tokens: purpose === 'prediction' ? 4096 : 1024
+            reasoning_effort: 'medium',
+            // Keep enough room for GPT-OSS reasoning and its concise N4 answer without
+            // letting prediction requests consume an oversized completion budget.
+            max_completion_tokens: purpose === 'prediction' ? 1536 : 1024
         };
         const orHeaders = {
             'Content-Type': 'application/json',
@@ -2019,7 +2020,7 @@ app.post('/api/ai/tracker', async (req, res) => {
         requestTimeout = setTimeout(() => {
             requestTimedOut = true;
             requestController.abort();
-        }, purpose === 'prediction' ? 30000 : 60000);
+        }, purpose === 'prediction' ? 14000 : 60000);
         const orResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: orHeaders,
@@ -2067,7 +2068,7 @@ app.post('/api/ai/tracker', async (req, res) => {
     } catch (err) {
         clearTimeout(requestTimeout);
         const errorMessage = requestTimedOut || err.name === 'AbortError'
-            ? 'OpenRouter superó el límite de 12.5 segundos para la predicción.'
+            ? 'OpenRouter no completó la predicción dentro del límite de 15 segundos.'
             : err.message;
         console.error('[Tracker AI] ERROR:', errorMessage, 'duration_ms:', Date.now() - requestStartedAt);
         res.json({ success: false, error: errorMessage, provider: provider || 'openrouter' });
