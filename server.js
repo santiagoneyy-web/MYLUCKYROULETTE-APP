@@ -1976,7 +1976,7 @@ app.post('/api/ai/tracker', async (req, res) => {
             model: orModel,
             messages: [{ role: 'system', content: system }, ...messages],
             temperature: 0.7,
-            max_tokens: 2048,
+            max_tokens: 256,
             reasoning: { effort: 'low' }
         };
         const orHeaders = {

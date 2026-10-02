@@ -1179,15 +1179,21 @@ async function callTrackerAISilent(promptObj) {
     const requestRevision = trackerLiveEventRevision;
     const requestMemory = trackerAiMemory;
     const requestContext = buildTrackerAIContext();
+    const aiOnlyBankroll = requestSource === 'live' && Boolean(trackerBankActiveSession());
     try {
+        const memoryContext = requestMemory.summary
+            ? `CONTEXTO HISTÓRICO DE MONGODB (referencia secundaria; prioriza los datos actuales):\n${requestMemory.summary}\nNúmeros recientes guardados: ${(requestMemory.context?.recentNumbers || []).join(', ')}. Total guardado: ${requestMemory.context?.totalSpins || 0}.`
+            : '';
         const payload = {
             provider: trackerConfig.provider,
             model: trackerConfig.model,
             apiKey: trackerConfig.apiKey,
-            messages: [...(requestSource === 'live' ? requestMemory.messages.slice(-8) : []), ...promptObj.messages],
-            system: requestMemory.summary
-                ? `${promptObj.system}\n\nCONTEXTO DE SESIONES ANTERIORES (úsalo como referencia y prioriza los datos actuales):\n${requestMemory.summary}\nNúmeros recientes guardados: ${(requestMemory.context?.recentNumbers || []).join(', ')}. Total guardado: ${requestMemory.context?.totalSpins || 0}.`
-                : promptObj.system
+            messages: [...(requestSource === 'live' && !aiOnlyBankroll ? requestMemory.messages.slice(-8) : []), ...promptObj.messages],
+            system: aiOnlyBankroll
+                ? [memoryContext, promptObj.system].filter(Boolean).join('\n\n')
+                : memoryContext
+                    ? `${promptObj.system}\n\n${memoryContext}`
+                    : promptObj.system
         };
         const timeoutId = setTimeout(() => controller.abort(), 30000);
         let res;
@@ -2286,17 +2292,11 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
     const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
-    const bankrollSystemPrompt = aiOnlyBankroll
-        ? systemPrompt.replace(
-            /Elige UNO de los targets listados en "Targets disponibles"\. Tu respuesta DEBE incluir el numero especifico del target elegido\. NO inventes numeros ni elijas numeros fuera de esa lista\./,
-            'Elige un número propio del 0 al 36, basándote solo en tu análisis de los datos.'
-        )
-        : systemPrompt;
     const finalSystemPrompt = aiOnlyBankroll
-        ? `${bankrollSystemPrompt}\n\nMODO BANCA IA N4: la predicción la genera exclusivamente tu análisis; no hay predicción local ni lista de candidatos del Tracker. Devuelve obligatoriamente el centro en el formato exacto "N4: NN", donde NN es un único número entero entre 0 y 36. No afirmes N4 si no puedes proponer ese número.`
+        ? 'Analiza internamente los números Live y sus saltos para elegir una predicción propia. No uses predicciones heurísticas, targets ni candidatos generados por el sistema. Devuelve únicamente una línea con este formato exacto: N4: NN, donde NN es un entero de 0 a 36. No incluyas explicación, etiquetas adicionales ni bloques de texto.'
         : systemPrompt;
     const predictionRequest = aiOnlyBankroll
-        ? 'Analiza los datos y elige tu propia predicción N4. Responde empezando exactamente con N4: seguido de un número entre 0 y 36.'
+        ? 'Analiza solo estos datos y devuelve únicamente N4: NN.'
         : 'Proyecta UN target específico con su número. Justifica en una oración.';
     if (userMessage) {
         return {
