@@ -11,8 +11,10 @@ const Spin    = require('./models/Spin'); // MongoDB Model
 const mongoose = require('mongoose');
 const TrackerBankrollSession = require('./models/TrackerBankrollSession');
 const TrackerBankrollEntry = require('./models/TrackerBankrollEntry');
+const TrackerAnalystSnapshot = require('./models/TrackerAnalystSnapshot');
 const trackerBankroll = require('./src/engine/tracker_bankroll');
 const predictor = require('./src/engine/predictor'); // Agents 1-4
+const { WHEEL_ORDER, WHEEL_INDEX } = predictor;
 const agent5  = require('./src/engine/agent5');      // Autonomous AI & Physics
 const axios   = require('axios');
 const strategyStore = require('./src/engine/strategy_store');
@@ -1960,6 +1962,160 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
 });
 
 // Tracker AI endpoint — OpenRouter
+const trackerAnalystInFlight = new Set();
+const TRACKER_ANALYST_MODEL = process.env.TRACKER_ANALYST_MODEL || 'qwen/qwen3.6-27b';
+
+function trackerWheelStep(from, to) {
+    const fromIndex = WHEEL_INDEX[Number(from)];
+    const toIndex = WHEEL_INDEX[Number(to)];
+    if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return null;
+    const clockwise = (toIndex - fromIndex + WHEEL_ORDER.length) % WHEEL_ORDER.length;
+    const signed = clockwise > Math.floor(WHEEL_ORDER.length / 2) ? clockwise - WHEEL_ORDER.length : clockwise;
+    const direction = signed === 0 ? 'STAY' : signed > 0 ? 'CW' : 'CCW';
+    const magnitude = Math.abs(signed) >= 10 ? 'BIG' : 'SMALL';
+    return { signed, direction, magnitude, signature: `${direction}-${magnitude}` };
+}
+
+function summarizeTrackerWindow(spins, minutes, now) {
+    const cutoff = now.getTime() - minutes * 60 * 1000;
+    const selected = spins.filter(spin => {
+        const at = new Date(spin.observed_at || spin.timestamp || spin.ingested_at).getTime();
+        return Number.isFinite(at) && at >= cutoff && at <= now.getTime();
+    });
+    const steps = [];
+    for (let i = 1; i < selected.length; i++) {
+        const step = trackerWheelStep(selected[i - 1].number, selected[i].number);
+        if (step) steps.push(step);
+    }
+    const count = key => steps.filter(step => step.signature === key).length;
+    const cw = steps.filter(step => step.direction === 'CW').length;
+    const ccw = steps.filter(step => step.direction === 'CCW').length;
+    const big = steps.filter(step => step.magnitude === 'BIG').length;
+    const avg = steps.length ? Math.round(steps.reduce((sum, step) => sum + Math.abs(step.signed), 0) / steps.length * 10) / 10 : null;
+    return {
+        minutes,
+        spins: selected.length,
+        transitions: steps.length,
+        clockwise: cw,
+        counterclockwise: ccw,
+        big,
+        small: steps.length - big,
+        averageWheelDistance: avg,
+        mostCommonTransitions: ['CW-BIG', 'CW-SMALL', 'CCW-BIG', 'CCW-SMALL', 'STAY-SMALL']
+            .map(signature => ({ signature, count: count(signature) }))
+            .sort((a, b) => b.count - a.count)
+    };
+}
+
+function buildTrackerAnalystEvidence(spins) {
+    const valid = spins.filter(spin => Number.isInteger(Number(spin.number)) && Number(spin.number) >= 0 && Number(spin.number) <= 36);
+    const steps = [];
+    for (let i = 1; i < valid.length; i++) {
+        const step = trackerWheelStep(valid[i - 1].number, valid[i].number);
+        if (step) steps.push(step);
+    }
+    const patternLength = 5;
+    const currentStart = Math.max(0, steps.length - patternLength);
+    const current = steps.slice(currentStart);
+    const matches = [];
+    if (current.length === patternLength) {
+        for (let start = 0; start + patternLength < currentStart; start++) {
+            const candidate = steps.slice(start, start + patternLength);
+            if (!candidate.every((step, index) => step.signature === current[index].signature)) continue;
+            matches.push({
+                priorSequence: valid.slice(start, start + patternLength + 1).map(spin => Number(spin.number)),
+                followingNumber: Number(valid[start + patternLength + 1]?.number),
+                followingTransition: steps[start + patternLength]?.signature,
+                followingSignedDistance: steps[start + patternLength]?.signed
+            });
+        }
+    }
+    const now = new Date();
+    return {
+        generatedAt: now.toISOString(),
+        historySize: valid.length,
+        latestSpinId: Number(valid[valid.length - 1]?.id),
+        latestNumber: Number(valid[valid.length - 1]?.number),
+        currentSequence: valid.slice(-patternLength - 1).map(spin => Number(spin.number)),
+        currentTransitionPattern: current.map(step => step.signature),
+        similarity: {
+            method: 'exact match of the last 5 signed wheel-transition classes (CW/CCW/STAY × BIG/SMALL)',
+            occurrences: matches.length,
+            examples: matches.slice(-8),
+            followingTransitionCounts: ['CW-BIG', 'CW-SMALL', 'CCW-BIG', 'CCW-SMALL', 'STAY-SMALL']
+                .map(signature => ({ signature, count: matches.filter(match => match.followingTransition === signature).length }))
+        },
+        fluctuation: {
+            last15Minutes: summarizeTrackerWindow(valid, 15, now),
+            last60Minutes: summarizeTrackerWindow(valid, 60, now)
+        },
+        note: 'Evidence is descriptive only; historical similarity does not guarantee a future outcome.'
+    };
+}
+
+function startTrackerAnalystReview(snapshotId, evidence, apiKey, tableId, spinId) {
+    const inFlightKey = `${tableId}:${spinId}`;
+    if (trackerAnalystInFlight.has(inFlightKey)) return;
+    trackerAnalystInFlight.add(inFlightKey);
+    const key = String(apiKey || process.env.OPENROUTER_API_KEY || '').trim().replace(/[^\x00-\x7F]/g, '');
+    if (!key) {
+        trackerAnalystInFlight.delete(inFlightKey);
+        TrackerAnalystSnapshot.updateOne({ _id: snapshotId }, {
+            $set: { analyst_status: 'failed', analyst_error: 'OpenRouter API key faltante.', updated_at: new Date() }
+        }).catch(() => {});
+        return;
+    }
+    (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
+        try {
+            const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${key}`,
+                    'HTTP-Referer': process.env.OPENROUTER_REFERER || 'http://localhost',
+                    'X-Title': 'OneMillion Tracker Analyst'
+                },
+                body: JSON.stringify({
+                    model: TRACKER_ANALYST_MODEL,
+                    messages: [
+                        { role: 'system', content: 'Eres un analista descriptivo de secuencias de ruleta. No predigas números, no elijas centro, no recomiendes apuestas ni afirmes causalidad. Evalúa solo la evidencia numérica recibida; señala similitud, tamaño de muestra, distribución de resultados posteriores y fluctuación 15/60 min. Devuelve JSON compacto con las claves: hallazgo (string), confianza_evidencia (baja|media|alta), limite (string). Si no hay coincidencias suficientes, dilo claramente.' },
+                        { role: 'user', content: JSON.stringify(evidence) }
+                    ],
+                    temperature: 0.1,
+                    max_tokens: 350,
+                    response_format: { type: 'json_object' }
+                }),
+                signal: controller.signal
+            });
+            if (!response.ok) throw new Error(`OpenRouter HTTP ${response.status}: ${(await response.text()).slice(0, 180)}`);
+            const data = await response.json();
+            const text = String(data.choices?.[0]?.message?.content || '').trim();
+            if (!text) throw new Error('Qwen devolvió el análisis vacío.');
+            let parsed;
+            try { parsed = JSON.parse(text); } catch { parsed = { hallazgo: text.slice(0, 500) }; }
+            const summary = JSON.stringify({
+                hallazgo: String(parsed.hallazgo || '').slice(0, 500),
+                confianza_evidencia: ['baja', 'media', 'alta'].includes(parsed.confianza_evidencia) ? parsed.confianza_evidencia : 'baja',
+                limite: String(parsed.limite || '').slice(0, 250)
+            });
+            await TrackerAnalystSnapshot.updateOne({ _id: snapshotId }, {
+                $set: { analyst_status: 'complete', analyst_summary: summary, analyst_error: '', updated_at: new Date() }
+            });
+            console.log('[Tracker Analyst] Complete:', TRACKER_ANALYST_MODEL, 'table:', tableId, 'spin:', spinId, 'duration_ms:', Date.now() - new Date(evidence.generatedAt).getTime());
+        } catch (error) {
+            await TrackerAnalystSnapshot.updateOne({ _id: snapshotId }, {
+                $set: { analyst_status: 'failed', analyst_error: String(error.message || error).slice(0, 250), updated_at: new Date() }
+            }).catch(() => {});
+            console.warn('[Tracker Analyst] Review failed:', error.message);
+        } finally {
+            clearTimeout(timeout);
+            trackerAnalystInFlight.delete(inFlightKey);
+        }
+    })();
+}
+
 app.post('/api/ai/tracker', async (req, res) => {
     const requestStartedAt = Date.now();
     const { provider, model, apiKey, system, messages, purpose, tableId, prediction_context: predictionContext } = req.body;
@@ -1983,6 +2139,64 @@ app.post('/api/ai/tracker', async (req, res) => {
         const isGeminiModel = orModel.startsWith('google/gemini-');
         const requestMessages = Array.isArray(messages) ? messages.map(message => ({ ...message })) : [];
         if (purpose === 'prediction' && requestMessages.length && Number.isInteger(Number(tableId))) {
+            try {
+                const numericTableId = Number(tableId);
+                const activeSession = await TrackerBankrollSession.findOne({ table_id: numericTableId, status: 'active' })
+                    .sort({ updated_at: -1 }).select('_id').lean().exec();
+                if (activeSession) {
+                    const liveSpins = await Spin.find({ table_id: numericTableId, source_quality: 'live' })
+                        .sort({ id: -1 }).limit(400).lean().exec();
+                    liveSpins.reverse();
+                    if (liveSpins.length) {
+                        const evidence = buildTrackerAnalystEvidence(liveSpins);
+                        const latestSpinId = Number(liveSpins[liveSpins.length - 1].id);
+                        const previous = await TrackerAnalystSnapshot.findOne({ table_id: numericTableId, spin_id: latestSpinId })
+                            .select('_id analyst_status').lean().exec();
+                        const snapshot = await TrackerAnalystSnapshot.findOneAndUpdate(
+                            { table_id: numericTableId, spin_id: latestSpinId },
+                            {
+                                $setOnInsert: {
+                                    table_id: numericTableId,
+                                    spin_id: latestSpinId,
+                                    latest_number: evidence.latestNumber,
+                                    evidence,
+                                    analyst_model: TRACKER_ANALYST_MODEL,
+                                    analyst_status: 'pending',
+                                    created_at: new Date()
+                                },
+                                $set: { updated_at: new Date() }
+                            },
+                            { new: true, upsert: true, setDefaultsOnInsert: true }
+                        ).lean().exec();
+                        if (!previous) {
+                            startTrackerAnalystReview(snapshot._id, evidence, key, numericTableId, latestSpinId);
+                            TrackerAnalystSnapshot.deleteMany({ table_id: numericTableId, spin_id: { $lt: latestSpinId - 200 } })
+                                .catch(error => console.warn('[Tracker Analyst] Snapshot cleanup failed:', error.message));
+                        }
+                        const recentReviews = await TrackerAnalystSnapshot.find({
+                            table_id: numericTableId,
+                            spin_id: { $lt: latestSpinId },
+                            analyst_status: 'complete',
+                            analyst_summary: { $ne: '' }
+                        }).sort({ spin_id: -1 }).limit(2).select('spin_id analyst_model analyst_summary').lean().exec();
+                        const analystContext = [
+                            'EVIDENCIA DEL ANALISTA (descriptiva; no es una predicción ni una orden):',
+                            JSON.stringify(evidence),
+                            ...recentReviews.reverse().map(report => `Revision Qwen ${report.analyst_model} del giro ${report.spin_id}: ${report.analyst_summary}`),
+                            'Usa las coincidencias solo si tienen muestra concreta; distingue datos recientes de históricos y considera el tamaño de muestra. Gemini conserva la decisión final.'
+                        ].join('\n');
+                        const lastMessage = requestMessages[requestMessages.length - 1];
+                        if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${analystContext}`;
+                        console.log('[Tracker Analyst] Evidence attached:', TRACKER_ANALYST_MODEL,
+                            'table:', numericTableId, 'spin:', latestSpinId,
+                            'similar sequences:', evidence.similarity.occurrences,
+                            '15m spins:', evidence.fluctuation.last15Minutes.spins,
+                            '60m spins:', evidence.fluctuation.last60Minutes.spins);
+                    }
+                }
+            } catch (analystError) {
+                console.warn('[Tracker Analyst] Evidence unavailable; Gemini continues with its current data:', analystError.message);
+            }
             try {
                 const aiEntries = await TrackerBankrollEntry.find({
                     table_id: Number(tableId),
