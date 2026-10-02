@@ -1842,6 +1842,13 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     const spinId = Number(req.body.spin_id);
     const number = Number(req.body.number);
     const predictionCenter = Number(req.body.prediction_center);
+    const rawContext = req.body.context_snapshot && typeof req.body.context_snapshot === 'object' ? req.body.context_snapshot : {};
+    const contextSnapshot = {
+        history: Array.isArray(rawContext.history)
+            ? rawContext.history.slice(-80).map(Number).filter(value => Number.isInteger(value) && value >= 0 && value <= 36)
+            : [],
+        prediction_source: rawContext.prediction_source === 'ai' ? 'ai' : 'system'
+    };
     const predictionNumbers = Number.isInteger(predictionCenter) && predictionCenter >= 0 && predictionCenter <= 36
         ? wheelNeighbors(predictionCenter, 4)
         : [];
@@ -1902,6 +1909,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     number,
                     prediction_center: predictionCenter,
                     prediction_numbers: predictionNumbers,
+                    context_snapshot: contextSnapshot,
                     round: settlement.round,
                     stake: settlement.stake,
                     cycle_wagered: settlement.cycleWagered,
@@ -1947,7 +1955,8 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
 // Tracker AI endpoint — OpenRouter
 app.post('/api/ai/tracker', async (req, res) => {
     const requestStartedAt = Date.now();
-    const { provider, model, apiKey, system, messages } = req.body;
+    const { provider, model, apiKey, system, messages, purpose, tableId } = req.body;
+    let requestTimeout = null;
     console.log('[Tracker AI] Request:', { provider, model, hasKey: !!apiKey, msgCount: messages?.length });
     if (!db.getUseMongo()) {
         return res.status(503).json({ success: false, error: 'MongoDB Atlas no está conectado. La IA del Tracker permanece pausada.' });
@@ -1958,11 +1967,33 @@ app.post('/api/ai/tracker', async (req, res) => {
         const key = rawKey.replace(/[^\x00-\x7F]/g, '');
         if (!key) throw new Error('API key de OpenRouter faltante. Pegala en Config IA o configura OPENROUTER_API_KEY.');
         const orModel = (model || 'openai/gpt-oss-120b').trim();
+        const requestMessages = Array.isArray(messages) ? messages.map(message => ({ ...message })) : [];
+        if (purpose === 'prediction' && requestMessages.length && Number.isInteger(Number(tableId))) {
+            try {
+                const aiEntries = await TrackerBankrollEntry.find({
+                    table_id: Number(tableId),
+                    'context_snapshot.prediction_source': 'ai'
+                }).sort({ created_at: -1 }).limit(120).select('number prediction_center won context_snapshot.history round created_at').lean().exec();
+                const wins = aiEntries.filter(entry => entry.won).length;
+                const losses = aiEntries.length - wins;
+                const samples = aiEntries.slice(0, 12).reverse().map(entry => {
+                    const history = Array.isArray(entry.context_snapshot?.history)
+                        ? entry.context_snapshot.history.slice(-10).join(',') : '';
+                    return `centro ${entry.prediction_center}, salió ${entry.number}, ${entry.won ? 'acierto' : 'fallo'}${history ? ` (previos ${history})` : ''}`;
+                });
+                const feedback = `RESULTADOS PREVIOS DE IA: ${aiEntries.length} liquidaciones, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay liquidaciones IA previas.'} Úsalos como referencia breve, sin asumir que se repetirá un resultado.`;
+                const lastMessage = requestMessages[requestMessages.length - 1];
+                if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}`;
+            } catch (learningError) {
+                console.warn('[Tracker AI] No se pudo cargar aprendizaje de banca:', learningError.message);
+            }
+        }
         const orBody = {
             model: orModel,
-            messages: [{ role: 'system', content: system }, ...messages],
-            temperature: 0.7,
-            max_tokens: 1024
+            messages: [{ role: 'system', content: system }, ...requestMessages],
+            temperature: purpose === 'prediction' ? 0.2 : 0.7,
+            reasoning_effort: purpose === 'prediction' ? 'low' : 'medium',
+            max_tokens: purpose === 'prediction' ? 128 : 1024
         };
         const orHeaders = {
             'Content-Type': 'application/json',
@@ -1970,13 +2001,17 @@ app.post('/api/ai/tracker', async (req, res) => {
             'HTTP-Referer': process.env.OPENROUTER_REFERER || 'http://localhost',
             'X-Title': 'Roulette-Classic'
         };
+        const requestController = new AbortController();
+        requestTimeout = setTimeout(() => requestController.abort(), purpose === 'prediction' ? 8500 : 60000);
         const orResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: orHeaders,
-            body: JSON.stringify(orBody)
+            body: JSON.stringify(orBody),
+            signal: requestController.signal
         });
         if (!orResp.ok) {
             const orErr = await orResp.text().catch(() => '');
+            clearTimeout(requestTimeout);
             console.error('[Tracker AI] OpenRouter HTTP', orResp.status, orErr);
             let orFriendly = 'OpenRouter HTTP ' + orResp.status;
             if (orErr.includes('auth') || orErr.includes('invalid') || orErr.includes('Invalid') || orResp.status === 401) {
@@ -1989,6 +2024,7 @@ app.post('/api/ai/tracker', async (req, res) => {
             throw new Error(orFriendly);
         }
         const orData = await orResp.json();
+        clearTimeout(requestTimeout);
         const choice = orData.choices?.[0];
         const message = choice?.message || {};
         const content = message.content;
@@ -2008,6 +2044,7 @@ app.post('/api/ai/tracker', async (req, res) => {
         console.log('[Tracker AI] OpenRouter success:', orModel, 'response length:', responseText.length, 'duration_ms:', Date.now() - requestStartedAt);
         res.json({ success: true, response: responseText });
     } catch (err) {
+        clearTimeout(requestTimeout);
         console.error('[Tracker AI] ERROR:', err.message, 'duration_ms:', Date.now() - requestStartedAt);
         res.json({ success: false, error: err.message, provider: provider || 'openrouter' });
     }

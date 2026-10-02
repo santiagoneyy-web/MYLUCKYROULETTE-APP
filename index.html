@@ -1292,6 +1292,10 @@
                 <!-- Controls -->
                 <div class="tracker-controls" style="flex-wrap: wrap; gap: 4px;">
                     <div style="display: flex; gap: 2px; margin-right: 4px;">
+                        <button class="tracker-btn tracker-btn-mode" id="tracker-source-system" onclick="setTrackerPredictionSource('system')">SISTEMA</button>
+                        <button class="tracker-btn tracker-btn-mode active" id="tracker-source-ai" onclick="setTrackerPredictionSource('ai')">IA</button>
+                    </div>
+                    <div style="display: flex; gap: 2px; margin-right: 4px;">
                         <button class="tracker-btn tracker-btn-mode active" id="tracker-btn-n9" onclick="setTrackerPredictionMode('n9')">N9</button>
                         <button class="tracker-btn tracker-btn-mode" id="tracker-btn-n4" onclick="setTrackerPredictionMode('n4')">N4</button>
                         <button class="tracker-btn tracker-btn-mode" id="tracker-btn-both" onclick="setTrackerPredictionMode('both')">Both</button>
@@ -1313,7 +1317,7 @@
 
 <script src="src/engine/predictor.js?v=999"></script>
 <script src="ai_chat.js?v=5"></script>
-<script src="modes.js?v=19"></script>
+<script src="modes.js?v=20"></script>
 <script src="app.js?v=1044"></script>
 </body>
 </html>

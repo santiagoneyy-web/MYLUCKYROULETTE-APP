@@ -9,6 +9,7 @@ const TrackerBankrollEntrySchema = new mongoose.Schema({
     number: { type: Number, required: true, min: 0, max: 36 },
     prediction_center: { type: Number, min: 0, max: 36 },
     prediction_numbers: { type: [Number], required: true, validate: values => values.length === 9 },
+    context_snapshot: { type: mongoose.Schema.Types.Mixed, default: {} },
     round: { type: Number, required: true, min: 1 },
     stake: { type: Number, required: true, min: 0 },
     cycle_wagered: { type: Number, required: true, min: 0 },
