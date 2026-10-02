@@ -2006,7 +2006,8 @@ app.post('/api/ai/tracker', async (req, res) => {
             messages: [{ role: 'system', content: system }, ...requestMessages],
             temperature: purpose === 'prediction' ? 0.2 : 0.7,
             reasoning_effort: purpose === 'prediction' ? 'low' : 'medium',
-            max_tokens: purpose === 'prediction' ? 96 : 1024
+            // GPT-OSS may spend hidden reasoning tokens before emitting its short N4 answer.
+            max_tokens: purpose === 'prediction' ? 512 : 1024
         };
         const orHeaders = {
             'Content-Type': 'application/json',

@@ -1388,7 +1388,7 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
         } else {
             console.warn('[Tracker AI Silent] Empty/error response:', data.error || 'empty response');
             trackerAiDisplayStatus = 'ANALIZANDO IA ?';
-            if (predEl && trackerBankActiveSession()) predEl.innerText = trackerAiDisplayStatus;
+            if (predEl && trackerPredictionSource === 'ai' && trackerBankActiveSession()) predEl.innerText = trackerAiDisplayStatus;
             scheduleTrackerAiRetry(requestRevision);
         }
     } catch (err) {
