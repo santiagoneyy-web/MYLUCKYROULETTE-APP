@@ -77,6 +77,9 @@ let trackerBankLoading = false;
 let trackerLiveSyncTimer = null;
 let trackerLiveSyncInFlight = false;
 let trackerLiveEventRevision = 0;
+let trackerAiRequestController = null;
+let trackerAiRequestId = 0;
+let trackerAiDisplayStatus = 'Esperando predicción N4 de IA';
 
 // ============================================================
 // MODE SWITCHING
@@ -682,6 +685,7 @@ async function startTrackerBankSession() {
     if (startButton) startButton.disabled = true;
     trackerBankSetMessage('Iniciando sesión y guardándola en MongoDB...');
     try {
+        saveTrackerConfig();
         const createResponse = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initial_capital: capital, chip_value: chip })
@@ -696,6 +700,7 @@ async function startTrackerBankSession() {
         trackerBankSelectedSessionId = session._id;
         await loadTrackerBankSessions();
         trackerAiN4Center = null;
+        trackerAiDisplayStatus = 'Conectando con IA...';
         trackerLiveEventRevision++;
         setTrackerPredictionMode('n4');
         trackerAutoBet = true;
@@ -1122,7 +1127,10 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
             predictionCenter
         });
     }
-    if (source === 'live' && !batch) trackerAiN4Center = null;
+    if (source === 'live' && !batch) {
+        trackerAiN4Center = null;
+        if (trackerBankActiveSession()) trackerAiDisplayStatus = 'Nueva tirada; actualizando análisis IA...';
+    }
     if (source === 'live' && !batch) trackerLiveEventRevision++;
     trackerHistory.push(n);
     if (trackerSource === 'live' && !batch) {
@@ -1154,10 +1162,19 @@ async function callTrackerAISilent(promptObj) {
     if (!trackerMemoryAvailable) {
         if (status) status.innerText = 'MongoDB Atlas no conectado; IA pausada.';
         if (predEl) predEl.innerText = '--';
+        trackerAiDisplayStatus = 'MongoDB desconectado';
+        renderTrackerBankroll();
         return;
     }
+    saveTrackerConfig();
+    const requestId = ++trackerAiRequestId;
+    if (trackerAiRequestController) trackerAiRequestController.abort();
+    const controller = new AbortController();
+    trackerAiRequestController = controller;
     if (status) status.innerText = 'Pensando...';
-    if (predEl) predEl.innerText = 'ANALIZANDO...';
+    trackerAiDisplayStatus = 'IA analizando datos Live...';
+    if (predEl) predEl.innerText = trackerBankActiveSession() ? trackerAiDisplayStatus : 'ANALIZANDO...';
+    renderTrackerBankroll();
     const requestSource = trackerSource;
     const requestRevision = trackerLiveEventRevision;
     const requestMemory = trackerAiMemory;
@@ -1172,15 +1189,19 @@ async function callTrackerAISilent(promptObj) {
                 ? `${promptObj.system}\n\nCONTEXTO DE SESIONES ANTERIORES (úsalo como referencia y prioriza los datos actuales):\n${requestMemory.summary}\nNúmeros recientes guardados: ${(requestMemory.context?.recentNumbers || []).join(', ')}. Total guardado: ${requestMemory.context?.totalSpins || 0}.`
                 : promptObj.system
         };
-        const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000);
-        const res = await fetch('/api/ai/tracker', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
+        let res;
+        try {
+            res = await fetch('/api/ai/tracker', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        if (requestId !== trackerAiRequestId) return;
         if (!res.ok) {
             if (res.status === 503) pauseTrackerForMongo();
             throw new Error('HTTP ' + res.status);
@@ -1191,6 +1212,11 @@ async function callTrackerAISilent(promptObj) {
                 syncPredictionFromAI(data.response);
             } else if (status) {
                 status.innerText = 'Análisis anterior descartado; hay tiradas más recientes.';
+                trackerAiDisplayStatus = 'Nueva tirada; actualizando análisis IA...';
+                if (trackerAutoBet) {
+                    if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
+                    trackerAutoAnalysisTimer = setTimeout(askTrackerAIForAnalysisSilent, 300);
+                }
             }
             const finalUserMessage = promptObj.memoryText || 'Análisis automático del Tracker.';
             if (requestSource === 'live') {
@@ -1198,17 +1224,27 @@ async function callTrackerAISilent(promptObj) {
             } else if (status) {
                 status.innerText = 'Análisis Manual listo; los datos no se guardaron.';
             }
-        } else if (trackerSource === 'live' && trackerBankActiveSession()) {
-            trackerBankSetMessage(`La API de IA no devolvió análisis${data.error ? `: ${data.error}` : ''}. No se liquidará la tirada sin N4.`);
+        } else {
+            const reason = data.error || 'respuesta vacía';
+            trackerAiDisplayStatus = `Error IA: ${reason}`;
+            if (predEl && trackerBankActiveSession()) predEl.innerText = trackerAiDisplayStatus.slice(0, 72);
+            if (trackerSource === 'live' && trackerBankActiveSession()) {
+                trackerBankSetMessage(`La API de IA no devolvió análisis: ${reason}. No se liquidará la tirada sin N4.`);
+            }
         }
     } catch (err) {
+        if (requestId !== trackerAiRequestId) return;
         console.error('[Tracker AI Silent] ERROR:', err.name, err.message);
-        if (predEl) predEl.innerText = '--';
+        const reason = err.name === 'AbortError' ? 'tiempo agotado (30 s)' : (err.message || 'error de conexión');
+        trackerAiDisplayStatus = `Error IA: ${reason}`;
+        if (predEl) predEl.innerText = trackerBankActiveSession() ? trackerAiDisplayStatus.slice(0, 72) : '--';
         if (trackerSource === 'live' && trackerBankActiveSession()) {
-            trackerBankSetMessage(`Error de API de IA (${err.message}). La banca espera un N4 válido; no usa predicción local.`);
+            trackerBankSetMessage(`Error de API de IA (${reason}). La banca espera un N4 válido; no usa predicción local.`);
         }
     }
+    if (requestId === trackerAiRequestId) trackerAiRequestController = null;
     if (status && status.innerText === 'Pensando...') status.innerText = 'Esperando datos...';
+    renderTrackerBankroll();
 }
 
 function processTrackerNumber() {
@@ -1406,7 +1442,12 @@ function renderTracker() {
         } catch(e) {}
     }
     const predEl = document.getElementById('tracker-prediction');
-    if (predEl) predEl.innerText = 'ANALIZANDO...';
+    if (trackerSource === 'live' && trackerBankActiveSession()) {
+        const center = trackerBankPredictionCenter();
+        if (predEl) predEl.innerText = center === null ? trackerAiDisplayStatus.slice(0, 72) : `IA N4: ${center}`;
+    } else {
+        if (predEl) predEl.innerText = 'ANALIZANDO...';
+    }
     updateNeighborButton();
     const chartRes = renderModeTravelChart('trackerChart', trackerHistory, trackerManualAvgOffset);
     if (chartRes) { trackerCurrentAvgCW = chartRes.avgCW; trackerCurrentAvgCCW = chartRes.avgCCW; }
@@ -2351,8 +2392,10 @@ function syncPredictionFromAI(responseText) {
         trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 ? center : null;
         predEl.innerText = trackerAiN4Center === null ? 'IA: falta predicción N4 válida' : `IA N4: ${trackerAiN4Center}`;
         if (trackerAiN4Center === null) {
+            trackerAiDisplayStatus = 'IA no devolvió N4 válido';
             trackerBankSetMessage('La IA no devolvió el formato N4: número. No se liquidará ninguna tirada hasta recibir un N4 válido.');
         } else {
+            trackerAiDisplayStatus = `IA N4: ${trackerAiN4Center}`;
             trackerBankSetMessage(`Predicción N4 ${trackerAiN4Center} recibida de la IA. La banca liquidará la próxima tirada Live.`);
         }
         renderTrackerBankroll();
