@@ -2316,14 +2316,34 @@ function buildTrackerPrompt(ctx, userMessage) {
         lines.push(`Media salto: ${ctx.sig.avgTravel} | Desviacion: ${ctx.sig.stdDev}`);
     }
     const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
-    const dataBlock = aiOnlyBankroll
-        ? [
-            `Live reciente (${ctx.totalSpins} tiradas): ${ctx.spins.slice(-20).join(', ')}`,
-            `Saltos recientes: ${ctx.travels.slice(-15).map(t => (t > 0 ? '+' : '') + t).join(', ')}`,
-            `Dirección derecha: ${ctx.stats.cw}% / izquierda: ${100 - ctx.stats.cw}%`,
-            `Dominancia dirección: ${ctx.stats.domDir}% / zona: ${ctx.stats.domZone}%`
-        ].join('\n')
-        : lines.join('\n');
+    let dataBlock = lines.join('\n');
+    if (aiOnlyBankroll) {
+        const history = trackerHistory.slice(-400);
+        const recent = history.slice(-120);
+        const recentJumps = [];
+        for (let i = 1; i < recent.length; i++) recentJumps.push(calcDist(recent[i - 1], recent[i]));
+        const windowStats = [20, 50, 100, 400].map(size => {
+            const spins = history.slice(-size);
+            const jumps = [];
+            for (let i = 1; i < spins.length; i++) jumps.push(calcDist(spins[i - 1], spins[i]));
+            const directional = jumps.filter(jump => jump !== 0);
+            const right = directional.filter(jump => jump > 0).length;
+            const left = directional.length - right;
+            const big = jumps.filter(jump => Math.abs(jump) >= 10).length;
+            const small = jumps.length - big;
+            const avgDistance = jumps.length
+                ? (jumps.reduce((sum, jump) => sum + Math.abs(jump), 0) / jumps.length).toFixed(1)
+                : '0.0';
+            return `Ventana ${spins.length}/${size}: derecha ${right}/${directional.length}, izquierda ${left}/${directional.length}; BIG ${big}/${jumps.length}, SMALL ${small}/${jumps.length}; salto medio ${avgDistance}.`;
+        });
+        dataBlock = [
+            `Historial Live disponible: ${history.length} giros (máximo 400; serie antigua a reciente).`,
+            `Últimos ${recent.length} giros: ${recent.join(', ')}`,
+            `Saltos firmados de esa serie: ${recentJumps.map(jump => (jump > 0 ? '+' : '') + jump).join(', ')}`,
+            ...windowStats,
+            'Definiciones: salto positivo = derecha y negativo = izquierda según el orden de la ruleta europea; BIG = salto absoluto de 10 o más, SMALL = menor que 10.'
+        ].join('\n');
+    }
 
     const systemPrompt = `Sos experta en sistemas cilindricos rotacionales. Analiza con criterio propio y proyecta. No solo mires la dominancia: analiza DIRECCION y ZONA como dos sistemas separados que pueden estar en distintos regimenes. Habla SOLO de direccion (derecha/izquierda) y zona (BIG/SMALL). No uses la palabra "sector".
 
@@ -2391,7 +2411,7 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
     const finalSystemPrompt = aiOnlyBankroll
-        ? 'Analiza internamente los números Live y sus saltos para elegir una predicción propia. No uses predicciones heurísticas, targets ni candidatos generados por el sistema. Devuelve únicamente una línea con este formato exacto: N4: NN, donde NN es un entero de 0 a 36. No incluyas explicación, etiquetas adicionales ni bloques de texto.'
+        ? 'Metodología N4: analiza la serie cronológica de saltos firmados y compárala en las ventanas de 20, 50, 100 y hasta 400 giros. Da mayor atención al comportamiento reciente, pero contrástalo con las ventanas mayores; observa continuidad, alternancia y cambios de magnitud sin asumir que un patrón garantiza el siguiente resultado. Usa los números y estadísticas como evidencia, no como candidatos ni predicciones del sistema. Elige por criterio propio un centro de 0 a 36. Devuelve únicamente: N4: NN. Sin explicación ni texto adicional.'
         : systemPrompt;
     const predictionRequest = aiOnlyBankroll
         ? 'Analiza solo estos datos y devuelve únicamente N4: NN.'
