@@ -528,78 +528,7 @@ function trackerBankPredictionNumbers() {
 }
 
 function trackerBankPredictionCenter() {
-    if (trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center)) return trackerAiN4Center;
-    const signal = trackerLastSignal;
-    if (!signal) return null;
-    const direction = signal.mainDir || (signal.confidenceCW >= signal.confidenceCCW ? 'CW' : 'CCW');
-    const center = direction === 'CW' ? signal.targetCW : signal.targetCCW;
-    if (center === undefined || center === null || !Number.isInteger(Number(center))) return null;
-    return Number(center);
-}
-
-function trackerCenterForHistory(history) {
-    if (!Array.isArray(history) || history.length < 3 || typeof computeDealerSignature !== 'function' ||
-        typeof projectNextRound !== 'function' || typeof getIAMasterSignals !== 'function') return null;
-    try {
-        const travels = [];
-        for (let i = 1; i < history.length; i++) travels.push(calcDist(history[i - 1], history[i]));
-        const cwTravels = travels.filter(distance => distance > 0);
-        const ccwTravels = travels.filter(distance => distance < 0);
-        const avgCW = cwTravels.length ? cwTravels.reduce((sum, distance) => sum + distance, 0) / cwTravels.length : 9;
-        const avgCCW = ccwTravels.length ? ccwTravels.reduce((sum, distance) => sum + distance, 0) / ccwTravels.length : -9;
-        const signature = computeDealerSignature(history);
-        const projected = projectNextRound(history, {});
-        const signals = getIAMasterSignals(projected, signature, history, {
-            cw: avgCW, ccw: avgCCW, offset: trackerPredictorOffset
-        });
-        const signal = signals?.[0];
-        if (!signal) return null;
-        const wave = typeof analyzeTravelWave === 'function' && travels.length >= 8
-            ? analyzeTravelWave(travels.slice(-12))
-            : null;
-        let cwVotes = 0, ccwVotes = 0, voteCount = 0;
-        const signalDir = signal.mainDir || (signal.confidenceCW > signal.confidenceCCW ? 'CW' : 'CCW');
-        if (signalDir === 'CW') { cwVotes += 2; voteCount += 2; }
-        else { ccwVotes += 2; voteCount += 2; }
-        if (wave?.targetDir === 'CW') { cwVotes++; voteCount++; }
-        else if (wave?.targetDir === 'CCW') { ccwVotes++; voteCount++; }
-        if (signature?.avgTravel > 1) { cwVotes++; voteCount++; }
-        else if (signature?.avgTravel < -1) { ccwVotes++; voteCount++; }
-        const direction = cwVotes >= ccwVotes ? 'CW' : 'CCW';
-        const center = direction === 'CW' ? signal.targetCW : signal.targetCCW;
-        return Number.isInteger(Number(center)) && Number(center) >= 0 && Number(center) <= 36 ? Number(center) : null;
-    } catch (error) {
-        console.warn('[Tracker bankroll] No se pudo reconstruir la señal histórica.', error.message);
-        return null;
-    }
-}
-
-function reconcileTrackerBankSpins(liveSpins) {
-    if (trackerSource !== 'live' || !Array.isArray(liveSpins)) return;
-    const session = trackerBankActiveSession();
-    if (!session) return;
-    let startSpinId = session.start_spin_id == null ? NaN : Number(session.start_spin_id);
-    if (!Number.isFinite(startSpinId)) {
-        const entryIds = trackerBankEntries
-            .filter(entry => String(entry.session_id) === String(session._id))
-            .map(entry => Number(String(entry.spin_key || '').split(':').pop()))
-            .filter(Number.isFinite);
-        startSpinId = entryIds.length ? Math.max(...entryIds) : Math.max(0, ...liveSpins.map(spin => Number(spin.id) || 0));
-    }
-    const recorded = new Set(trackerBankEntries.map(entry => String(entry.spin_key || '')));
-    const queued = new Set(trackerBankPending.map(spin => `${trackerBankTableId()}:${spin.spinId}`));
-    for (let index = 0; index < liveSpins.length; index++) {
-        const spin = liveSpins[index];
-        const spinId = Number(spin.id);
-        if (!Number.isInteger(spinId) || spinId <= startSpinId) continue;
-        const spinKey = `${trackerBankTableId()}:${spinId}`;
-        if (recorded.has(spinKey) || queued.has(spinKey)) continue;
-        const historyBeforeSpin = liveSpins.slice(0, index).map(item => Number(item.number));
-        const predictionCenter = trackerCenterForHistory(historyBeforeSpin);
-        if (predictionCenter === null) continue;
-        enqueueTrackerBankSpin({ sessionId: session._id, spinId, number: Number(spin.number), predictionCenter });
-        queued.add(spinKey);
-    }
+    return trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) ? trackerAiN4Center : null;
 }
 
 function trackerBankSetMessage(message) {
@@ -682,7 +611,6 @@ function renderTrackerBankroll() {
     const grossReturn = Number((stake * 4).toFixed(2));
     const possibleProfit = Number((stake * 4 - cycle - stake).toFixed(2));
     const pred = trackerBankPredictionNumbers();
-    const predictionSource = trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) ? 'IA' : 'Tracker';
     const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     set('tracker-bank-capital-value', session ? trackerBankMoney(capital) : '--');
     set('tracker-bank-balance', session ? trackerBankMoney(balance) : '--');
@@ -695,7 +623,7 @@ function renderTrackerBankroll() {
     set('tracker-bank-cycle', active ? trackerBankMoney(roundTotal) : '--');
     set('tracker-bank-gross-return', active ? trackerBankMoney(grossReturn) : '--');
     set('tracker-bank-win-profit', active ? trackerBankMoney(possibleProfit) : '--');
-    set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? `${predictionSource} · ${pred.join(', ')}` : active ? 'Esperando señal Live' : '--');
+    set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? `IA · ${pred.join(', ')}` : active ? 'Esperando señal N4 de la IA' : '--');
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / --');
     set('tracker-bank-started', session ? trackerBankDate(session.starts_at || session.created_at) : '--');
     set('tracker-bank-ended', session?.closed_at ? trackerBankDate(session.closed_at) : session ? (session.status === 'draft' ? 'Sin iniciar' : 'En curso') : '--');
@@ -713,7 +641,7 @@ function renderTrackerBankroll() {
         const hasCenter = center !== null && Number.isInteger(Number(center));
         inline.textContent = active && trackerSource === 'live' && hasCenter
             ? `${Number(center)} N4 · ${trackerBankMoney(stake)}`
-            : '';
+            : active && trackerSource === 'live' ? 'Esperando predicción N4 de IA' : '';
         inline.title = active ? `Apuesta de la ronda ${round}, no el acumulado del ciclo.` : '';
     }
     const ledger = document.getElementById('tracker-bank-ledger');
@@ -739,6 +667,14 @@ async function startTrackerBankSession() {
     const startButton = document.getElementById('tracker-bank-start');
     if (trackerBankActiveSession()) return;
     if (startButton?.disabled) return;
+    if (trackerSource !== 'live') {
+        trackerBankSetMessage('Cambia el Tracker a LIVE antes de iniciar una sesión con IA.');
+        return;
+    }
+    if (!trackerMemoryAvailable) {
+        trackerBankSetMessage('MongoDB no está conectado; conecta la base antes de activar IA y banca.');
+        return;
+    }
     if (!Number.isFinite(capital) || capital <= 0 || !Number.isFinite(chip) || chip <= 0) {
         trackerBankSetMessage('Ingresa un capital y un valor de ficha válidos.');
         return;
@@ -756,9 +692,22 @@ async function startTrackerBankSession() {
         const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(session._id)}/activate`, { method: 'POST' });
         const data = await response.json();
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
+        trackerBankSessions = trackerBankMergeSessions(trackerBankSessions, [data.session]);
         trackerBankSelectedSessionId = session._id;
         await loadTrackerBankSessions();
-        trackerBankSetMessage('Sesión iniciada. Las tiradas Live se registran en MongoDB.');
+        trackerAiN4Center = null;
+        trackerLiveEventRevision++;
+        setTrackerPredictionMode('n4');
+        trackerAutoBet = true;
+        const autoButton = document.getElementById('tracker-auto-bet-btn');
+        if (autoButton) {
+            autoButton.innerHTML = '&#x1F916; IA AUTO: ON';
+            autoButton.classList.remove('off');
+        }
+        localStorage.setItem('tracker_auto_bet', '1');
+        renderTrackerBankroll();
+        trackerBankSetMessage('Sesión iniciada. IA N4 activa; esperando una predicción válida para liquidar Live.');
+        askTrackerAIForAnalysisSilent();
     } catch (error) {
         trackerBankSetMessage(`No se pudo iniciar la sesión en MongoDB: ${error.message}`);
     } finally {
@@ -873,7 +822,6 @@ async function syncTrackerFromLive() {
         trackerLiveSyncInFlight = false;
     }
     if (revisionAtStart !== trackerLiveEventRevision || !Array.isArray(liveSpins)) return;
-    reconcileTrackerBankSpins(liveSpins);
     const liveNumbers = liveSpins.map(spin => spin.number);
     const changed = liveNumbers.length !== trackerLiveHistory.length ||
         liveNumbers.some((number, index) => number !== trackerLiveHistory[index]);
@@ -980,6 +928,11 @@ async function saveTrackerAiMemory(userText, assistantText, source = trackerSour
 
 function setTrackerSource(source) {
     if (source !== 'manual' && source !== 'live') return;
+    if (trackerBankActiveSession() && source !== 'live') {
+        trackerBankSetMessage('La sesión de banca requiere Tracker LIVE y predicción IA.');
+        return;
+    }
+    if (trackerSource === source) return;
     if (trackerSource !== source) trackerLiveEventRevision++;
     trackerSource = source;
     trackerHistory = source === 'live' ? trackerLiveHistory : trackerManualHistory;
@@ -1180,7 +1133,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
     if (!batch) {
         renderTracker();
         // El análisis automático solo se ejecuta cuando IA AUTO está activado.
-        if (trackerAutoBet && trackerHistory.length >= 3) {
+        if (trackerAutoBet && trackerHistory.length > 0) {
             if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
             trackerAutoAnalysisTimer = setTimeout(() => {
                 askTrackerAIForAnalysisSilent();
@@ -1245,10 +1198,15 @@ async function callTrackerAISilent(promptObj) {
             } else if (status) {
                 status.innerText = 'Análisis Manual listo; los datos no se guardaron.';
             }
+        } else if (trackerSource === 'live' && trackerBankActiveSession()) {
+            trackerBankSetMessage(`La API de IA no devolvió análisis${data.error ? `: ${data.error}` : ''}. No se liquidará la tirada sin N4.`);
         }
     } catch (err) {
         console.error('[Tracker AI Silent] ERROR:', err.name, err.message);
         if (predEl) predEl.innerText = '--';
+        if (trackerSource === 'live' && trackerBankActiveSession()) {
+            trackerBankSetMessage(`Error de API de IA (${err.message}). La banca espera un N4 válido; no usa predicción local.`);
+        }
     }
     if (status && status.innerText === 'Pensando...') status.innerText = 'Esperando datos...';
 }
@@ -1293,6 +1251,10 @@ function clearTrackerData() {
 }
 
 function toggleTrackerAutoBet() {
+    if (trackerBankActiveSession() && trackerAutoBet) {
+        trackerBankSetMessage('La IA N4 debe permanecer activa durante la sesión de banca.');
+        return;
+    }
     if (!trackerAutoBet && !trackerMemoryAvailable) {
         const status = document.getElementById('tracker-ai-status');
         if (status) status.innerText = 'Conecta MongoDB Atlas para activar la IA del Tracker.';
@@ -1321,14 +1283,19 @@ function toggleTrackerAutoBet() {
 }
 
 function trackerBet9Neighbors() {
-    if (!trackerLastSignal || !trackerLastSignal.targetCW) return;
-    const center = trackerLastSignal.mainDir === 'CW' ? trackerLastSignal.targetCW : trackerLastSignal.targetCCW;
-    if (!center) return;
+    const center = trackerSource === 'live'
+        ? trackerAiN4Center
+        : trackerLastSignal?.[trackerLastSignal.mainDir === 'CW' ? 'targetCW' : 'targetCCW'];
+    if (!Number.isInteger(Number(center))) return;
     const neighbors = wheelNeighbors(center, 9);
     addTrackerChatMessage('ai', '&#x1F3B2; Apuesta sugerida: <strong>' + center + '</strong> + 9 vecinos ' + neighbors.join(', '));
 }
 
 function setTrackerPredictionMode(mode) {
+    if (trackerBankActiveSession() && mode !== 'n4') {
+        mode = 'n4';
+        trackerBankSetMessage('La sesión de banca usa exclusivamente predicciones N4 de la IA.');
+    }
     trackerConfig.prediction = mode;
     localStorage.setItem('tracker_ai_config', JSON.stringify(trackerConfig));
     ['n9','n4','both'].forEach(m => {
@@ -1351,10 +1318,14 @@ function updateNeighborButton() {
 }
 
 function trackerBetNeighbors() {
-    if (!trackerLastSignal || !trackerLastSignal.targetCW) return;
-    const dir = trackerLastSignal.mainDir || (trackerLastSignal.confidenceCW >= trackerLastSignal.confidenceCCW ? 'CW' : 'CCW');
-    const center = dir === 'CW' ? trackerLastSignal.targetCW : trackerLastSignal.targetCCW;
-    if (!center) return;
+    let center;
+    if (trackerSource === 'live') center = trackerAiN4Center;
+    else {
+        if (!trackerLastSignal) return;
+        const dir = trackerLastSignal.mainDir || (trackerLastSignal.confidenceCW >= trackerLastSignal.confidenceCCW ? 'CW' : 'CCW');
+        center = dir === 'CW' ? trackerLastSignal.targetCW : trackerLastSignal.targetCCW;
+    }
+    if (!Number.isInteger(Number(center))) return;
     const count = trackerConfig.prediction === 'n4' ? 4 : 9;
     const neighbors = wheelNeighbors(center, count);
     addTrackerChatMessage('ai', '&#x1F3B2; Apuesta sugerida: <strong>' + center + '</strong> + ' + count + ' vecinos ' + neighbors.join(', '));
@@ -1383,11 +1354,12 @@ function renderTracker() {
     const placedBadge = document.getElementById('tracker-placed-badge');
     if (statusText) statusText.innerText = trackerHistory.length > 2 ? 'Active' : 'Waiting';
     if (placedBadge) {
-        if (trackerAutoBet && trackerLastSignal) { placedBadge.innerText = 'Placed'; placedBadge.className = 'tracker-status-badge status-placed'; }
+        const hasPlacedPrediction = trackerSource === 'live' ? trackerAiN4Center !== null : Boolean(trackerLastSignal);
+        if (trackerAutoBet && hasPlacedPrediction) { placedBadge.innerText = 'Placed'; placedBadge.className = 'tracker-status-badge status-placed'; }
         else { placedBadge.innerText = 'Waiting'; placedBadge.className = 'tracker-status-badge status-wait'; }
     }
     let predText = '--';
-    if (trackerHistory.length >= 3) {
+    if (trackerHistory.length >= 3 && trackerSource !== 'live') {
         try {
             // â”€â”€ CALCULAR PROMEDIOS REALES DEL TRACKER â”€â”€
             const travels = [];
@@ -1620,23 +1592,6 @@ function buildTrackerAIContext() {
     const ccwCount = lastTravels.filter(d => d < 0).length;
     const totalDir = cwCount + ccwCount;
 
-    // â”€â”€ PREDICCIÃ“N DEL SISTEMA (6 targets fijos desde el Ãºltimo nÃºmero) â”€â”€
-    let targets = null;
-    if (trackerHistory.length > 0) {
-        const lastNum = trackerHistory[trackerHistory.length - 1];
-        const idx = WHEEL_NUMS.indexOf(lastNum);
-        if (idx !== -1) {
-            targets = {
-                n9CW:    WHEEL_NUMS[(idx + 9) % 37],   // N9 = casilla 9 derecha
-                n9CCW:   WHEEL_NUMS[(idx - 9 + 37) % 37],  // N9 = casilla 9 izquierda
-                underCW: WHEEL_NUMS[(idx + 4) % 37],   // N4 SMALL derecha
-                overCW:  WHEEL_NUMS[(idx + 14) % 37],  // N4 BIG derecha
-                underCCW: WHEEL_NUMS[(idx - 4 + 37) % 37],  // N4 SMALL izquierda
-                overCCW: WHEEL_NUMS[(idx - 14 + 37) % 37]   // N4 BIG izquierda
-            };
-        }
-    }
-
     // â”€â”€ FIRMA DEL DEALER â”€â”€
     let sig = null;
     if (typeof computeDealerSignature === 'function' && trackerHistory.length >= 12) {
@@ -1773,7 +1728,6 @@ function buildTrackerAIContext() {
             prevDominantDir
         },
         prediction: null,
-        targets,
         source: trackerSource,
         totalSpins: trackerHistory.length,
         sig, pat, stability,
@@ -2223,37 +2177,6 @@ function buildTrackerPrompt(ctx, userMessage) {
     if (ctx.sig) {
         lines.push(`Media salto: ${ctx.sig.avgTravel} | Desviacion: ${ctx.sig.stdDev}`);
     }
-    if (ctx.targets) {
-        const mode = trackerConfig.prediction || 'both';
-        const t = ctx.targets;
-        const targetLines = [];
-        if (mode === 'n9' || mode === 'both') {
-            targetLines.push(`  N9 derecha: ${t.n9CW}`);
-            targetLines.push(`  N9 izquierda: ${t.n9CCW}`);
-        }
-        if (mode === 'n4' || mode === 'both') {
-            targetLines.push(`  N4 SMALL derecha: ${t.underCW}`);
-            targetLines.push(`  N4 BIG derecha: ${t.overCW}`);
-            targetLines.push(`  N4 SMALL izquierda: ${t.underCCW}`);
-            targetLines.push(`  N4 BIG izquierda: ${t.overCCW}`);
-        }
-        lines.push(`Targets disponibles (elige UNO de los ${targetLines.length}):`);
-        lines.push(...targetLines);
-    }
-
-    const tv = analyzeThreeVariables(ctx);
-    lines.push(`ECUACION 3 VARIABLES (x = a + b):`);
-    for (const v of [tv.dir, tv.zone, tv.level]) {
-        lines.push(`  ${v.name}: ${v.value || '?'} | score ${v.score}/100 | ${v.note}`);
-    }
-    if (tv.derived) {
-        lines.push(`Mejores 2: ${tv.top2[0].name} + ${tv.top2[1].name} (scores ${tv.top2[0].score} y ${tv.top2[1].score})`);
-        lines.push(`Derivada: ${tv.derived.eq} => ${tv.derived.var} = ${tv.derived.value}`);
-        lines.push(`Prediccion ecuacion: ${tv.derived.value} ${tv.top2[0].value || tv.top2[1].value || ''}`.trim());
-    } else {
-        lines.push(`Las 3 variables detectadas: ${tv.dir.value} + ${tv.zone.value} + ${tv.level.value} (consistencia: ${checkTripleConsistency(tv.dir.value, tv.zone.value, tv.level.value) ? 'OK' : 'CONFLICTO'})`);
-    }
-
     const dataBlock = lines.join('\n');
 
     const systemPrompt = `Sos experta en sistemas cilindricos rotacionales. Analiza con criterio propio y proyecta. No solo mires la dominancia: analiza DIRECCION y ZONA como dos sistemas separados que pueden estar en distintos regimenes. Habla SOLO de direccion (derecha/izquierda) y zona (BIG/SMALL). No uses la palabra "sector".
@@ -2321,17 +2244,30 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
+    const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
+    const bankrollSystemPrompt = aiOnlyBankroll
+        ? systemPrompt.replace(
+            /Elige UNO de los targets listados en "Targets disponibles"\. Tu respuesta DEBE incluir el numero especifico del target elegido\. NO inventes numeros ni elijas numeros fuera de esa lista\./,
+            'Elige un número propio del 0 al 36, basándote solo en tu análisis de los datos.'
+        )
+        : systemPrompt;
+    const finalSystemPrompt = aiOnlyBankroll
+        ? `${bankrollSystemPrompt}\n\nMODO BANCA IA N4: la predicción la genera exclusivamente tu análisis; no hay predicción local ni lista de candidatos del Tracker. Devuelve obligatoriamente el centro en el formato exacto "N4: NN", donde NN es un único número entero entre 0 y 36. No afirmes N4 si no puedes proponer ese número.`
+        : systemPrompt;
+    const predictionRequest = aiOnlyBankroll
+        ? 'Analiza los datos y elige tu propia predicción N4. Responde empezando exactamente con N4: seguido de un número entre 0 y 36.'
+        : 'Proyecta UN target específico con su número. Justifica en una oración.';
     if (userMessage) {
         return {
-            system: systemPrompt,
+            system: finalSystemPrompt,
             memoryText: userMessage,
-            messages: [{ role: 'user', content: dataBlock + '\n\n' + userMessage + ' (proyecta UN target especifico con su numero)' }]
+            messages: [{ role: 'user', content: dataBlock + '\n\n' + userMessage + '\n' + predictionRequest }]
         };
     }
     return {
-        system: systemPrompt,
+        system: finalSystemPrompt,
         memoryText: 'Análisis automático del Tracker.',
-        messages: [{ role: 'user', content: dataBlock + '\n\nProyecta UN target especifico con su numero. Justifica en una oracion.' }]
+        messages: [{ role: 'user', content: dataBlock + '\n\n' + predictionRequest }]
     };
 }
 
@@ -2408,6 +2344,20 @@ function syncPredictionFromAI(responseText) {
     const predEl = document.getElementById('tracker-prediction');
     if (!predEl) return;
     const text = responseText;
+    const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
+    if (aiOnlyBankroll) {
+        const match = text.match(/\bN4\s*:\s*(3[0-6]|[0-2]?\d)\b/i);
+        const center = match ? Number(match[1]) : null;
+        trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 ? center : null;
+        predEl.innerText = trackerAiN4Center === null ? 'IA: falta predicción N4 válida' : `IA N4: ${trackerAiN4Center}`;
+        if (trackerAiN4Center === null) {
+            trackerBankSetMessage('La IA no devolvió el formato N4: número. No se liquidará ninguna tirada hasta recibir un N4 válido.');
+        } else {
+            trackerBankSetMessage(`Predicción N4 ${trackerAiN4Center} recibida de la IA. La banca liquidará la próxima tirada Live.`);
+        }
+        renderTrackerBankroll();
+        return;
+    }
 
     // extraer numeros (0-36)
     const numMatches = text.match(/\b(3[0-6]|[0-2]?[0-9])\b/g);
