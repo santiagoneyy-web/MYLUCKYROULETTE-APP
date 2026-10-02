@@ -539,6 +539,7 @@ function trackerBankPredictionNumbers() {
 }
 
 function trackerBankPredictionCenter() {
+    if (!trackerBankActiveSession()) return null;
     if (trackerPredictionSource === 'ai') {
         return trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) ? trackerAiN4Center : null;
     }
@@ -732,10 +733,14 @@ async function startTrackerBankSession() {
             autoButton.classList.remove('off');
         }
         localStorage.setItem('tracker_auto_bet', '1');
+        // Las predicciones empiezan solo después de que MongoDB activa la sesión.
+        renderTracker();
         renderTrackerBankroll();
         trackerBankSetMessage('');
         trackerAiLastRequestedRevision = -1;
-        askTrackerAIForAnalysisSilent(false, trackerPredictionSource === 'system');
+        if (trackerHistory.length >= 3) {
+            askTrackerAIForAnalysisSilent(false, trackerPredictionSource === 'system');
+        }
     } catch (error) {
         trackerBankSetMessage(`No se pudo iniciar la sesión en MongoDB: ${error.message}`);
     } finally {
@@ -946,7 +951,7 @@ async function loadTrackerAiMemory() {
                     ? `Memoria MongoDB restaurada: ${trackerAiMemory.messages.length} mensajes`
                     : 'MongoDB conectado. Memoria IA lista.';
         }
-        if (trackerPredictionSource === 'ai' && trackerAutoBet && trackerHistory.length >= 3 && (trackerSource !== 'live' || trackerBankActiveSession())) {
+        if (trackerPredictionSource === 'ai' && trackerAutoBet && trackerHistory.length >= 3 && trackerBankActiveSession()) {
             askTrackerAIForAnalysisSilent();
         }
     } catch (error) {
@@ -1227,10 +1232,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
     if (!batch) {
         renderTracker();
         // El análisis automático solo se ejecuta cuando IA AUTO está activado.
-        const requestAiPrediction = trackerAutoBet && trackerHistory.length > 0 && (
-            trackerPredictionSource === 'ai' && (trackerSource !== 'live' || trackerBankActiveSession()) ||
-            trackerPredictionSource === 'system' && trackerSource === 'live' && Boolean(trackerBankActiveSession())
-        );
+        const requestAiPrediction = trackerAutoBet && trackerHistory.length >= 3 && Boolean(trackerBankActiveSession());
         if (requestAiPrediction) {
             if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
             trackerAutoAnalysisTimer = setTimeout(() => {
@@ -1241,6 +1243,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
 }
 
 async function askTrackerAIForAnalysisSilent(isRetry = false, backgroundPrediction = false) {
+    if (!trackerBankActiveSession() || trackerHistory.length < 3) return;
     if (trackerPredictionSource !== 'ai' && !backgroundPrediction) return;
     if (isRetry && (trackerSource !== 'live' || !trackerBankActiveSession() || trackerAiRetryRevision !== trackerLiveEventRevision)) return;
     if (trackerSource === 'live') {
@@ -1269,6 +1272,7 @@ function scheduleTrackerAiRetry(revision) {
 }
 
 async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
+    if (!trackerBankActiveSession() || trackerHistory.length < 3) return;
     if (trackerPredictionSource !== 'ai' && !backgroundPrediction) return;
     const status = document.getElementById('tracker-ai-status');
     const predEl = document.getElementById('tracker-prediction');
@@ -1438,7 +1442,7 @@ function toggleTrackerAutoBet() {
     }
     localStorage.setItem('tracker_auto_bet', trackerAutoBet ? '1' : '0');
     console.log('[Tracker] IA AUTO:', trackerAutoBet ? 'ON (analiza cada número nuevo)' : 'OFF (análisis automático pausado)');
-    if (trackerPredictionSource === 'ai' && trackerAutoBet && trackerHistory.length >= 3) {
+    if (trackerPredictionSource === 'ai' && trackerAutoBet && trackerHistory.length >= 3 && trackerBankActiveSession()) {
         const status = document.getElementById('tracker-ai-status');
         if (status) status.innerText = 'IA AUTO ON: analizando...';
         askTrackerAIForAnalysisSilent();
@@ -1482,7 +1486,7 @@ function setTrackerPredictionSource(source) {
     const status = document.getElementById('tracker-ai-status');
     if (status) status.innerText = '';
     renderTracker();
-    if (source === 'ai' && trackerHistory.length > 0) askTrackerAIForAnalysisSilent();
+    if (source === 'ai' && trackerBankActiveSession() && trackerHistory.length >= 3) askTrackerAIForAnalysisSilent();
 }
 
 function setTrackerPredictionMode(mode) {
@@ -1547,7 +1551,7 @@ function renderTracker() {
         else { placedBadge.innerText = 'Waiting'; placedBadge.className = 'tracker-status-badge status-wait'; }
     }
     let predText = '--';
-    if (trackerHistory.length >= 3) {
+    if (trackerBankActiveSession() && trackerHistory.length >= 3) {
         try {
             // â”€â”€ CALCULAR PROMEDIOS REALES DEL TRACKER â”€â”€
             const travels = [];
@@ -1597,7 +1601,7 @@ function renderTracker() {
     const center = trackerBankPredictionCenter();
     if (predEl) {
         if (center !== null) predEl.innerText = `${trackerPredictionSource === 'ai' ? 'IA' : 'SISTEMA'} · N4: ${center}`;
-        else predEl.innerText = trackerPredictionSource === 'ai' ? 'ANALIZANDO IA ?' : '--';
+        else predEl.innerText = trackerBankActiveSession() && trackerHistory.length >= 3 && trackerPredictionSource === 'ai' ? 'ANALIZANDO IA ?' : '--';
     }
     document.getElementById('tracker-source-system')?.classList.toggle('active', trackerPredictionSource === 'system');
     document.getElementById('tracker-source-ai')?.classList.toggle('active', trackerPredictionSource === 'ai');
@@ -1766,6 +1770,7 @@ function sendTrackerChat() {
 
 // â”€â”€ AI Calls â”€â”€
 async function askTrackerAIForAnalysis() {
+    if (!trackerBankActiveSession() || trackerHistory.length < 3) return;
     if (trackerPredictionSource !== 'ai') {
         setTrackerPredictionSource('ai');
         return;
