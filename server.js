@@ -1964,6 +1964,7 @@ app.post('/api/ai/tracker', async (req, res) => {
     const requestStartedAt = Date.now();
     const { provider, model, apiKey, system, messages, purpose, tableId } = req.body;
     let requestTimeout = null;
+    let requestTimedOut = false;
     console.log('[Tracker AI] Request:', { provider, model, hasKey: !!apiKey, msgCount: messages?.length });
     if (!db.getUseMongo()) {
         return res.status(503).json({ success: false, error: 'MongoDB Atlas no está conectado. La IA del Tracker permanece pausada.' });
@@ -2000,7 +2001,7 @@ app.post('/api/ai/tracker', async (req, res) => {
             messages: [{ role: 'system', content: system }, ...requestMessages],
             temperature: purpose === 'prediction' ? 0.2 : 0.7,
             reasoning_effort: purpose === 'prediction' ? 'low' : 'medium',
-            max_tokens: purpose === 'prediction' ? 128 : 1024
+            max_tokens: purpose === 'prediction' ? 96 : 1024
         };
         const orHeaders = {
             'Content-Type': 'application/json',
@@ -2009,7 +2010,10 @@ app.post('/api/ai/tracker', async (req, res) => {
             'X-Title': 'Roulette-Classic'
         };
         const requestController = new AbortController();
-        requestTimeout = setTimeout(() => requestController.abort(), purpose === 'prediction' ? 8500 : 60000);
+        requestTimeout = setTimeout(() => {
+            requestTimedOut = true;
+            requestController.abort();
+        }, purpose === 'prediction' ? 12500 : 60000);
         const orResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: orHeaders,
@@ -2052,8 +2056,11 @@ app.post('/api/ai/tracker', async (req, res) => {
         res.json({ success: true, response: responseText });
     } catch (err) {
         clearTimeout(requestTimeout);
-        console.error('[Tracker AI] ERROR:', err.message, 'duration_ms:', Date.now() - requestStartedAt);
-        res.json({ success: false, error: err.message, provider: provider || 'openrouter' });
+        const errorMessage = requestTimedOut || err.name === 'AbortError'
+            ? 'OpenRouter superó el límite de 12.5 segundos para la predicción.'
+            : err.message;
+        console.error('[Tracker AI] ERROR:', errorMessage, 'duration_ms:', Date.now() - requestStartedAt);
+        res.json({ success: false, error: errorMessage, provider: provider || 'openrouter' });
     }
 });
 

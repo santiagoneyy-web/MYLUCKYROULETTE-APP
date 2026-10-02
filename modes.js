@@ -945,7 +945,7 @@ async function loadTrackerAiMemory() {
         }
         const status = document.getElementById('tracker-ai-status');
         if (status) {
-            status.innerText = trackerBankActiveSession() ? 'ANALIZANDO...' : trackerSource === 'manual'
+            status.innerText = trackerPredictionSource === 'system' ? '' : trackerBankActiveSession() ? 'ANALIZANDO...' : trackerSource === 'manual'
                 ? 'MongoDB conectado. Manual usa conocimiento Live; no se guarda.'
                 : trackerAiMemory.messages.length
                     ? `Memoria MongoDB restaurada: ${trackerAiMemory.messages.length} mensajes`
@@ -958,7 +958,7 @@ async function loadTrackerAiMemory() {
         if (loadId === trackerMemoryLoadId) trackerMemoryAvailable = false;
         console.warn('[Tracker] No se pudo cargar la memoria guardada:', error.message);
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = error.message || 'MongoDB Atlas no conectado. IA pausada.';
+        if (status) status.innerText = trackerPredictionSource === 'system' ? '' : error.message || 'MongoDB Atlas no conectado. IA pausada.';
     }
 }
 
@@ -969,7 +969,7 @@ function pauseTrackerForMongo() {
         trackerAutoAnalysisTimer = null;
     }
     const status = document.getElementById('tracker-ai-status');
-    if (status) status.innerText = 'MongoDB Atlas desconectado; Tracker pausado.';
+    if (status) status.innerText = trackerPredictionSource === 'system' ? '' : 'MongoDB Atlas desconectado; Tracker pausado.';
 }
 
 async function saveTrackerAiMemory(userText, assistantText, source = trackerSource, baseMemory = trackerAiMemory, context = buildTrackerAIContext()) {
@@ -998,7 +998,7 @@ async function saveTrackerAiMemory(userText, assistantText, source = trackerSour
         if (result.storage !== 'mongodb') throw new Error('El servidor no confirmó guardado en MongoDB Atlas.');
         if (source === trackerSource) trackerAiMemory = { summary, messages: nextMessages, context: savedContext };
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = trackerBankActiveSession() ? 'ANALIZANDO...' : 'Análisis y memoria guardados en MongoDB';
+        if (status) status.innerText = trackerPredictionSource === 'system' ? '' : trackerBankActiveSession() ? 'ANALIZANDO...' : 'Análisis y memoria guardados en MongoDB';
     } catch (error) {
         if (source === trackerSource) pauseTrackerForMongo();
         console.error('[Tracker] No se pudo guardar la memoria de IA:', error.message);
@@ -1227,7 +1227,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
     if (trackerSource === 'live' && !batch) {
         console.log('[Tracker Live] NÃºmero recibido:', n, '| Total:', trackerHistory.length);
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = trackerPredictionSource === 'ai' && trackerBankActiveSession() ? 'ANALIZANDO IA ?' : 'Dato live recibido: ' + n;
+        if (status) status.innerText = trackerPredictionSource === 'system' ? '' : trackerBankActiveSession() ? 'ANALIZANDO IA ?' : 'Dato live recibido: ' + n;
     }
     if (!batch) {
         renderTracker();
@@ -1269,6 +1269,13 @@ function scheduleTrackerAiRetry(revision) {
     if (predEl && trackerPredictionSource === 'ai') predEl.innerText = trackerAiDisplayStatus;
     if (status) status.innerText = '';
     renderTrackerBankroll();
+    if (trackerAiRetryTimer || trackerAiRetryCount >= 2) return;
+    trackerAiRetryCount++;
+    trackerAiRetryTimer = setTimeout(() => {
+        trackerAiRetryTimer = null;
+        if (revision !== trackerLiveEventRevision || !trackerBankActiveSession()) return;
+        askTrackerAIForAnalysisSilent(true, trackerPredictionSource === 'system');
+    }, trackerAiRetryCount * 700);
 }
 
 async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
@@ -1324,7 +1331,7 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
                     ? `${promptObj.system}\n\n${memoryContext}`
                     : promptObj.system
         };
-        const timeoutId = setTimeout(() => controller.abort(), aiPrediction ? 9000 : 30000);
+        const timeoutId = setTimeout(() => controller.abort(), aiPrediction ? 14500 : 30000);
         let res;
         try {
             res = await fetch('/api/ai/tracker', {
@@ -1354,7 +1361,7 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
                     trackerAiRetryTimer = null;
                 }
             } else if (status) {
-                status.innerText = trackerBankActiveSession() ? 'ANALIZANDO...' : 'Análisis anterior descartado; hay tiradas más recientes.';
+                status.innerText = trackerPredictionSource === 'system' ? '' : trackerBankActiveSession() ? 'ANALIZANDO...' : 'Análisis anterior descartado; hay tiradas más recientes.';
                 trackerAiDisplayStatus = 'ANALIZANDO IA ?';
                 if (trackerAutoBet) {
                     if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
@@ -1448,11 +1455,11 @@ function toggleTrackerAutoBet() {
         askTrackerAIForAnalysisSilent();
     } else if (trackerAutoBet) {
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = 'IA AUTO ON: esperando 3+ números...';
+        if (status) status.innerText = trackerPredictionSource === 'system' ? '' : 'IA AUTO ON: esperando 3+ números...';
     } else {
         if (trackerAutoAnalysisTimer) { clearTimeout(trackerAutoAnalysisTimer); trackerAutoAnalysisTimer = null; }
         const status = document.getElementById('tracker-ai-status');
-        if (status) status.innerText = 'IA AUTO OFF: análisis automático pausado';
+        if (status) status.innerText = trackerPredictionSource === 'system' ? '' : 'IA AUTO OFF: análisis automático pausado';
     }
 }
 
@@ -2534,7 +2541,7 @@ async function callTrackerAI(promptObj, isAuto) {
                 : promptObj.system
         };
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), isAuto && trackerPredictionSource === 'ai' ? 9000 : 30000);
+        const timeoutId = setTimeout(() => controller.abort(), isAuto && trackerPredictionSource === 'ai' ? 14500 : 30000);
         const res = await fetch('/api/ai/tracker', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
