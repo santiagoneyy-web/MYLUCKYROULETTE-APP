@@ -33,6 +33,8 @@ let manualModeAvgOffset = 0;
 // â”€â”€ TRACKER MODE STATE â”€â”€
 const trackerManualHistory = [];
 const trackerLiveHistory = [];
+const trackerLiveSpinIds = new Set();
+let trackerLiveIdsTableId = null;
 let trackerHistory = trackerManualHistory;
 let trackerLastSignal = null;
 let trackerAiN4Center = null;
@@ -831,14 +833,48 @@ async function syncTrackerFromLive() {
         trackerLiveSyncInFlight = false;
     }
     if (revisionAtStart !== trackerLiveEventRevision || !Array.isArray(liveSpins)) return;
+    const tableId = String(trackerBankTableId());
+    if (trackerLiveIdsTableId !== tableId) {
+        trackerLiveSpinIds.clear();
+        trackerLiveIdsTableId = tableId;
+    }
+    const unseenSpins = liveSpins
+        .filter(spin => !trackerLiveSpinIds.has(spin.id))
+        .sort((left, right) => left.id - right.id);
+    liveSpins.forEach(spin => trackerLiveSpinIds.add(spin.id));
     const liveNumbers = liveSpins.map(spin => spin.number);
-    const changed = liveNumbers.length !== trackerLiveHistory.length ||
+    const changed = liveNumbers.length !== trackerLiveHistory.length || unseenSpins.length > 0 ||
         liveNumbers.some((number, index) => number !== trackerLiveHistory[index]);
     if (changed) {
+        const activeSession = trackerBankActiveSession();
+        let hasEligibleNewSpin = false;
+        if (activeSession && unseenSpins.length) {
+            const settledThrough = Number(activeSession.last_settled_spin_id ?? activeSession.start_spin_id ?? 0);
+            const firstUnseen = unseenSpins.find(spin => spin.id > settledThrough);
+            if (firstUnseen) {
+                hasEligibleNewSpin = true;
+                const predictionCenter = trackerBankPredictionCenter();
+                if (Number.isInteger(predictionCenter)) {
+                    enqueueTrackerBankSpin({
+                        sessionId: activeSession._id,
+                        spinId: firstUnseen.id,
+                        number: firstUnseen.number,
+                        predictionCenter
+                    });
+                }
+                trackerAiN4Center = null;
+                trackerAiDisplayStatus = 'ANALIZANDO...';
+                trackerLiveEventRevision++;
+            }
+        }
         trackerLiveHistory.length = 0;
         for (const number of liveNumbers) trackerLiveHistory.push(number);
         renderTracker();
         console.log('[Tracker] Synced ' + trackerLiveHistory.length + ' spins from Live mode');
+        if (activeSession && hasEligibleNewSpin && trackerAutoBet) {
+            if (trackerAutoAnalysisTimer) clearTimeout(trackerAutoAnalysisTimer);
+            trackerAutoAnalysisTimer = setTimeout(askTrackerAIForAnalysisSilent, 500);
+        }
     }
     if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
 }
@@ -1120,6 +1156,10 @@ let trackerAutoAnalysisTimer = null;
 
 function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = null) {
     if (source !== trackerSource || !Number.isInteger(n) || n < 0 || n > 36) return;
+    if (source === 'live' && Number.isInteger(Number(spinId)) && Number(spinId) > 0) {
+        trackerLiveSpinIds.add(Number(spinId));
+        trackerLiveIdsTableId = String(trackerBankTableId());
+    }
     if (source === 'manual' && !trackerMemoryAvailable) {
         const status = document.getElementById('tracker-ai-status');
         if (status) status.innerText = 'MongoDB Atlas no conectado; Manual está pausado.';

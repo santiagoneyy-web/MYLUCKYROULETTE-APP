@@ -1883,23 +1883,8 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                         ? priorId
                         : Number(session.start_spin_id || 0);
                 }
-                const earlierLiveSpins = await Spin.find({
-                    table_id: tableId,
-                    source_quality: 'live',
-                    id: { $gt: session.last_settled_spin_id, $lt: spinId }
-                }).sort({ id: 1 }).select('id').session(mongoSession).lean().exec();
-                let missingEarlierSpin = null;
-                for (const earlierLiveSpin of earlierLiveSpins) {
-                    const earlierKey = `${tableId}:${earlierLiveSpin.id}`;
-                    const earlierEntry = await TrackerBankrollEntry.findOne({ session_id: session._id, spin_key: earlierKey })
-                        .session(mongoSession).select('_id').lean().exec();
-                    if (!earlierEntry) {
-                        missingEarlierSpin = earlierLiveSpin;
-                        break;
-                    }
-                }
-                if (missingEarlierSpin) {
-                    result = { error: 'Hay una tirada Live anterior pendiente de liquidar.', status: 409, retryable: true };
+                if (spinId <= Number(session.last_settled_spin_id)) {
+                    result = { error: 'La tirada ya quedó atrás de la última apuesta liquidada.', status: 409 };
                     return;
                 }
                 const stake = trackerBankroll.getStake(session.chip_value, session.current_round);
