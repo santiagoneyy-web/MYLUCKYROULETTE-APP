@@ -1843,11 +1843,18 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     const number = Number(req.body.number);
     const predictionCenter = Number(req.body.prediction_center);
     const rawContext = req.body.context_snapshot && typeof req.body.context_snapshot === 'object' ? req.body.context_snapshot : {};
+    const systemCenter = rawContext.system_center == null ? null : Number(rawContext.system_center);
+    const aiCenter = rawContext.ai_center == null ? null : Number(rawContext.ai_center);
     const contextSnapshot = {
         history: Array.isArray(rawContext.history)
             ? rawContext.history.slice(-80).map(Number).filter(value => Number.isInteger(value) && value >= 0 && value <= 36)
             : [],
-        prediction_source: rawContext.prediction_source === 'ai' ? 'ai' : 'system'
+        prediction_source: rawContext.prediction_source === 'ai' ? 'ai' : 'system',
+        system_center: Number.isInteger(systemCenter) && systemCenter >= 0 && systemCenter <= 36 ? systemCenter : null,
+        ai_center: Number.isInteger(aiCenter) && aiCenter >= 0 && aiCenter <= 36 ? aiCenter : null,
+        ai_won: Number.isInteger(aiCenter) && aiCenter >= 0 && aiCenter <= 36
+            ? wheelNeighbors(aiCenter, 4).includes(number)
+            : null
     };
     const predictionNumbers = Number.isInteger(predictionCenter) && predictionCenter >= 0 && predictionCenter <= 36
         ? wheelNeighbors(predictionCenter, 4)
@@ -1972,16 +1979,16 @@ app.post('/api/ai/tracker', async (req, res) => {
             try {
                 const aiEntries = await TrackerBankrollEntry.find({
                     table_id: Number(tableId),
-                    'context_snapshot.prediction_source': 'ai'
-                }).sort({ created_at: -1 }).limit(120).select('number prediction_center won context_snapshot.history round created_at').lean().exec();
-                const wins = aiEntries.filter(entry => entry.won).length;
-                const losses = aiEntries.length - wins;
+                    'context_snapshot.ai_won': { $in: [true, false] }
+                }).sort({ created_at: -1 }).limit(120).select('context_snapshot.ai_center context_snapshot.ai_won context_snapshot.history round created_at').lean().exec();
+                const wins = aiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
+                const losses = aiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
                 const samples = aiEntries.slice(0, 12).reverse().map(entry => {
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-10).join(',') : '';
-                    return `centro ${entry.prediction_center}, salió ${entry.number}, ${entry.won ? 'acierto' : 'fallo'}${history ? ` (previos ${history})` : ''}`;
+                    return `centro IA ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto' : 'fallo'}${history ? ` (previos ${history})` : ''}`;
                 });
-                const feedback = `RESULTADOS PREVIOS DE IA: ${aiEntries.length} liquidaciones, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay liquidaciones IA previas.'} Úsalos como referencia breve, sin asumir que se repetirá un resultado.`;
+                const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Úsalos como referencia breve, sin asumir que se repetirá un resultado.`;
                 const lastMessage = requestMessages[requestMessages.length - 1];
                 if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}`;
             } catch (learningError) {
