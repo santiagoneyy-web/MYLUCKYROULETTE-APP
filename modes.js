@@ -628,53 +628,87 @@ function trackerPredictionMetricCandidates(mode = trackerConfig.prediction) {
         Number.isInteger(metric.number) && metric.number >= 0 && metric.number <= 36);
 }
 
-function trackerSystemDirectionChoice() {
-    const fallback = trackerLastSignal?.mainDir ||
-        (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
-    if (trackerHistory.length < 7) return { direction: fallback, basis: 'prediction' };
+function trackerSystemAxisChoice(travels, kind, fallbackValue) {
+    const symbolValues = kind === 'dir'
+        ? { R: 'CW', L: 'CCW' }
+        : kind === 'zone'
+            ? { B: 'BIG', S: 'SMALL' }
+            : { O: 'OVER', U: 'UNDER' };
+    const pattern = detectTrackerTurbulence(travels.slice(-30), kind, true);
+    if (pattern?.next_state && Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state)) {
+        return {
+            value: symbolValues[pattern.next_state],
+            basis: 'pattern',
+            pattern: pattern.name,
+            confidence: Number(pattern.confidence) || 65
+        };
+    }
 
+    const symbols = travels.slice(-30).map(distance => kind === 'dir'
+        ? (distance >= 0 ? 'R' : 'L')
+        : kind === 'zone'
+            ? (Math.abs(distance) >= 10 ? 'B' : 'S')
+            : (((distance >= 0 && Math.abs(distance) >= 10) || (distance < 0 && Math.abs(distance) < 10)) ? 'O' : 'U'));
+    const streaks = extractStreaks(symbols);
+    const currentStreak = streaks[streaks.length - 1];
+    // A run of 3 can be a false break during turbulence; require 4 for dominance.
+    if (currentStreak?.len >= 4) {
+        return {
+            value: symbolValues[currentStreak.type],
+            basis: 'dominance',
+            pattern: null,
+            confidence: Math.min(90, 65 + (currentStreak.len - 4) * 5)
+        };
+    }
+    return { value: fallbackValue, basis: 'prediction', pattern: null, confidence: 50 };
+}
+
+function trackerSystemAxisGuidance() {
     const travels = [];
     for (let i = 1; i < trackerHistory.length; i++) {
         travels.push(calcDist(trackerHistory[i - 1], trackerHistory[i]));
     }
-    const recent = travels.slice(-30);
-    const pattern = detectTrackerTurbulence(recent, 'dir', true);
-    if (pattern?.next_state === 'R' || pattern?.next_state === 'L') {
-        return {
-            direction: pattern.next_state === 'R' ? 'CW' : 'CCW',
-            basis: 'pattern',
-            pattern: pattern.name
-        };
-    }
+    const fallbackDirection = trackerLastSignal?.mainDir ||
+        (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
+    const recentSpins = trackerHistory.slice(-21);
+    const recentJumps = recentSpins.slice(1).map((number, index) => calcDist(recentSpins[index], number));
+    const bigCount = recentJumps.filter(jump => Math.abs(jump) >= 10).length;
+    const fallbackZone = bigCount <= recentJumps.length / 2 ? 'SMALL' : 'BIG';
+    const fallbackLevel = ((fallbackDirection === 'CW' && fallbackZone === 'BIG') ||
+        (fallbackDirection === 'CCW' && fallbackZone === 'SMALL')) ? 'OVER' : 'UNDER';
+    return {
+        direction: trackerSystemAxisChoice(travels, 'dir', fallbackDirection),
+        zone: trackerSystemAxisChoice(travels, 'zone', fallbackZone),
+        level: trackerSystemAxisChoice(travels, 'nivel', fallbackLevel)
+    };
+}
 
-    const directionStreaks = extractStreaks(recent.map(distance => distance >= 0 ? 'R' : 'L'));
-    const currentStreak = directionStreaks[directionStreaks.length - 1];
-    // A three-spin run can be a false break during turbulence; keep it as
-    // observation. Require four in a row before treating direction as a live dominance.
-    if (currentStreak?.len >= 4) {
-        return {
-            direction: currentStreak.type === 'R' ? 'CW' : 'CCW',
-            basis: 'dominance',
-            pattern: null
-        };
-    }
+function trackerSystemN4MetricZone(guidance) {
+    const zoneMetric = guidance.zone.value === 'SMALL' ? 'S' : 'B';
+    const levelMetric = guidance.direction.value === 'CW'
+        ? (guidance.level.value === 'UNDER' ? 'S' : 'B')
+        : (guidance.level.value === 'OVER' ? 'S' : 'B');
+    const priority = { prediction: 1, dominance: 2, pattern: 3 };
+    const zonePriority = priority[guidance.zone.basis] || 0;
+    const levelPriority = priority[guidance.level.basis] || 0;
 
-    return { direction: fallback, basis: 'prediction', pattern: null };
+    if (zonePriority !== levelPriority) return zonePriority > levelPriority ? zoneMetric : levelMetric;
+    if (zoneMetric === levelMetric) return zoneMetric;
+    if (guidance.zone.confidence !== guidance.level.confidence) {
+        return guidance.zone.confidence > guidance.level.confidence ? zoneMetric : levelMetric;
+    }
+    // When two equally strong observations disagree, keep the direct zone signal.
+    return zoneMetric;
 }
 
 function trackerSystemPredictionMetric() {
     if (!trackerLastSignal) return null;
-    const direction = trackerSystemDirectionChoice().direction;
+    const guidance = trackerSystemAxisGuidance();
+    const direction = guidance.direction.value;
     const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
     let selected;
     if (trackerConfig.prediction === 'n4') {
-        // Preserve SISTEMA's direction vote; choose its small/big N4 metric
-        // from the recent jump sizes using the app's SMALL/BIG boundary.
-        const recentSpins = trackerHistory.slice(-21);
-        const jumps = recentSpins.slice(1).map((number, index) => calcDist(recentSpins[index], number));
-        const bigCount = jumps.filter(jump => Math.abs(jump) >= 10).length;
-        const isSmall = bigCount <= jumps.length / 2;
-        const label = `${direction}_N4${isSmall ? 'S' : 'B'}`;
+        const label = `${direction}_N4${trackerSystemN4MetricZone(guidance)}`;
         selected = metrics.find(metric => metric.label === label);
     } else {
         // N9 is SISTEMA's native center; Both allows it while IA can choose any family.
@@ -690,8 +724,8 @@ function trackerSystemPredictionCenter() {
 
 function trackerSystemReasoningSnapshot() {
     if (!trackerLastSignal) return null;
-    const directionChoice = trackerSystemDirectionChoice();
-    const direction = directionChoice.direction;
+    const axisGuidance = trackerSystemAxisGuidance();
+    const direction = axisGuidance.direction.value;
     const center = trackerSystemPredictionCenter();
     const recentHistory = trackerHistory.slice(-21);
     const recentDistances = [];
@@ -700,8 +734,14 @@ function trackerSystemReasoningSnapshot() {
         signal: String(trackerLastSignal.name || 'System'),
         rule: String(trackerLastSignal.rule || 'N9'),
         direction,
-        direction_basis: directionChoice.basis,
-        direction_pattern: directionChoice.pattern || null,
+        direction_basis: axisGuidance.direction.basis,
+        direction_pattern: axisGuidance.direction.pattern || null,
+        zone_projection: axisGuidance.zone.value,
+        zone_basis: axisGuidance.zone.basis,
+        zone_pattern: axisGuidance.zone.pattern || null,
+        level_projection: axisGuidance.level.value,
+        level_basis: axisGuidance.level.basis,
+        level_pattern: axisGuidance.level.pattern || null,
         selected_target: center,
         metric_label: trackerSystemPredictionMetric()?.label || 'N9',
         target_cw: Number(trackerLastSignal.targetCW),
