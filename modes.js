@@ -628,10 +628,43 @@ function trackerPredictionMetricCandidates(mode = trackerConfig.prediction) {
         Number.isInteger(metric.number) && metric.number >= 0 && metric.number <= 36);
 }
 
+function trackerSystemDirectionChoice() {
+    const fallback = trackerLastSignal?.mainDir ||
+        (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
+    if (trackerHistory.length < 7) return { direction: fallback, basis: 'prediction' };
+
+    const travels = [];
+    for (let i = 1; i < trackerHistory.length; i++) {
+        travels.push(calcDist(trackerHistory[i - 1], trackerHistory[i]));
+    }
+    const recent = travels.slice(-30);
+    const pattern = detectTrackerTurbulence(recent, 'dir', true);
+    if (pattern?.next_state === 'R' || pattern?.next_state === 'L') {
+        return {
+            direction: pattern.next_state === 'R' ? 'CW' : 'CCW',
+            basis: 'pattern',
+            pattern: pattern.name
+        };
+    }
+
+    const directionStreaks = extractStreaks(recent.map(distance => distance >= 0 ? 'R' : 'L'));
+    const currentStreak = directionStreaks[directionStreaks.length - 1];
+    // A three-spin run can be a false break during turbulence; keep it as
+    // observation. Require four in a row before treating direction as a live dominance.
+    if (currentStreak?.len >= 4) {
+        return {
+            direction: currentStreak.type === 'R' ? 'CW' : 'CCW',
+            basis: 'dominance',
+            pattern: null
+        };
+    }
+
+    return { direction: fallback, basis: 'prediction', pattern: null };
+}
+
 function trackerSystemPredictionMetric() {
     if (!trackerLastSignal) return null;
-    const direction = trackerLastSignal?.mainDir ||
-        (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
+    const direction = trackerSystemDirectionChoice().direction;
     const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
     let selected;
     if (trackerConfig.prediction === 'n4') {
@@ -657,8 +690,8 @@ function trackerSystemPredictionCenter() {
 
 function trackerSystemReasoningSnapshot() {
     if (!trackerLastSignal) return null;
-    const direction = trackerLastSignal.mainDir ||
-        (trackerLastSignal.confidenceCW >= trackerLastSignal.confidenceCCW ? 'CW' : 'CCW');
+    const directionChoice = trackerSystemDirectionChoice();
+    const direction = directionChoice.direction;
     const center = trackerSystemPredictionCenter();
     const recentHistory = trackerHistory.slice(-21);
     const recentDistances = [];
@@ -667,6 +700,8 @@ function trackerSystemReasoningSnapshot() {
         signal: String(trackerLastSignal.name || 'System'),
         rule: String(trackerLastSignal.rule || 'N9'),
         direction,
+        direction_basis: directionChoice.basis,
+        direction_pattern: directionChoice.pattern || null,
         selected_target: center,
         metric_label: trackerSystemPredictionMetric()?.label || 'N9',
         target_cw: Number(trackerLastSignal.targetCW),
@@ -2303,7 +2338,30 @@ function buildTrackerAIContext() {
     };
 }
 
-function detectTrackerTurbulence(travels, kind = 'dir') {
+function trackerPatternExpectedSymbol(streaks, motif, currentSymbol, currentStreak) {
+    if (!streaks.length || !motif.length) return null;
+    const runLengths = streaks.map(streak => streak.len);
+    let bestMatch = 0;
+    let nextRunLength = motif[0];
+    const maxMatch = Math.min(runLengths.length, motif.length);
+    for (let offset = 0; offset < motif.length; offset++) {
+        for (let matchLength = maxMatch; matchLength > bestMatch; matchLength--) {
+            const suffix = runLengths.slice(-matchLength);
+            const matches = suffix.every((length, index) => length === motif[(offset + index) % motif.length]);
+            if (matches) {
+                bestMatch = matchLength;
+                nextRunLength = motif[(offset + matchLength) % motif.length];
+                break;
+            }
+        }
+    }
+    const opposite = currentSymbol === 'R' ? 'L' : currentSymbol === 'L' ? 'R'
+        : currentSymbol === 'B' ? 'S' : currentSymbol === 'S' ? 'B'
+            : currentSymbol === 'O' ? 'U' : 'O';
+    return currentStreak < nextRunLength ? currentSymbol : opposite;
+}
+
+function detectTrackerTurbulence(travels, kind = 'dir', allowActionablePatternOverStreakObservation = false) {
     if (travels.length < 6) return null;
     const symbols = [];
     for (let i = Math.max(0, travels.length - 12); i < travels.length; i++) {
@@ -2339,11 +2397,13 @@ function detectTrackerTurbulence(travels, kind = 'dir') {
     const runSeq = runLens.join('');
     const label = kind === 'dir' ? 'dir' : kind === 'nivel' ? 'nivel' : 'zona';
 
-    // Una racha de 3 no confirma por sí sola un cambio de régimen. Se registra
-    // como observación y el analista contrasta bloques y frecuencias históricas.
-    if (currentStreak >= 3) {
-        return { name: `RACHA EN OBSERVACIÓN ${label.toUpperCase()}`, type: 'streak_observation', desc: `${currentStreak} ${streakType} seguidos: posible falsa ruptura; revisar el régimen`, action: 'OBSERVE', next: 'no confirmar ruptura por esta racha sola' };
-    }
+    // Una racha de 3 no confirma por sí sola un cambio de régimen. En el
+    // selector de SISTEMA se comprueban primero los motivos repetidos claros;
+    // si no hay uno, la racha sigue siendo solo una observación.
+    const streakObservation = currentStreak >= 3
+        ? { name: `RACHA EN OBSERVACIÓN ${label.toUpperCase()}`, type: 'streak_observation', desc: `${currentStreak} ${streakType} seguidos: posible falsa ruptura; revisar el régimen`, action: 'OBSERVE', next: 'no confirmar ruptura por esta racha sola' }
+        : null;
+    if (streakObservation && !allowActionablePatternOverStreakObservation) return streakObservation;
 
     // --- BLOQUES DE TAMANO VARIABLE (2-5, 3-1, 4-2, etc.) ---
     // Razonamiento: los bloques alternan tipos. Si el bloque actual es MAS CORTO
@@ -2376,37 +2436,38 @@ function detectTrackerTurbulence(travels, kind = 'dir') {
                 : '';
             if (cur.len < prevSame.len) {
                 const conf = cur.len === prevSame.len - 1 ? 74 : 68;
-                return { name: `BLOQUES ${label.toUpperCase()} (completar)`, type: 'block_complete', desc: `bloques alternos [${blockSeq}]: el bloque ${cur.type}${cur.len} es menor al previo ${cur.type}${prevSame.len}, se completa${anticipation}`, action: 'FOLLOW_STREAK', next: `completar bloque: sigue ${cur.type}${anticipation}`, confidence: conf, anticipation: aging ? `el patron envejece: ${opposite} puede romper` : null };
+                return { name: `BLOQUES ${label.toUpperCase()} (completar)`, type: 'block_complete', desc: `bloques alternos [${blockSeq}]: el bloque ${cur.type}${cur.len} es menor al previo ${cur.type}${prevSame.len}, se completa${anticipation}`, action: 'FOLLOW_STREAK', next: `completar bloque: sigue ${cur.type}${anticipation}`, next_state: cur.type, confidence: conf, anticipation: aging ? `el patron envejece: ${opposite} puede romper` : null };
             } else {
-                return { name: `BLOQUES ${label.toUpperCase()} (cambio)`, type: 'block_switch', desc: `bloques alternos [${blockSeq}]: el bloque ${cur.type}${cur.len} ya completo el ciclo del previo ${cur.type}${prevSame.len}, cambia${anticipation}`, action: 'SWITCH', next: `bloque completo: sigue ${opposite}${anticipation}`, confidence: 68, anticipation: aging ? `el patron envejece: ${opposite} puede romper` : null };
+                return { name: `BLOQUES ${label.toUpperCase()} (cambio)`, type: 'block_switch', desc: `bloques alternos [${blockSeq}]: el bloque ${cur.type}${cur.len} ya completo el ciclo del previo ${cur.type}${prevSame.len}, cambia${anticipation}`, action: 'SWITCH', next: `bloque completo: sigue ${opposite}${anticipation}`, next_state: opposite, confidence: 68, anticipation: aging ? `el patron envejece: ${opposite} puede romper` : null };
             }
         }
     }
 
     // --- PATRONES DE RODILLO / TURBULENCIA ---
     if (runSeq.endsWith('1212') || runSeq.endsWith('2121') || /(12){3,}$/.test(runSeq) || /(21){3,}$/.test(runSeq)) {
-        return { name: `ALT 1-2 ${label.toUpperCase()}`, type: 'alt_1_2', desc: 'Rebote alternado 1-2', action: 'ALTERNATE', next: 'alternar al lado opuesto', confidence: 70 };
+        return { name: `ALT 1-2 ${label.toUpperCase()}`, type: 'alt_1_2', desc: 'Rebote alternado 1-2', action: 'ALTERNATE', next: 'alternar al lado opuesto', next_state: trackerPatternExpectedSymbol(streaks, [1, 2], streakType, currentStreak), confidence: 70 };
     }
     if (runSeq.endsWith('112112') || runSeq.endsWith('221221') || /(112){2,}$/.test(runSeq) || /(221){2,}$/.test(runSeq)) {
-        return { name: `PAIRS-1+2 ${label.toUpperCase()}`, type: 'pairs_1_2', desc: 'Pares 1 con singleton 2', action: 'EXPECT_PAIR', next: 'par 1 + singleton 2', confidence: 68 };
+        const pairRunPattern = runSeq.endsWith('221221') || /(221){2,}$/.test(runSeq) ? [2, 2, 1] : [1, 1, 2];
+        return { name: `PAIRS-1+2 ${label.toUpperCase()}`, type: 'pairs_1_2', desc: 'Pares 1 con singleton 2', action: 'EXPECT_PAIR', next: 'par 1 + singleton 2', next_state: trackerPatternExpectedSymbol(streaks, pairRunPattern, streakType, currentStreak), confidence: 68 };
     }
     if (runSeq.endsWith('222') || /22[12]22/.test(runSeq)) {
-        return { name: `TRIPLE/PARES-2 ${label.toUpperCase()}`, type: 'pairs_2', desc: 'Pares de 2 dominando', action: 'EXPECT_2', next: 'esperar racha de 2', confidence: 72 };
+        return { name: `TRIPLE/PARES-2 ${label.toUpperCase()}`, type: 'pairs_2', desc: 'Pares de 2 dominando', action: 'EXPECT_2', next: 'esperar racha de 2', next_state: trackerPatternExpectedSymbol(streaks, [2], streakType, currentStreak), confidence: 72 };
     }
     if (runSeq.endsWith('111') || /11[12]11/.test(runSeq)) {
-        return { name: `PARES-1 ${label.toUpperCase()}`, type: 'pairs_1', desc: 'Pares de 1 dominando', action: 'EXPECT_1', next: 'esperar racha de 1', confidence: 68 };
+        return { name: `PARES-1 ${label.toUpperCase()}`, type: 'pairs_1', desc: 'Pares de 1 dominando', action: 'EXPECT_1', next: 'esperar racha de 1', next_state: trackerPatternExpectedSymbol(streaks, [1], streakType, currentStreak), confidence: 68 };
     }
     if (runSeq.endsWith('22') && runSeq.slice(-4, -2) === '11') {
-        return { name: `BLOQUES 2-2 ${label.toUpperCase()}`, type: 'blocks_2_2', desc: 'Bloques de 2 alternados 2-2', action: 'ALTERNATE_BLOCKS', next: 'completar bloque de 2 del mismo lado', confidence: 72 };
+        return { name: `BLOQUES 2-2 ${label.toUpperCase()}`, type: 'blocks_2_2', desc: 'Bloques de 2 alternados 2-2', action: 'ALTERNATE_BLOCKS', next: 'completar bloque de 2 del mismo lado', next_state: trackerPatternExpectedSymbol(streaks, [2, 2], streakType, currentStreak), confidence: 72 };
     }
     if (runSeq.endsWith('222') && runSeq.slice(-6, -3) === '111') {
-        return { name: `BLOQUES 3-3 ${label.toUpperCase()}`, type: 'three_three', desc: 'Bloques de 3 alternados 3-3', action: 'ALTERNATE_BLOCKS', next: 'completar bloque de 3 del mismo lado', confidence: 74 };
+        return { name: `BLOQUES 3-3 ${label.toUpperCase()}`, type: 'three_three', desc: 'Bloques de 3 alternados 3-3', action: 'ALTERNATE_BLOCKS', next: 'completar bloque de 3 del mismo lado', next_state: trackerPatternExpectedSymbol(streaks, [3, 3], streakType, currentStreak), confidence: 74 };
     }
     if (/^(33|33[123]33|333|33[123]33[123]33)/.test(runSeq) || runSeq.endsWith('33') || /33/.test(runSeq.slice(-6))) {
-        return { name: `PATRON 3-3 ${label.toUpperCase()}`, type: 'three_three', desc: 'Bloques de 3 alternados', action: 'ALTERNATE_BLOCKS', next: 'siguiente bloque alternado', confidence: 74 };
+        return { name: `PATRON 3-3 ${label.toUpperCase()}`, type: 'three_three', desc: 'Bloques de 3 alternados', action: 'ALTERNATE_BLOCKS', next: 'siguiente bloque alternado', next_state: trackerPatternExpectedSymbol(streaks, [3, 3], streakType, currentStreak), confidence: 74 };
     }
     if (runSeq.endsWith('31') || runSeq.endsWith('131') || /(31){2,}$/.test(runSeq)) {
-        return { name: `BLOQUE+SINGLETON ${label.toUpperCase()}`, type: 'three_one', desc: 'Bloque de 3 + singleton 1', action: 'EXPECT_1', next: 'esperar singleton tras bloque de 3', confidence: 70 };
+        return { name: `BLOQUE+SINGLETON ${label.toUpperCase()}`, type: 'three_one', desc: 'Bloque de 3 + singleton 1', action: 'EXPECT_1', next: 'esperar singleton tras bloque de 3', next_state: trackerPatternExpectedSymbol(streaks, [3, 1], streakType, currentStreak), confidence: 70 };
     }
     if (last4 === 'RLRL' || last4 === 'LRLR' || last4 === 'BSBS' || last4 === 'SBSB' || last4 === 'OUOU' || last4 === 'UOUO') {
         return { name: `MICRO-TURBULENCIA ${label.toUpperCase()}`, type: 'micro_turbulence', desc: 'Alternancia perfecta - caos', action: 'AVOID', next: 'sin seÃ±al: alternancia pura', confidence: 85 };
@@ -2418,8 +2479,9 @@ function detectTrackerTurbulence(travels, kind = 'dir') {
         if (streaks[i].len <= 2 && streaks[i-1].len <= 2 && streaks[i].type !== streaks[i-1].type) zigzagCount++;
     }
     if (zigzagCount >= 3) {
-        return { name: `ZIGZAG ${label.toUpperCase()}`, type: 'zigzag', desc: 'Rachas cortas alternando', action: 'REDUCE', next: 'alternar, cautela', confidence: 65 };
+        return { name: `ZIGZAG ${label.toUpperCase()}`, type: 'zigzag', desc: 'Rachas cortas alternando', action: 'REDUCE', next: 'alternar, cautela', next_state: trackerPatternExpectedSymbol(streaks, [1, 2], streakType, currentStreak), confidence: 65 };
     }
+    if (streakObservation) return streakObservation;
     if (turbulenceLevel >= 0.7) {
         return { name: `CAOS ${label.toUpperCase()}`, type: 'total_chaos', desc: `${Math.round(turbulenceLevel*100)}% cambios`, action: 'AVOID', next: 'sin seÃ±al: caos total', confidence: 80 };
     }

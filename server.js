@@ -1996,6 +1996,8 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
         signal: String(rawSystemReasoning.signal || '').slice(0, 80),
         rule: String(rawSystemReasoning.rule || '').slice(0, 80),
         direction: ['CW', 'CCW'].includes(rawSystemReasoning.direction) ? rawSystemReasoning.direction : '',
+        direction_basis: ['pattern', 'dominance', 'prediction'].includes(rawSystemReasoning.direction_basis) ? rawSystemReasoning.direction_basis : 'prediction',
+        direction_pattern: String(rawSystemReasoning.direction_pattern || '').slice(0, 120),
         selected_target: validSystemCenter,
         metric_label: validSystemMetricLabel,
         target_cw: Number.isInteger(Number(rawSystemReasoning.target_cw)) ? Number(rawSystemReasoning.target_cw) : null,
