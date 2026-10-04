@@ -38,6 +38,7 @@ let trackerLiveIdsTableId = null;
 let trackerHistory = trackerManualHistory;
 let trackerLastSignal = null;
 let trackerAiN4Center = null;
+let trackerAiPredictionMetric = null;
 let trackerAiPredictionHistoryLength = -1;
 let trackerPredictionSource = 'ai';
 let trackerPredictorOffset = 0;
@@ -548,6 +549,13 @@ function trackerBankPredictionCenter() {
     return trackerSystemPredictionCenter();
 }
 
+function trackerPredictionMetricFamilies(mode = trackerConfig.prediction) {
+    if (mode === 'n4') return ['n4'];
+    if (mode === 'n9') return ['n9'];
+    if (mode === 'both') return ['n4', 'n9'];
+    return [];
+}
+
 function trackerPredictionMetricCandidates(mode = trackerConfig.prediction) {
     const signal = trackerLastSignal;
     if (!signal) return [];
@@ -561,15 +569,36 @@ function trackerPredictionMetricCandidates(mode = trackerConfig.prediction) {
         { label: 'CCW_N4S', number: Number(signal.targetOverCCW), family: 'n4' },
         { label: 'CCW_N4B', number: Number(signal.targetUnderCCW), family: 'n4' }
     ];
-    const selected = mode === 'n9' ? n9 : n4;
-    return selected.filter(metric => Number.isInteger(metric.number) && metric.number >= 0 && metric.number <= 36);
+    const allowedFamilies = trackerPredictionMetricFamilies(mode);
+    return [...n4, ...n9].filter(metric => allowedFamilies.includes(metric.family) &&
+        Number.isInteger(metric.number) && metric.number >= 0 && metric.number <= 36);
+}
+
+function trackerSystemPredictionMetric() {
+    if (!trackerLastSignal) return null;
+    const direction = trackerLastSignal?.mainDir ||
+        (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
+    const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
+    let selected;
+    if (trackerConfig.prediction === 'n4') {
+        // Preserve SISTEMA's direction vote; choose its small/big N4 metric
+        // from the recent jump sizes using the app's SMALL/BIG boundary.
+        const recentSpins = trackerHistory.slice(-21);
+        const jumps = recentSpins.slice(1).map((number, index) => calcDist(recentSpins[index], number));
+        const bigCount = jumps.filter(jump => Math.abs(jump) >= 10).length;
+        const isSmall = bigCount <= jumps.length / 2;
+        const label = `${direction}_N4${isSmall ? 'S' : 'B'}`;
+        selected = metrics.find(metric => metric.label === label);
+    } else {
+        // N9 is SISTEMA's native center; Both allows it while IA can choose any family.
+        selected = metrics.find(metric => metric.label === `${direction}_N9`);
+    }
+    return selected || null;
 }
 
 function trackerSystemPredictionCenter() {
-    const direction = trackerLastSignal?.mainDir ||
-        (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
-    const center = Number(direction === 'CW' ? trackerLastSignal?.targetCW : trackerLastSignal?.targetCCW);
-    return Number.isInteger(center) && center >= 0 && center <= 36 ? center : null;
+    const metric = trackerSystemPredictionMetric();
+    return metric ? metric.number : null;
 }
 
 function trackerSystemReasoningSnapshot() {
@@ -585,6 +614,7 @@ function trackerSystemReasoningSnapshot() {
         rule: String(trackerLastSignal.rule || 'N9'),
         direction,
         selected_target: center,
+        metric_label: trackerSystemPredictionMetric()?.label || 'N9',
         target_cw: Number(trackerLastSignal.targetCW),
         target_ccw: Number(trackerLastSignal.targetCCW),
         confidence_cw: Number(trackerLastSignal.confidenceCW),
@@ -765,13 +795,13 @@ async function startTrackerBankSession() {
         trackerBankSelectedSessionId = session._id;
         await loadTrackerBankSessions();
         trackerAiN4Center = null;
+        trackerAiPredictionMetric = null;
         trackerAiPredictionHistoryLength = -1;
         trackerAiDisplayStatus = 'ANALIZANDO IA ?';
         document.getElementById('tracker-chat-messages')?.replaceChildren();
         const aiStatus = document.getElementById('tracker-ai-status');
         if (aiStatus) aiStatus.innerText = '';
         trackerLiveEventRevision++;
-        setTrackerPredictionMode('n4');
         trackerAutoBet = true;
         const autoButton = document.getElementById('tracker-auto-bet-btn');
         if (autoButton) {
@@ -943,6 +973,7 @@ async function syncTrackerFromLive() {
                     });
                 }
                 trackerAiN4Center = null;
+                trackerAiPredictionMetric = null;
                 trackerAiPredictionHistoryLength = -1;
                 trackerAiDisplayStatus = 'ANALIZANDO IA ?';
                 trackerLiveEventRevision++;
@@ -1072,6 +1103,7 @@ function setTrackerSource(source) {
     trackerHistory = source === 'live' ? trackerLiveHistory : trackerManualHistory;
     trackerLastSignal = null;
     trackerAiN4Center = null;
+    trackerAiPredictionMetric = null;
     trackerAiPredictionHistoryLength = -1;
     trackerTriggerCounter = 0;
     trackerLastDominantDir = null;
@@ -1279,6 +1311,7 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
     }
     if (!batch && (source === 'live' || trackerPredictionSource === 'ai')) {
         trackerAiN4Center = null;
+        trackerAiPredictionMetric = null;
         trackerAiPredictionHistoryLength = -1;
         if (trackerBankActiveSession()) trackerAiDisplayStatus = 'ANALIZANDO IA ?';
     }
@@ -1542,6 +1575,7 @@ function setTrackerPredictionSource(source) {
     trackerPredictionSource = source;
     trackerConfig.predictionSource = source;
     trackerAiN4Center = null;
+    trackerAiPredictionMetric = null;
     trackerAiPredictionHistoryLength = -1;
     trackerAiDisplayStatus = 'ANALIZANDO IA ?';
     if (trackerAiRetryTimer) clearTimeout(trackerAiRetryTimer);
@@ -1564,12 +1598,16 @@ function setTrackerPredictionSource(source) {
 }
 
 function setTrackerPredictionMode(mode) {
-    if (trackerBankActiveSession() && mode !== 'n4') {
-        mode = 'n4';
-        trackerBankSetMessage('La sesión de banca usa exclusivamente predicciones N4.');
+    if (!['n4', 'n9', 'both'].includes(mode)) return;
+    const changed = mode !== trackerConfig.prediction;
+    if (changed) {
+        trackerConfig.prediction = mode;
+        trackerAiN4Center = null;
+        trackerAiPredictionMetric = null;
+        trackerAiPredictionHistoryLength = -1;
+        trackerAiLastRequestedRevision = -1;
+        localStorage.setItem('tracker_ai_config', JSON.stringify(trackerConfig));
     }
-    trackerConfig.prediction = mode;
-    localStorage.setItem('tracker_ai_config', JSON.stringify(trackerConfig));
     ['n9','n4','both'].forEach(m => {
         const btn = document.getElementById('tracker-btn-' + m);
         if (btn) btn.classList.toggle('active', m === mode);
@@ -1577,6 +1615,9 @@ function setTrackerPredictionMode(mode) {
     const pr = document.getElementById('tracker-ai-pred'); if (pr) pr.value = mode;
     updateNeighborButton();
     renderTracker();
+    if (changed && trackerPredictionSource === 'ai' && trackerBankActiveSession() && trackerHistory.length >= 3) {
+        askTrackerAIForAnalysisSilent();
+    }
 }
 
 function updateNeighborButton() {
@@ -1674,7 +1715,9 @@ function renderTracker() {
     const predEl = document.getElementById('tracker-prediction');
     const center = trackerBankPredictionCenter();
     if (predEl) {
-        const metricLabel = trackerPredictionSource === 'ai' && trackerConfig.prediction === 'n9' ? 'N9' : 'N4';
+        const metricLabel = trackerPredictionSource === 'ai'
+            ? (trackerAiPredictionMetric || (trackerConfig.prediction === 'n9' ? 'N9' : 'N4'))
+            : (trackerSystemPredictionMetric()?.label?.split('_')[1] || 'N9');
         if (center !== null) predEl.innerText = `${trackerPredictionSource === 'ai' ? 'IA' : 'SISTEMA'} · ${metricLabel}: ${center}`;
         else predEl.innerText = trackerBankActiveSession() && trackerHistory.length >= 3 && trackerPredictionSource === 'ai' ? 'ANALIZANDO IA ?' : '--';
     }
@@ -2481,7 +2524,7 @@ function buildTrackerPatternEvidence(spins) {
 
 function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
     const aiPrediction = (trackerPredictionSource === 'ai' || forceAiPrediction) && !userMessage;
-    const outputMetricLabel = trackerConfig.prediction === 'n9' ? 'N9' : 'N4';
+    const outputMetricLabel = trackerConfig.prediction === 'both' ? 'N4/N9' : trackerConfig.prediction === 'n9' ? 'N9' : 'N4';
     const allowedMetrics = aiPrediction ? trackerPredictionMetricCandidates(trackerConfig.prediction) : [];
     // Pattern-focused data block
     const lines = [
@@ -2574,7 +2617,7 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
         ].join('\n');
     }
     if (aiPrediction) {
-        dataBlock += `\nFILTRO ACTIVO ${outputMetricLabel}: elige únicamente una de estas métricas exactas: ${allowedMetrics.map(metric => `${metric.label}=${metric.number}`).join(' | ') || 'ninguna disponible'}. No uses valores de la otra familia ni inventes centros.`;
+        dataBlock += `\nFILTRO ACTIVO ${outputMetricLabel}: elige únicamente una de estas métricas exactas: ${allowedMetrics.map(metric => `${metric.label}=${metric.number}`).join(' | ') || 'ninguna disponible'}. No uses valores fuera de esta lista ni inventes centros.`;
     }
 
     const systemPrompt = `Sos experta en sistemas cilindricos rotacionales. Analiza con criterio propio y proyecta. No solo mires la dominancia: analiza DIRECCION, ZONA y NIVEL (UNDER/OVER) como sistemas separados que pueden estar en distintos regimenes. No uses la palabra "sector".
@@ -2649,10 +2692,10 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
     const finalSystemPrompt = aiPrediction
-        ? `Metodología ${outputMetricLabel}: analiza por separado DIRECCIÓN, ZONA y NIVEL UNDER/OVER usando las estadísticas, los bloques, los zigzags y los conteos históricos incluidos en el mensaje. Una racha de 3 no confirma ruptura: durante turbulencia puede ser falsa; exige evidencia de secuencia para considerar un cambio de régimen. Usa n y resultados observados, reconoce internamente cuando la muestra es pequeña y no inventes porcentajes. Compara ventanas recientes con las amplias y elige exclusivamente una de las métricas ${outputMetricLabel} enumeradas. No selecciones métricas de otra familia ni inventes un centro. Devuelve únicamente ${outputMetricLabel}: seguido del número exacto elegido. Sin explicación ni texto adicional.`
+        ? `Metodología ${outputMetricLabel}: analiza por separado DIRECCIÓN, ZONA y NIVEL UNDER/OVER usando las estadísticas, los bloques, los zigzags y los conteos históricos incluidos en el mensaje. Una racha de 3 no confirma ruptura: durante turbulencia puede ser falsa; exige evidencia de secuencia para considerar un cambio de régimen. Usa n y resultados observados, reconoce internamente cuando la muestra es pequeña y no inventes porcentajes. Compara ventanas recientes con las amplias y elige exclusivamente una de las métricas permitidas enumeradas. Devuelve únicamente la etiqueta exacta de la métrica y el número, por ejemplo N4: 17 o N9: 8. Sin explicación ni texto adicional.`
         : systemPrompt;
     const predictionRequest = aiPrediction
-        ? `Analiza solo estos datos y devuelve únicamente ${outputMetricLabel}: seguido del número exacto de una métrica ${outputMetricLabel} permitida. No escribas un marcador como NN.`
+        ? `Analiza solo estos datos y devuelve únicamente N4: o N9: seguido del número exacto de una métrica permitida. Respeta la lista del filtro activo. No escribas un marcador como NN.`
         : 'Proyecta UN target específico con su número. Justifica en una oración.';
     if (userMessage) {
         return {
@@ -2757,17 +2800,22 @@ async function callTrackerAI(promptObj, isAuto) {
 function syncPredictionFromAI(responseText, backgroundPrediction = false) {
     const predEl = document.getElementById('tracker-prediction');
     if (!predEl || (trackerPredictionSource !== 'ai' && !backgroundPrediction)) return;
-    const expectedLabel = trackerConfig.prediction === 'n9' ? 'N9' : 'N4';
     const match = String(responseText || '').match(/\bN([49])\s*:\s*(3[0-6]|[0-2]?\d)\b/i);
-    const center = match && `N${match[1]}`.toUpperCase() === expectedLabel ? Number(match[2]) : null;
-    const allowedCenters = trackerPredictionMetricCandidates(trackerConfig.prediction).map(metric => metric.number);
-    trackerAiN4Center = Number.isInteger(center) && center >= 0 && center <= 36 && allowedCenters.includes(center) ? center : null;
+    const metricFamily = match ? `N${match[1]}`.toUpperCase() : null;
+    const center = match ? Number(match[2]) : null;
+    const allowedMetrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
+    const allowedFamilies = trackerPredictionMetricFamilies(trackerConfig.prediction).map(family => family.toUpperCase());
+    const metricAllowed = Number.isInteger(center) && center >= 0 && center <= 36 &&
+        allowedFamilies.includes(metricFamily) &&
+        allowedMetrics.some(metric => metric.family === metricFamily.toLowerCase() && metric.number === center);
+    trackerAiN4Center = metricAllowed ? center : null;
+    trackerAiPredictionMetric = metricAllowed ? metricFamily : null;
     trackerAiPredictionHistoryLength = trackerAiN4Center === null ? -1 : trackerHistory.length;
     if (trackerPredictionSource === 'ai') {
-        predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${expectedLabel}: ${trackerAiN4Center}`;
-        trackerAiDisplayStatus = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${expectedLabel}: ${trackerAiN4Center}`;
+        predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${trackerAiPredictionMetric}: ${trackerAiN4Center}`;
+        trackerAiDisplayStatus = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${trackerAiPredictionMetric}: ${trackerAiN4Center}`;
     }
-    if (trackerAiN4Center === null) console.warn(`[Tracker AI] Response did not match an allowed ${expectedLabel} metric.`, responseText);
+    if (trackerAiN4Center === null) console.warn(`[Tracker AI] Response did not match the allowed ${trackerConfig.prediction} metric filter.`, responseText);
     renderTrackerBankroll();
 }
 
