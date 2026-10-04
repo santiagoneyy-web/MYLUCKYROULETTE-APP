@@ -1,17 +1,11 @@
 const mongoose = require('mongoose');
 
-const TrackerAnalystSnapshotSchema = new mongoose.Schema({
+const TrackerPredictionAuditSchema = new mongoose.Schema({
     table_id: { type: Number, required: true },
+    bankroll_session_id: { type: String, required: true },
+    bankroll_session_no: { type: Number, default: null },
     spin_id: { type: Number, required: true },
     latest_number: { type: Number, required: true, min: 0, max: 36 },
-    evidence: { type: mongoose.Schema.Types.Mixed, default: {} },
-    analyst_model: { type: String, default: 'qwen/qwen3.6-27b' },
-    analyst_status: { type: String, enum: ['pending', 'complete', 'failed'], default: 'pending' },
-    analyst_summary: { type: String, default: '' },
-    analyst_error: { type: String, default: '' },
-    bankroll_session_id: { type: String, default: '' },
-    bankroll_session_no: { type: Number, default: null },
-    has_bankroll_audit: { type: Boolean, default: false },
     prediction_mode: { type: String, enum: ['n4', 'n9', 'both'], default: null },
     prediction_source: { type: String, enum: ['system', 'ai'], default: null },
     forecast_history_length: { type: Number, default: null },
@@ -28,6 +22,10 @@ const TrackerAnalystSnapshotSchema = new mongoose.Schema({
     ai_status: { type: String, enum: ['ready', 'unavailable', 'late'], default: 'unavailable' },
     ai_won: { type: Boolean, default: null },
     ai_reward: { type: Number, default: null },
+    analyst_model: { type: String, default: '' },
+    analyst_status: { type: String, enum: ['pending', 'complete', 'failed'], default: 'pending' },
+    analyst_summary: { type: String, default: '' },
+    analyst_error: { type: String, default: '' },
     result_spin_id: { type: Number, default: null },
     result_number: { type: Number, min: 0, max: 36, default: null },
     audited_at: { type: Date, default: null },
@@ -35,9 +33,8 @@ const TrackerAnalystSnapshotSchema = new mongoose.Schema({
     updated_at: { type: Date, default: Date.now }
 });
 
-TrackerAnalystSnapshotSchema.index({ table_id: 1, spin_id: 1 }, { unique: true });
-TrackerAnalystSnapshotSchema.index({ table_id: 1, created_at: -1 });
-TrackerAnalystSnapshotSchema.index({ bankroll_session_id: 1, updated_at: -1 });
-TrackerAnalystSnapshotSchema.index({ table_id: 1, prediction_mode: 1, result_spin_id: -1 });
+TrackerPredictionAuditSchema.index({ table_id: 1, bankroll_session_id: 1, spin_id: 1 }, { unique: true });
+TrackerPredictionAuditSchema.index({ bankroll_session_id: 1, result_spin_id: -1 });
+TrackerPredictionAuditSchema.index({ table_id: 1, prediction_mode: 1, result_spin_id: -1 });
 
-module.exports = mongoose.model('TrackerAnalystSnapshot', TrackerAnalystSnapshotSchema);
+module.exports = mongoose.model('TrackerPredictionAudit', TrackerPredictionAuditSchema);

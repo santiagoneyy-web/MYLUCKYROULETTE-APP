@@ -34,11 +34,28 @@ let manualModeAvgOffset = 0;
 const trackerManualHistory = [];
 const trackerLiveHistory = [];
 const trackerLiveSpinIds = new Set();
+const TRACKER_BANK_PENDING_STORAGE_KEY = 'tracker_bank_pending_v1';
+const TRACKER_AUDIT_PENDING_STORAGE_KEY = 'tracker_audit_pending_v1';
+function trackerReadPendingQueue(key) {
+    try {
+        const items = JSON.parse(localStorage.getItem(key) || '[]');
+        return Array.isArray(items) ? items.filter(item => item && typeof item === 'object').slice(-1000) : [];
+    } catch { return []; }
+}
+const trackerBankPending = trackerReadPendingQueue(TRACKER_BANK_PENDING_STORAGE_KEY).map(item => ({ ...item, tableId: item.tableId || null }));
+const trackerBankPendingKeys = new Set(trackerBankPending.map(item => `${item.sessionId}:${item.spinId}`));
+const trackerPredictionAuditPending = trackerReadPendingQueue(TRACKER_AUDIT_PENDING_STORAGE_KEY).map(item => ({
+    ...item, tableId: item.tableId || null, key: item.key || `${item.sessionId}:${item.spinId}`
+}));
+const trackerPredictionAuditPendingKeys = new Set(trackerPredictionAuditPending.map(item => item.key || `${item.sessionId}:${item.spinId}`));
+let trackerPredictionAuditQueue = Promise.resolve();
 let trackerLiveIdsTableId = null;
 let trackerHistory = trackerManualHistory;
 let trackerLastSignal = null;
 let trackerAiN4Center = null;
 let trackerAiPredictionMetric = null;
+let trackerAiPredictionModel = null;
+let trackerAiPredictionReasoning = null;
 let trackerAiPredictionHistoryLength = -1;
 let trackerPredictionSource = 'ai';
 let trackerPredictorOffset = 0;
@@ -73,12 +90,12 @@ let trackerLastZigzag = false;
 let trackerManualAvgOffset = 0;
 let trackerBankSessions = [];
 let trackerBankEntries = [];
+let trackerBankAudits = [];
 let trackerBankSelectedSessionId = null;
 let trackerBankEntriesSessionId = null;
+let trackerBankAuditsSessionId = null;
 let trackerBankLoadedTableId = null;
 let trackerBankQueue = Promise.resolve();
-const trackerBankPending = [];
-const trackerBankPendingKeys = new Set();
 let trackerBankLoading = false;
 let trackerLiveSyncTimer = null;
 let trackerLiveSyncInFlight = false;
@@ -501,6 +518,12 @@ async function closeTrackerBankSessionOnReload() {
     const navigation = performance.getEntriesByType('navigation')[0];
     if (navigation?.type !== 'reload') return;
     try {
+        await flushTrackerBankQueue();
+        await flushTrackerPredictionAuditQueue();
+        if (trackerBankPending.length || trackerPredictionAuditPending.length) {
+            trackerBankSetMessage('Hay giros o auditorías pendientes. La sesión se conserva activa y se reintentará el guardado.');
+            return;
+        }
         const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/stop-active`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', cache: 'no-store'
         });
@@ -515,8 +538,39 @@ function closeTrackerBankSessionOnPageHide() {
     const stop = () => fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/stop-active`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true
     }).catch(() => {});
-    if (trackerBankPending.length) trackerBankQueue.then(stop, stop);
+    if (trackerBankPending.length || trackerPredictionAuditPending.length) {
+        Promise.allSettled([trackerBankQueue, trackerPredictionAuditQueue]).then(() => {
+            trackerPersistPendingQueues();
+            if (!trackerBankPending.length && !trackerPredictionAuditPending.length) stop();
+        }, trackerPersistPendingQueues);
+    }
     else stop();
+}
+
+function trackerBankMergeAudits(current, incoming) {
+    const audits = new Map();
+    for (const audit of [...current, ...incoming]) {
+        const key = String(audit.spin_id || audit._id);
+        audits.set(key, audit);
+    }
+    return Array.from(audits.values())
+        .sort((a, b) => Number(a.result_spin_id || 0) - Number(b.result_spin_id || 0))
+        .slice(-500);
+}
+
+function trackerEscapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[character]);
+}
+
+function trackerPersistPendingQueues() {
+    try { localStorage.setItem(TRACKER_BANK_PENDING_STORAGE_KEY, JSON.stringify(trackerBankPending)); } catch (error) {
+        console.warn('[Tracker bankroll] Pending settlement queue could not be persisted locally:', error.message);
+    }
+    try { localStorage.setItem(TRACKER_AUDIT_PENDING_STORAGE_KEY, JSON.stringify(trackerPredictionAuditPending)); } catch (error) {
+        console.warn('[Tracker audit] Pending audit queue could not be persisted locally:', error.message);
+    }
 }
 
 function trackerBankDate(value) {
@@ -628,6 +682,36 @@ function trackerSystemReasoningSnapshot() {
     };
 }
 
+function trackerPredictionAuditSnapshot(targetSpinId = null, forecastAvailable = true) {
+    const systemMetric = forecastAvailable ? trackerSystemPredictionMetric() : null;
+    const aiReady = forecastAvailable && Number.isInteger(trackerAiN4Center) && trackerAiPredictionHistoryLength === trackerHistory.length;
+    const aiMetric = aiReady
+        ? trackerPredictionMetricCandidates(trackerConfig.prediction).find(metric =>
+            metric.family === String(trackerAiPredictionMetric || '').toLowerCase() && metric.number === trackerAiN4Center)
+        : null;
+    const targetId = Number(targetSpinId);
+    const eligibleSpinIds = Array.from(trackerLiveSpinIds).map(Number)
+        .filter(id => Number.isInteger(id) && id > 0 && (!Number.isInteger(targetId) || id < targetId));
+    const baseSpinId = eligibleSpinIds.length ? Math.max(...eligibleSpinIds) : null;
+    return {
+        audit_version: 1,
+        prediction_mode: trackerConfig.prediction,
+        prediction_source: trackerPredictionSource,
+        system_center: systemMetric?.number ?? null,
+        system_metric_label: systemMetric?.label || null,
+        system_status: systemMetric ? 'ready' : forecastAvailable ? 'unavailable' : 'late',
+        system_reasoning: forecastAvailable ? trackerSystemReasoningSnapshot() : null,
+        ai_center: aiReady ? trackerAiN4Center : null,
+        ai_metric_label: aiMetric?.label || null,
+        ai_model: aiReady ? trackerAiPredictionModel : null,
+        ai_reasoning: aiReady ? trackerAiPredictionReasoning : null,
+        ai_status: aiReady ? 'ready' : forecastAvailable ? 'unavailable' : 'late',
+        forecast_base_spin_id: baseSpinId,
+        forecast_history_length: forecastAvailable ? trackerHistory.length : null,
+        history: forecastAvailable ? trackerHistory.slice(-80) : []
+    };
+}
+
 function trackerBankSetMessage(message) {
     const element = document.getElementById('tracker-bank-message');
     if (element) element.textContent = message || '';
@@ -642,7 +726,9 @@ async function loadTrackerBankSessions() {
             trackerBankSelectedSessionId = null;
             trackerBankSessions = [];
             trackerBankEntries = [];
+            trackerBankAudits = [];
             trackerBankEntriesSessionId = null;
+            trackerBankAuditsSessionId = null;
             trackerBankLoadedTableId = tableId;
         }
         const url = new URL(`/api/tracker/bankroll/${encodeURIComponent(tableId)}`, location.origin);
@@ -658,8 +744,12 @@ async function loadTrackerBankSessions() {
         const selected = active || latestClosed;
         trackerBankSelectedSessionId = selected?._id || null;
         if (String(trackerBankEntriesSessionId || '') !== String(selected?._id || '')) trackerBankEntries = [];
+        if (String(trackerBankAuditsSessionId || '') !== String(selected?._id || '')) trackerBankAudits = [];
         let incomingEntries = selected && String(data.selected_session_id || '') === String(selected._id)
             ? (Array.isArray(data.entries) ? data.entries : [])
+            : [];
+        let incomingAudits = selected && String(data.selected_session_id || '') === String(selected._id)
+            ? (Array.isArray(data.audits) ? data.audits : [])
             : [];
         if (selected && String(data.selected_session_id || '') !== String(selected._id)) {
             const selectedUrl = new URL(url);
@@ -668,12 +758,17 @@ async function loadTrackerBankSessions() {
             const selectedData = await selectedResponse.json().catch(() => ({}));
             if (selectedResponse.ok && selectedData.storage === 'mongodb') {
                 incomingEntries = Array.isArray(selectedData.entries) ? selectedData.entries : [];
+                incomingAudits = Array.isArray(selectedData.audits) ? selectedData.audits : [];
             }
         }
         trackerBankEntries = selected
             ? trackerBankMergeEntries(trackerBankEntries, incomingEntries)
             : [];
+        trackerBankAudits = selected
+            ? trackerBankMergeAudits(trackerBankAudits, incomingAudits)
+            : [];
         trackerBankEntriesSessionId = selected?._id || null;
+        trackerBankAuditsSessionId = selected?._id || null;
         trackerBankSetMessage(active
             ? 'Sesión activa. Las tiradas Live se guardan en MongoDB.'
             : selected
@@ -749,6 +844,47 @@ function renderTrackerBankroll() {
             return `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td title="N4 ${center}: ${prediction}">${center} → ${entry.number} ${entry.won ? '✓' : '×'}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`;
         }).join('')
         : '<tr><td colspan="6" style="text-align:center">Sin resultados guardados</td></tr>';
+    const auditLedger = document.getElementById('tracker-bank-audit-ledger');
+    const auditSummary = document.getElementById('tracker-bank-audit-summary');
+    if (auditSummary) {
+        const score = (audits, predictor) => {
+            const evaluated = audits.filter(audit => typeof audit[`${predictor}_won`] === 'boolean');
+            const hits = evaluated.filter(audit => audit[`${predictor}_won`]).length;
+            return `${hits}/${evaluated.length}${evaluated.length ? ` (${Math.round(hits / evaluated.length * 100)}%)` : ''}`;
+        };
+        const grouped = ['n4', 'n9', 'both'].map(mode => {
+            const audits = trackerBankAudits.filter(audit => audit.prediction_mode === mode);
+            if (!audits.length) return '';
+            const evaluated = audits.some(audit => typeof audit.system_won === 'boolean' || typeof audit.ai_won === 'boolean');
+            return evaluated
+                ? `${mode.toUpperCase()} · SISTEMA ${score(audits, 'system')} · IA ${score(audits, 'ai')}`
+                : `${mode.toUpperCase()} · pronósticos guardados, esperando giros reales`;
+        }).filter(Boolean);
+        const unknownMode = trackerBankAudits.filter(audit => !['n4', 'n9', 'both'].includes(audit.prediction_mode));
+        if (unknownMode.length) grouped.push(`SIN FILTRO ANTIGUO · SISTEMA ${score(unknownMode, 'system')} · IA ${score(unknownMode, 'ai')}`);
+        auditSummary.textContent = grouped.length ? grouped.join(' | ') : 'La comparación se completa cuando llegue el primer giro real.';
+    }
+    if (auditLedger) auditLedger.innerHTML = trackerBankAudits.length
+        ? trackerBankAudits.slice(-100).reverse().map(audit => {
+            const centerCell = (center, label, won, status) => {
+                if (center !== null && center !== undefined && Number.isInteger(Number(center)) && Number(center) >= 0 && Number(center) <= 36) {
+                    return `${trackerEscapeHtml(label || 'centro')} ${Number(center)} ${won === true ? '✓' : won === false ? '×' : '·'}`;
+                }
+                return status === 'late' ? 'Tardía' : 'Sin predicción';
+            };
+            let report = '';
+            let confidence = '';
+            try {
+                const parsed = JSON.parse(String(audit.analyst_summary || ''));
+                report = parsed.hallazgo || '';
+                confidence = parsed.confianza_evidencia || '';
+            } catch { report = String(audit.analyst_summary || ''); }
+            if (!report) report = audit.analyst_status === 'pending' ? 'Analizando' : audit.analyst_status === 'failed' ? (audit.analyst_error || 'Informe no disponible') : 'Sin hallazgo';
+            const systemReasoning = audit.system_reasoning ? JSON.stringify(audit.system_reasoning).slice(0, 1000) : 'Sin razonamiento guardado.';
+            const aiReasoning = audit.ai_reasoning || 'Sin razonamiento IA guardado.';
+            return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}</div></details></td></tr>`;
+        }).join('')
+        : '<tr><td colspan="6" style="text-align:center">Las auditorías de ambos predictores aparecerán al iniciar la sesión y al llegar el resultado.</td></tr>';
 }
 
 function toggleTrackerBankPanel(open) {
@@ -796,6 +932,8 @@ async function startTrackerBankSession() {
         await loadTrackerBankSessions();
         trackerAiN4Center = null;
         trackerAiPredictionMetric = null;
+        trackerAiPredictionModel = null;
+        trackerAiPredictionReasoning = null;
         trackerAiPredictionHistoryLength = -1;
         trackerAiDisplayStatus = 'ANALIZANDO IA ?';
         document.getElementById('tracker-chat-messages')?.replaceChildren();
@@ -815,6 +953,7 @@ async function startTrackerBankSession() {
         trackerBankSetMessage('');
         trackerAiLastRequestedRevision = -1;
         if (trackerHistory.length >= 3) {
+            enqueueTrackerPredictionForecast(session._id, trackerPredictionAuditSnapshot());
             askTrackerAIForAnalysisSilent(false, trackerPredictionSource === 'system');
         }
     } catch (error) {
@@ -833,8 +972,13 @@ async function closeTrackerBankSession() {
     if (finishButton) finishButton.disabled = true;
     try {
         await trackerBankQueue.catch(() => {});
+        await flushTrackerPredictionAuditQueue();
         if (trackerBankPending.length) {
             trackerBankSetMessage('Hay tiradas Live pendientes de guardar en MongoDB. Reconecta antes de finalizar.');
+            return;
+        }
+        if (trackerPredictionAuditPending.length) {
+            trackerBankSetMessage('Hay auditorías pendientes de guardar en MongoDB. Reconecta antes de finalizar.');
             return;
         }
         const response = await fetch(trackerBankCloseUrl(session._id), { method: 'POST' });
@@ -851,6 +995,7 @@ async function closeTrackerBankSession() {
 }
 
 function enqueueTrackerBankSpin(spin) {
+    spin.tableId = spin.tableId || trackerBankTableId();
     const pendingKey = `${spin.sessionId}:${spin.spinId}`;
     if (trackerBankPendingKeys.has(pendingKey)) return trackerBankQueue;
     trackerBankPendingKeys.add(pendingKey);
@@ -859,7 +1004,88 @@ function enqueueTrackerBankSpin(spin) {
     );
     if (insertAt === -1) trackerBankPending.push(spin);
     else trackerBankPending.splice(insertAt, 0, spin);
+    trackerPersistPendingQueues();
     return flushTrackerBankQueue();
+}
+
+function enqueueTrackerPredictionAudit(sessionId, spinId, number, contextSnapshot) {
+    const baseSpinId = Number(contextSnapshot?.forecast_base_spin_id);
+    if (!trackerBankActiveSession() || !Number.isInteger(baseSpinId) || baseSpinId <= 0) return trackerPredictionAuditQueue;
+    const key = `${sessionId}:${spinId}`;
+    if (trackerPredictionAuditPendingKeys.has(key)) return trackerPredictionAuditQueue;
+    const audit = { tableId: trackerBankTableId(), sessionId, spinId: Number(spinId), number: Number(number), contextSnapshot, key };
+    trackerPredictionAuditPendingKeys.add(key);
+    trackerPredictionAuditPending.push({ ...audit, type: 'audit' });
+    trackerPersistPendingQueues();
+    return flushTrackerPredictionAuditQueue();
+}
+
+function enqueueTrackerPredictionForecast(sessionId, contextSnapshot) {
+    const baseSpinId = Number(contextSnapshot?.forecast_base_spin_id);
+    if (!trackerBankActiveSession() || !Number.isInteger(baseSpinId) || baseSpinId <= 0) return trackerPredictionAuditQueue;
+    const key = `${sessionId}:forecast:${baseSpinId}`;
+    const existingIndex = trackerPredictionAuditPending.findIndex(item => item.key === key);
+    const forecast = {
+        type: 'forecast', tableId: trackerBankTableId(), sessionId, spinId: baseSpinId,
+        contextSnapshot, key
+    };
+    trackerPredictionAuditPendingKeys.add(key);
+    if (existingIndex >= 0) trackerPredictionAuditPending[existingIndex] = forecast;
+    else trackerPredictionAuditPending.push(forecast);
+    trackerPersistPendingQueues();
+    return flushTrackerPredictionAuditQueue();
+}
+
+function flushTrackerPredictionAuditQueue() {
+    trackerPredictionAuditQueue = trackerPredictionAuditQueue.catch(() => {}).then(async () => {
+        while (trackerPredictionAuditPending.length) {
+            const audit = trackerPredictionAuditPending[0];
+            try {
+                const action = audit.type === 'forecast' ? 'forecast' : 'audit';
+                const sentContext = JSON.stringify(audit.contextSnapshot || {});
+                const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(audit.tableId || trackerBankTableId())}/${encodeURIComponent(audit.sessionId)}/${action}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(action === 'forecast' ? {
+                        forecast_base_spin_id: audit.contextSnapshot.forecast_base_spin_id,
+                        context_snapshot: audit.contextSnapshot
+                    } : {
+                        forecast_base_spin_id: audit.contextSnapshot.forecast_base_spin_id,
+                        result_spin_id: audit.spinId,
+                        result_number: audit.number,
+                        context_snapshot: audit.contextSnapshot
+                    })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.storage !== 'mongodb') {
+                    console.warn('[Tracker audit] Snapshot pending:', data.error || `HTTP ${response.status}`);
+                    trackerBankSetMessage(`Registro pendiente para el giro ${audit.spinId}: ${data.error || `HTTP ${response.status}`}. Se conserva para reintentar.`);
+                    break;
+                }
+                const savedAudit = data.audit || data.forecast;
+                if (savedAudit) {
+                    if (String(audit.tableId || trackerBankTableId()) === String(trackerBankTableId()) &&
+                        String(audit.sessionId) === String(trackerBankSelectedSessionId)) {
+                        trackerBankAudits = trackerBankMergeAudits(trackerBankAudits, [savedAudit]);
+                        trackerBankAuditsSessionId = audit.sessionId;
+                        renderTrackerBankroll();
+                    }
+                }
+                if (action === 'forecast' && trackerPredictionAuditPending[0] === audit &&
+                    JSON.stringify(audit.contextSnapshot || {}) !== sentContext) {
+                    trackerPersistPendingQueues();
+                    continue;
+                }
+                trackerPredictionAuditPending.shift();
+                trackerPredictionAuditPendingKeys.delete(audit.key);
+                trackerPersistPendingQueues();
+            } catch (error) {
+                console.warn('[Tracker audit] Audit queued for retry:', error.message);
+                break;
+            }
+        }
+    });
+    return trackerPredictionAuditQueue;
 }
 
 function flushTrackerBankQueue() {
@@ -869,7 +1095,7 @@ function flushTrackerBankQueue() {
             const pendingKey = `${spin.sessionId}:${spin.spinId}`;
             let response, data;
             try {
-                response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/${encodeURIComponent(spin.sessionId)}/settle`, {
+                response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(spin.tableId || trackerBankTableId())}/${encodeURIComponent(spin.sessionId)}/settle`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         spin_id: spin.spinId,
@@ -895,6 +1121,7 @@ function flushTrackerBankQueue() {
             }
             trackerBankPending.shift();
             trackerBankPendingKeys.delete(pendingKey);
+            trackerPersistPendingQueues();
             trackerBankSessions = trackerBankMergeSessions(trackerBankSessions, [data.session]);
             if (String(trackerBankEntriesSessionId || '') !== String(data.session._id)) {
                 trackerBankEntries = [];
@@ -956,6 +1183,9 @@ async function syncTrackerFromLive() {
             const firstUnseen = unseenSpins.find(spin => spin.id > settledThrough);
             if (firstUnseen) {
                 hasEligibleNewSpin = true;
+                const eligibleSpins = unseenSpins.filter(spin => spin.id > settledThrough);
+                const auditSnapshot = trackerPredictionAuditSnapshot(firstUnseen.id);
+                enqueueTrackerPredictionAudit(activeSession._id, firstUnseen.id, firstUnseen.number, auditSnapshot);
                 const predictionCenter = trackerBankPredictionCenter();
                 if (Number.isInteger(predictionCenter)) {
                     enqueueTrackerBankSpin({
@@ -963,17 +1193,21 @@ async function syncTrackerFromLive() {
                         spinId: firstUnseen.id,
                         number: firstUnseen.number,
                         predictionCenter,
-                        contextSnapshot: {
-                            history: trackerHistory.slice(-80),
-                            prediction_source: trackerPredictionSource,
-                            system_center: trackerSystemPredictionCenter(),
-                            system_reasoning: trackerSystemReasoningSnapshot(),
-                            ai_center: trackerAiN4Center
-                        }
+                        contextSnapshot: auditSnapshot
                     });
+                }
+                for (const missedSpin of eligibleSpins.slice(1)) {
+                    enqueueTrackerPredictionAudit(
+                        activeSession._id,
+                        missedSpin.id,
+                        missedSpin.number,
+                        trackerPredictionAuditSnapshot(missedSpin.id, false)
+                    );
                 }
                 trackerAiN4Center = null;
                 trackerAiPredictionMetric = null;
+                trackerAiPredictionModel = null;
+                trackerAiPredictionReasoning = null;
                 trackerAiPredictionHistoryLength = -1;
                 trackerAiDisplayStatus = 'ANALIZANDO IA ?';
                 trackerLiveEventRevision++;
@@ -1104,6 +1338,8 @@ function setTrackerSource(source) {
     trackerLastSignal = null;
     trackerAiN4Center = null;
     trackerAiPredictionMetric = null;
+    trackerAiPredictionModel = null;
+    trackerAiPredictionReasoning = null;
     trackerAiPredictionHistoryLength = -1;
     trackerTriggerCounter = 0;
     trackerLastDominantDir = null;
@@ -1138,6 +1374,9 @@ function updateTrackerLiveSync() {
     trackerLiveSyncTimer = setInterval(() => {
         syncTrackerFromLive().finally(() => {
             if (trackerBankPending.length) flushTrackerBankQueue().catch(() => {});
+            if (trackerPredictionAuditPending.length) flushTrackerPredictionAuditQueue().catch(() => {});
+            const bankOverlay = document.getElementById('tracker-bank-overlay');
+            if (bankOverlay && getComputedStyle(bankOverlay).display !== 'none') loadTrackerBankSessions();
         });
     }, 5000);
 }
@@ -1294,24 +1533,22 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
         return;
     }
     if (source === 'live' && !batch && spinId && trackerBankActiveSession()) {
+        const auditSnapshot = trackerPredictionAuditSnapshot(Number(spinId));
+        enqueueTrackerPredictionAudit(trackerBankActiveSession()._id, Number(spinId), n, auditSnapshot);
         const predictionCenter = trackerBankPredictionCenter();
         if (Number.isInteger(predictionCenter) && trackerBankPredictionNumbers().length === 9) enqueueTrackerBankSpin({
             sessionId: trackerBankActiveSession()._id,
             spinId: Number(spinId),
             number: n,
             predictionCenter,
-            contextSnapshot: {
-                history: trackerHistory.slice(-80),
-                prediction_source: trackerPredictionSource,
-                system_center: trackerSystemPredictionCenter(),
-                system_reasoning: trackerSystemReasoningSnapshot(),
-                ai_center: trackerAiN4Center
-            }
+            contextSnapshot: auditSnapshot
         });
     }
     if (!batch && (source === 'live' || trackerPredictionSource === 'ai')) {
         trackerAiN4Center = null;
         trackerAiPredictionMetric = null;
+        trackerAiPredictionModel = null;
+        trackerAiPredictionReasoning = null;
         trackerAiPredictionHistoryLength = -1;
         if (trackerBankActiveSession()) trackerAiDisplayStatus = 'ANALIZANDO IA ?';
     }
@@ -1352,6 +1589,7 @@ async function askTrackerAIForAnalysisSilent(isRetry = false, backgroundPredicti
             trackerAiRetryTimer = null;
         }
     }
+    enqueueTrackerPredictionForecast(trackerBankActiveSession()._id, trackerPredictionAuditSnapshot());
     const ctx = buildTrackerAIContext();
     const prompt = buildTrackerPrompt(ctx, null, backgroundPrediction);
     await callTrackerAISilent(prompt, backgroundPrediction);
@@ -1416,7 +1654,8 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
             prediction_context: aiPrediction ? {
                 revision: requestRevision,
                 history_length: trackerHistory.length,
-                latest_spin: trackerHistory[trackerHistory.length - 1]
+                latest_spin: trackerHistory[trackerHistory.length - 1],
+                mode: trackerConfig.prediction
             } : undefined,
             spinHistory: aiPrediction ? trackerHistory.slice(-80) : undefined,
             messages: aiPrediction
@@ -1576,6 +1815,8 @@ function setTrackerPredictionSource(source) {
     trackerConfig.predictionSource = source;
     trackerAiN4Center = null;
     trackerAiPredictionMetric = null;
+    trackerAiPredictionModel = null;
+    trackerAiPredictionReasoning = null;
     trackerAiPredictionHistoryLength = -1;
     trackerAiDisplayStatus = 'ANALIZANDO IA ?';
     if (trackerAiRetryTimer) clearTimeout(trackerAiRetryTimer);
@@ -1604,6 +1845,8 @@ function setTrackerPredictionMode(mode) {
         trackerConfig.prediction = mode;
         trackerAiN4Center = null;
         trackerAiPredictionMetric = null;
+        trackerAiPredictionModel = null;
+        trackerAiPredictionReasoning = null;
         trackerAiPredictionHistoryLength = -1;
         trackerAiLastRequestedRevision = -1;
         localStorage.setItem('tracker_ai_config', JSON.stringify(trackerConfig));
@@ -2810,12 +3053,17 @@ function syncPredictionFromAI(responseText, backgroundPrediction = false) {
         allowedMetrics.some(metric => metric.family === metricFamily.toLowerCase() && metric.number === center);
     trackerAiN4Center = metricAllowed ? center : null;
     trackerAiPredictionMetric = metricAllowed ? metricFamily : null;
+    trackerAiPredictionModel = metricAllowed ? `${trackerConfig.provider}/${trackerConfig.model}` : null;
+    trackerAiPredictionReasoning = metricAllowed ? String(responseText || '').trim().slice(0, 1800) : null;
     trackerAiPredictionHistoryLength = trackerAiN4Center === null ? -1 : trackerHistory.length;
     if (trackerPredictionSource === 'ai') {
         predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${trackerAiPredictionMetric}: ${trackerAiN4Center}`;
         trackerAiDisplayStatus = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${trackerAiPredictionMetric}: ${trackerAiN4Center}`;
     }
     if (trackerAiN4Center === null) console.warn(`[Tracker AI] Response did not match the allowed ${trackerConfig.prediction} metric filter.`, responseText);
+    if (trackerBankActiveSession() && trackerSource === 'live') {
+        enqueueTrackerPredictionForecast(trackerBankActiveSession()._id, trackerPredictionAuditSnapshot());
+    }
     renderTrackerBankroll();
 }
 

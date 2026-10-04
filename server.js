@@ -12,6 +12,7 @@ const mongoose = require('mongoose');
 const TrackerBankrollSession = require('./models/TrackerBankrollSession');
 const TrackerBankrollEntry = require('./models/TrackerBankrollEntry');
 const TrackerAnalystSnapshot = require('./models/TrackerAnalystSnapshot');
+const TrackerPredictionAudit = require('./models/TrackerPredictionAudit');
 const trackerBankroll = require('./src/engine/tracker_bankroll');
 const predictor = require('./src/engine/predictor'); // Agents 1-4
 const { WHEEL_ORDER, WHEEL_INDEX } = predictor;
@@ -1694,10 +1695,23 @@ app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
         const selected = (req.query.session_id
             ? sessions.find(item => String(item._id) === String(req.query.session_id))
             : null) || sessions.find(item => item.status === 'active');
-        const entries = selected
-            ? await TrackerBankrollEntry.find({ session_id: selected._id }).sort({ created_at: -1 }).limit(30).lean().exec()
-            : [];
-        res.json({ sessions, selected_session_id: selected?._id || null, entries: entries.reverse(), storage: 'mongodb' });
+        const [entries, sessionAudits, legacyAudits] = selected ? await Promise.all([
+            TrackerBankrollEntry.find({ session_id: selected._id }).sort({ created_at: -1 }).limit(30).lean().exec(),
+            TrackerPredictionAudit.find({ bankroll_session_id: String(selected._id) })
+                .sort({ updated_at: -1 }).limit(500)
+                .lean().exec(),
+            TrackerAnalystSnapshot.find({ bankroll_session_id: String(selected._id) })
+                .sort({ updated_at: -1 }).limit(500)
+                .select('spin_id latest_number analyst_model analyst_status analyst_summary analyst_error bankroll_session_id bankroll_session_no prediction_mode prediction_source forecast_history_length system_center system_status system_metric_label system_reasoning system_won system_reward ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won ai_reward result_spin_id result_number audited_at updated_at')
+                .lean().exec()
+        ]) : [[], [], []];
+        const auditByForecast = new Map();
+        for (const audit of legacyAudits) auditByForecast.set(String(audit.spin_id), audit);
+        for (const audit of sessionAudits) auditByForecast.set(String(audit.spin_id), audit);
+        const audits = Array.from(auditByForecast.values())
+            .sort((left, right) => Number(left.result_spin_id || 0) - Number(right.result_spin_id || 0))
+            .slice(-500);
+        res.json({ sessions, selected_session_id: selected?._id || null, entries: entries.reverse(), audits: audits.reverse(), storage: 'mongodb' });
     } catch (error) {
         console.error('[Tracker bankroll] Load failed:', error.message);
         res.status(500).json({ error: 'No se pudieron cargar las sesiones desde MongoDB.' });
@@ -1784,6 +1798,126 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/activate', async (req, res) 
     }
 });
 
+app.post('/api/tracker/bankroll/:tableId/:sessionId/forecast', async (req, res) => {
+    if (!db.getUseMongo()) return res.status(503).json({ error: 'MongoDB Atlas no está conectado.' });
+    const tableId = Number(req.params.tableId);
+    const sessionId = String(req.params.sessionId || '');
+    const baseSpinId = Number(req.body.forecast_base_spin_id);
+    if (!Number.isInteger(tableId) || tableId < 1 || !sessionId || !Number.isInteger(baseSpinId) || baseSpinId < 1) {
+        return res.status(400).json({ error: 'Pronóstico de sesión inválido.' });
+    }
+    try {
+        const [session, baseSpin] = await Promise.all([
+            TrackerBankrollSession.findOne({ _id: sessionId, table_id: tableId, status: 'active' }).select('_id session_no').lean().exec(),
+            Spin.findOne({ id: baseSpinId, table_id: tableId, source_quality: 'live' }).select('id number').lean().exec()
+        ]);
+        if (!session) return res.status(409).json({ error: 'No hay una sesión activa para guardar el pronóstico.' });
+        if (!baseSpin) return res.status(409).json({ error: 'El giro base Live aún no está confirmado en MongoDB.' });
+
+        const raw = req.body.context_snapshot && typeof req.body.context_snapshot === 'object' ? req.body.context_snapshot : {};
+        const center = value => {
+            const parsed = value == null ? null : Number(value);
+            return Number.isInteger(parsed) && parsed >= 0 && parsed <= 36 ? parsed : null;
+        };
+        const labels = new Set(['CW_N9', 'CCW_N9', 'CW_N4S', 'CW_N4B', 'CCW_N4S', 'CCW_N4B']);
+        const systemCenter = center(raw.system_center);
+        const aiCenter = center(raw.ai_center);
+        const previous = await TrackerPredictionAudit.findOne({ table_id: tableId, bankroll_session_id: String(session._id), spin_id: baseSpinId })
+            .select('result_number').lean().exec();
+        const resultNumber = Number.isInteger(Number(previous?.result_number)) && previous?.result_number !== null
+            ? Number(previous.result_number) : null;
+        const hit = candidate => candidate === null || resultNumber === null
+            ? null : wheelNeighbors(candidate, 4).includes(resultNumber);
+        const systemWon = hit(systemCenter);
+        const aiWon = hit(aiCenter);
+        const forecast = await TrackerPredictionAudit.findOneAndUpdate(
+            { table_id: tableId, bankroll_session_id: String(session._id), spin_id: baseSpinId },
+            {
+                $setOnInsert: {
+                    table_id: tableId,
+                    bankroll_session_id: String(session._id),
+                    bankroll_session_no: Number(session.session_no),
+                    spin_id: baseSpinId,
+                    latest_number: Number(baseSpin.number),
+                    created_at: new Date()
+                },
+                $set: {
+                    bankroll_session_no: Number(session.session_no),
+                    prediction_mode: ['n4', 'n9', 'both'].includes(raw.prediction_mode) ? raw.prediction_mode : null,
+                    prediction_source: raw.prediction_source === 'ai' ? 'ai' : 'system',
+                    forecast_history_length: raw.forecast_history_length != null && Number.isInteger(Number(raw.forecast_history_length)) ? Number(raw.forecast_history_length) : null,
+                    system_center: systemCenter,
+                    system_status: systemCenter === null ? (raw.system_status === 'late' ? 'late' : 'unavailable') : 'ready',
+                    system_metric_label: labels.has(raw.system_metric_label) ? raw.system_metric_label : '',
+                    system_reasoning: systemCenter === null ? null : (raw.system_reasoning || null),
+                    system_won: systemWon,
+                    system_reward: systemWon === null ? null : systemWon ? 1 : -1,
+                    ai_center: aiCenter,
+                    ai_metric_label: labels.has(raw.ai_metric_label) ? raw.ai_metric_label : '',
+                    ai_model: aiCenter === null ? '' : String(raw.ai_model || '').slice(0, 120),
+                    ai_reasoning: aiCenter === null ? '' : String(raw.ai_reasoning || '').slice(0, 1800),
+                    ai_status: aiCenter === null ? (raw.ai_status === 'late' ? 'late' : 'unavailable') : 'ready',
+                    ai_won: aiWon,
+                    ai_reward: aiWon === null ? null : aiWon ? 1 : -1,
+                    updated_at: new Date()
+                }
+            },
+            { new: true, upsert: true, setDefaultsOnInsert: true }
+        ).lean().exec();
+        await TrackerAnalystSnapshot.updateOne({ table_id: tableId, spin_id: baseSpinId }, { $set: { has_bankroll_audit: true } }).exec();
+        const analystSnapshot = await TrackerAnalystSnapshot.findOne({ table_id: tableId, spin_id: baseSpinId })
+            .select('analyst_model analyst_status analyst_summary analyst_error').lean().exec();
+        if (analystSnapshot) {
+            await TrackerPredictionAudit.updateOne({ _id: forecast._id }, { $set: {
+                analyst_model: analystSnapshot.analyst_model,
+                analyst_status: analystSnapshot.analyst_status,
+                analyst_summary: analystSnapshot.analyst_summary,
+                analyst_error: analystSnapshot.analyst_error,
+                updated_at: new Date()
+            } });
+        }
+        const savedForecast = analystSnapshot
+            ? { ...forecast, analyst_model: analystSnapshot.analyst_model, analyst_status: analystSnapshot.analyst_status, analyst_summary: analystSnapshot.analyst_summary, analyst_error: analystSnapshot.analyst_error }
+            : forecast;
+        res.json({
+            success: true,
+            forecast: {
+                spin_id: savedForecast.spin_id,
+                latest_number: savedForecast.latest_number,
+                analyst_model: savedForecast.analyst_model,
+                analyst_status: savedForecast.analyst_status,
+                analyst_summary: savedForecast.analyst_summary,
+                analyst_error: savedForecast.analyst_error,
+                bankroll_session_id: savedForecast.bankroll_session_id,
+                bankroll_session_no: savedForecast.bankroll_session_no,
+                prediction_mode: savedForecast.prediction_mode,
+                prediction_source: savedForecast.prediction_source,
+                forecast_history_length: savedForecast.forecast_history_length,
+                system_center: savedForecast.system_center,
+                system_status: savedForecast.system_status,
+                system_metric_label: savedForecast.system_metric_label,
+                system_reasoning: savedForecast.system_reasoning,
+                system_won: savedForecast.system_won,
+                system_reward: savedForecast.system_reward,
+                ai_center: savedForecast.ai_center,
+                ai_metric_label: savedForecast.ai_metric_label,
+                ai_model: savedForecast.ai_model,
+                ai_reasoning: savedForecast.ai_reasoning,
+                ai_status: savedForecast.ai_status,
+                ai_won: savedForecast.ai_won,
+                ai_reward: savedForecast.ai_reward,
+                result_spin_id: savedForecast.result_spin_id,
+                result_number: savedForecast.result_number,
+                audited_at: savedForecast.audited_at
+            },
+            storage: 'mongodb'
+        });
+    } catch (error) {
+        console.error('[Tracker audit] Forecast save failed:', error.message);
+        res.status(500).json({ error: 'No se pudieron guardar los centros de SISTEMA e IA.' });
+    }
+});
+
 app.post('/api/tracker/bankroll/:tableId/stop-active', async (req, res) => {
     const tableId = Number(req.params.tableId);
     if (!Number.isInteger(tableId)) return res.status(400).json({ error: 'Mesa inválida.' });
@@ -1847,6 +1981,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     const aiCenter = rawContext.ai_center == null ? null : Number(rawContext.ai_center);
     const validSystemCenter = Number.isInteger(systemCenter) && systemCenter >= 0 && systemCenter <= 36 ? systemCenter : null;
     const validAiCenter = Number.isInteger(aiCenter) && aiCenter >= 0 && aiCenter <= 36 ? aiCenter : null;
+    const validMetricLabels = new Set(['CW_N9', 'CCW_N9', 'CW_N4S', 'CW_N4B', 'CCW_N4S', 'CCW_N4B']);
+    const validPredictionMode = ['n4', 'n9', 'both'].includes(rawContext.prediction_mode) ? rawContext.prediction_mode : null;
+    const validSystemMetricLabel = validMetricLabels.has(rawContext.system_metric_label) ? rawContext.system_metric_label : null;
+    const validAiMetricLabel = validMetricLabels.has(rawContext.ai_metric_label) ? rawContext.ai_metric_label : null;
+    const forecastBaseSpinId = Number.isInteger(Number(rawContext.forecast_base_spin_id)) && Number(rawContext.forecast_base_spin_id) > 0
+        ? Number(rawContext.forecast_base_spin_id) : null;
     const systemWon = validSystemCenter !== null ? wheelNeighbors(validSystemCenter, 4).includes(number) : null;
     const aiWon = validAiCenter !== null ? wheelNeighbors(validAiCenter, 4).includes(number) : null;
     const rawSystemReasoning = rawContext.system_reasoning && typeof rawContext.system_reasoning === 'object'
@@ -1857,6 +1997,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
         rule: String(rawSystemReasoning.rule || '').slice(0, 80),
         direction: ['CW', 'CCW'].includes(rawSystemReasoning.direction) ? rawSystemReasoning.direction : '',
         selected_target: validSystemCenter,
+        metric_label: validSystemMetricLabel,
         target_cw: Number.isInteger(Number(rawSystemReasoning.target_cw)) ? Number(rawSystemReasoning.target_cw) : null,
         target_ccw: Number.isInteger(Number(rawSystemReasoning.target_ccw)) ? Number(rawSystemReasoning.target_ccw) : null,
         confidence_cw: safeNumber(rawSystemReasoning.confidence_cw),
@@ -1873,17 +2014,33 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
             : []
     };
     const contextSnapshot = {
+        audit_version: Number(rawContext.audit_version) === 1 ? 1 : 0,
         history: Array.isArray(rawContext.history)
             ? rawContext.history.slice(-80).map(Number).filter(value => Number.isInteger(value) && value >= 0 && value <= 36)
             : [],
         prediction_source: rawContext.prediction_source === 'ai' ? 'ai' : 'system',
+        prediction_mode: validPredictionMode,
+        forecast_base_spin_id: forecastBaseSpinId,
+        forecast_history_length: rawContext.forecast_history_length != null && Number.isInteger(Number(rawContext.forecast_history_length))
+            ? Number(rawContext.forecast_history_length) : null,
         system_center: validSystemCenter,
+        system_metric_label: validSystemMetricLabel,
+        system_status: validSystemCenter === null ? (rawContext.system_status === 'late' ? 'late' : 'unavailable') : 'ready',
         system_reasoning: systemReasoning,
         system_won: systemWon,
         system_reward: systemWon === null ? null : systemWon ? 1 : -1,
         ai_center: validAiCenter,
+        ai_metric_label: validAiMetricLabel,
+        ai_model: validAiCenter === null ? null : String(rawContext.ai_model || '').slice(0, 120),
+        ai_reasoning: validAiCenter === null ? '' : String(rawContext.ai_reasoning || '').slice(0, 1800),
+        ai_status: validAiCenter === null ? 'unavailable' : 'ready',
         ai_won: aiWon,
-        ai_reward: aiWon === null ? null : aiWon ? 1 : -1
+        ai_reward: aiWon === null ? null : aiWon ? 1 : -1,
+        analyst_base_spin_id: forecastBaseSpinId,
+        analyst_status: 'unavailable',
+        analyst_model: '',
+        analyst_snapshot_id: '',
+        analyst_summary: ''
     };
     const predictionNumbers = Number.isInteger(predictionCenter) && predictionCenter >= 0 && predictionCenter <= 36
         ? wheelNeighbors(predictionCenter, 4)
@@ -1899,6 +2056,16 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     try {
         const spin = await Spin.findOne({ id: spinId, table_id: tableId, number, source_quality: 'live' }).lean().exec();
         if (!spin) return res.status(409).json({ error: 'La tirada Live no está confirmada en MongoDB.' });
+        if (forecastBaseSpinId !== null) {
+            const analystSnapshot = await TrackerAnalystSnapshot.findOne({ table_id: tableId, spin_id: forecastBaseSpinId })
+                .select('_id analyst_status analyst_model analyst_summary').lean().exec();
+            if (analystSnapshot) {
+                contextSnapshot.analyst_status = String(analystSnapshot.analyst_status || 'pending');
+                contextSnapshot.analyst_model = String(analystSnapshot.analyst_model || '').slice(0, 120);
+                contextSnapshot.analyst_snapshot_id = String(analystSnapshot._id);
+                contextSnapshot.analyst_summary = String(analystSnapshot.analyst_summary || '').slice(0, 1200);
+            }
+        }
 
         const mongoSession = await mongoose.startSession();
         let result;
@@ -1988,6 +2155,132 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     }
 });
 
+app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => {
+    if (!db.getUseMongo()) return res.status(503).json({ error: 'MongoDB Atlas no está conectado.' });
+    const tableId = Number(req.params.tableId);
+    const sessionId = String(req.params.sessionId || '');
+    const baseSpinId = Number(req.body.forecast_base_spin_id);
+    const resultSpinId = Number(req.body.result_spin_id);
+    const resultNumber = Number(req.body.result_number);
+    if (!Number.isInteger(tableId) || tableId < 1 || !sessionId ||
+        !Number.isInteger(baseSpinId) || baseSpinId < 1 ||
+        !Number.isInteger(resultSpinId) || resultSpinId <= baseSpinId ||
+        !Number.isInteger(resultNumber) || resultNumber < 0 || resultNumber > 36) {
+        return res.status(400).json({ error: 'Auditoría de predicción inválida.' });
+    }
+    try {
+        const [session, resultSpin, baseSpin] = await Promise.all([
+            TrackerBankrollSession.findOne({ _id: sessionId, table_id: tableId }).select('_id session_no').lean().exec(),
+            Spin.findOne({ id: resultSpinId, table_id: tableId, number: resultNumber, source_quality: 'live' }).select('id number').lean().exec(),
+            Spin.findOne({ id: baseSpinId, table_id: tableId }).select('id number').lean().exec()
+        ]);
+        if (!session) return res.status(404).json({ error: 'No se encontró la sesión.' });
+        if (!resultSpin || !baseSpin) return res.status(409).json({ error: 'La tirada Live no está confirmada en MongoDB.' });
+
+        const raw = req.body.context_snapshot && typeof req.body.context_snapshot === 'object' ? req.body.context_snapshot : {};
+        const center = value => {
+            const parsed = value == null ? null : Number(value);
+            return Number.isInteger(parsed) && parsed >= 0 && parsed <= 36 ? parsed : null;
+        };
+        const labels = new Set(['CW_N9', 'CCW_N9', 'CW_N4S', 'CW_N4B', 'CCW_N4S', 'CCW_N4B']);
+        const key = { table_id: tableId, bankroll_session_id: String(session._id), spin_id: baseSpinId };
+        const previous = await TrackerPredictionAudit.findOne(key).lean().exec();
+        const systemCenter = center(raw.system_center) ?? center(previous?.system_center);
+        const aiCenter = center(raw.ai_center) ?? center(previous?.ai_center);
+        const systemWon = systemCenter === null ? null : wheelNeighbors(systemCenter, 4).includes(resultNumber);
+        const aiWon = aiCenter === null ? null : wheelNeighbors(aiCenter, 4).includes(resultNumber);
+        const audit = await TrackerPredictionAudit.findOneAndUpdate(
+            key,
+            {
+                $setOnInsert: {
+                    table_id: tableId,
+                    bankroll_session_id: String(session._id),
+                    bankroll_session_no: Number(session.session_no),
+                    spin_id: baseSpinId,
+                    latest_number: Number(baseSpin.number),
+                    created_at: new Date()
+                },
+                $set: {
+                    bankroll_session_no: Number(session.session_no),
+                    prediction_mode: ['n4', 'n9', 'both'].includes(raw.prediction_mode) ? raw.prediction_mode : previous?.prediction_mode || null,
+                    prediction_source: ['ai', 'system'].includes(raw.prediction_source) ? raw.prediction_source : previous?.prediction_source || 'system',
+                    forecast_history_length: raw.forecast_history_length != null && Number.isInteger(Number(raw.forecast_history_length)) ? Number(raw.forecast_history_length) : null,
+                    system_center: systemCenter,
+                    system_status: systemCenter === null ? (raw.system_status === 'late' ? 'late' : previous?.system_status || 'unavailable') : 'ready',
+                    system_metric_label: labels.has(raw.system_metric_label) ? raw.system_metric_label : previous?.system_metric_label || '',
+                    system_reasoning: systemCenter === null ? previous?.system_reasoning || null : (raw.system_reasoning || previous?.system_reasoning || null),
+                    system_won: systemWon,
+                    system_reward: systemWon === null ? null : systemWon ? 1 : -1,
+                    ai_center: aiCenter,
+                    ai_metric_label: labels.has(raw.ai_metric_label) ? raw.ai_metric_label : previous?.ai_metric_label || '',
+                    ai_model: aiCenter === null ? previous?.ai_model || '' : String(raw.ai_model || previous?.ai_model || '').slice(0, 120),
+                    ai_reasoning: aiCenter === null ? previous?.ai_reasoning || '' : String(raw.ai_reasoning || previous?.ai_reasoning || '').slice(0, 1800),
+                    ai_status: aiCenter === null ? (raw.ai_status === 'late' ? 'late' : previous?.ai_status || 'unavailable') : 'ready',
+                    ai_won: aiWon,
+                    ai_reward: aiWon === null ? null : aiWon ? 1 : -1,
+                    result_spin_id: resultSpinId,
+                    result_number: resultNumber,
+                    audited_at: new Date(),
+                    updated_at: new Date()
+                }
+            },
+            { new: true, upsert: true, setDefaultsOnInsert: true }
+        ).lean().exec();
+        await TrackerAnalystSnapshot.updateOne({ table_id: tableId, spin_id: baseSpinId }, { $set: { has_bankroll_audit: true } }).exec();
+        const analystSnapshot = await TrackerAnalystSnapshot.findOne({ table_id: tableId, spin_id: baseSpinId })
+            .select('analyst_model analyst_status analyst_summary analyst_error').lean().exec();
+        if (analystSnapshot) {
+            await TrackerPredictionAudit.updateOne({ _id: audit._id }, { $set: {
+                analyst_model: analystSnapshot.analyst_model,
+                analyst_status: analystSnapshot.analyst_status,
+                analyst_summary: analystSnapshot.analyst_summary,
+                analyst_error: analystSnapshot.analyst_error,
+                updated_at: new Date()
+            } });
+        }
+        const savedAudit = analystSnapshot
+            ? { ...audit, analyst_model: analystSnapshot.analyst_model, analyst_status: analystSnapshot.analyst_status, analyst_summary: analystSnapshot.analyst_summary, analyst_error: analystSnapshot.analyst_error }
+            : audit;
+        res.json({
+            success: true,
+            snapshot_id: String(savedAudit._id),
+            audit: {
+                spin_id: savedAudit.spin_id,
+                latest_number: savedAudit.latest_number,
+                analyst_model: savedAudit.analyst_model,
+                analyst_status: savedAudit.analyst_status,
+                analyst_summary: savedAudit.analyst_summary,
+                analyst_error: savedAudit.analyst_error,
+                bankroll_session_id: savedAudit.bankroll_session_id,
+                bankroll_session_no: savedAudit.bankroll_session_no,
+                prediction_mode: savedAudit.prediction_mode,
+                prediction_source: savedAudit.prediction_source,
+                forecast_history_length: savedAudit.forecast_history_length,
+                system_center: savedAudit.system_center,
+                system_status: savedAudit.system_status,
+                system_metric_label: savedAudit.system_metric_label,
+                system_reasoning: savedAudit.system_reasoning,
+                system_won: savedAudit.system_won,
+                system_reward: savedAudit.system_reward,
+                ai_center: savedAudit.ai_center,
+                ai_metric_label: savedAudit.ai_metric_label,
+                ai_model: savedAudit.ai_model,
+                ai_reasoning: savedAudit.ai_reasoning,
+                ai_status: savedAudit.ai_status,
+                ai_won: savedAudit.ai_won,
+                ai_reward: savedAudit.ai_reward,
+                result_spin_id: savedAudit.result_spin_id,
+                result_number: savedAudit.result_number,
+                audited_at: savedAudit.audited_at
+            },
+            storage: 'mongodb'
+        });
+    } catch (error) {
+        console.error('[Tracker audit] Save failed:', error.message);
+        res.status(500).json({ error: 'No se pudo guardar la auditoría de ambos predictores.' });
+    }
+});
+
 // Tracker AI endpoint — OpenRouter
 const trackerAnalystInFlight = new Set();
 const TRACKER_ANALYST_MODEL = process.env.TRACKER_ANALYST_MODEL || 'qwen/qwen3.6-27b';
@@ -2072,12 +2365,103 @@ function buildTrackerAnalystEvidence(spins) {
             followingTransitionCounts: ['CW-BIG', 'CW-SMALL', 'CCW-BIG', 'CCW-SMALL', 'STAY-SMALL']
                 .map(signature => ({ signature, count: matches.filter(match => match.followingTransition === signature).length }))
         },
+        regimes: buildTrackerRegimeEvidence(steps),
         fluctuation: {
             last15Minutes: summarizeTrackerWindow(valid, 15, now),
             last60Minutes: summarizeTrackerWindow(valid, 60, now)
         },
         note: 'Evidence is descriptive only; historical similarity does not guarantee a future outcome.'
     };
+}
+
+function buildTrackerRegimeEvidence(steps) {
+    const dimensions = [
+        { key: 'direction', label: 'dirección', value: step => step.direction },
+        { key: 'zone', label: 'zona', value: step => step.magnitude },
+        {
+            key: 'level', label: 'nivel',
+            value: step => ((step.signed >= 0 && Math.abs(step.signed) >= 10) || (step.signed < 0 && Math.abs(step.signed) < 10)) ? 'OVER' : 'UNDER'
+        }
+    ];
+    const motifs = [[3, 3], [2, 1, 2, 1], [2, 1, 2, 1, 2, 1], [2, 2, 2, 2], [1, 3, 1, 3], [3, 3, 2, 3, 4]];
+    const bucket = length => length >= 3 ? '3+' : String(length);
+
+    return dimensions.map(dimension => {
+        const sequence = steps.map(dimension.value);
+        const runs = [];
+        sequence.forEach((symbol, index) => {
+            const last = runs[runs.length - 1];
+            if (last && last.symbol === symbol) last.length++;
+            else runs.push({ symbol, length: 1, start: index });
+        });
+        const windows = [20, 50, 100, 400].map(size => {
+            const values = sequence.slice(-Math.max(1, size - 1));
+            const counts = {};
+            let switches = 0;
+            values.forEach((symbol, index) => {
+                counts[symbol] = (counts[symbol] || 0) + 1;
+                if (index > 0 && symbol !== values[index - 1]) switches++;
+            });
+            const total = values.length;
+            const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || ['', 0];
+            return {
+                spins: Math.min(size, total + 1), counts, switches,
+                dominant: dominant[0], dominantPercent: total ? Math.round(dominant[1] / total * 100) : 0
+            };
+        });
+        const motifStats = motifs.map(motif => {
+            const following = { '1': 0, '2': 0, '3+': 0 };
+            let n = 0;
+            for (let index = 0; index + motif.length < runs.length; index++) {
+                if (!motif.every((length, offset) => runs[index + offset].length === length)) continue;
+                following[bucket(runs[index + motif.length].length)]++;
+                n++;
+            }
+            return { motif, n, following };
+        }).filter(item => item.n > 0);
+        const zigzag = [4, 6].map(width => {
+            let n = 0, continued = 0, stopped = 0;
+            for (let index = 0; index + width < sequence.length; index++) {
+                let alternating = true;
+                for (let offset = 1; offset < width; offset++) {
+                    if (sequence[index + offset] === sequence[index + offset - 1]) {
+                        alternating = false;
+                        break;
+                    }
+                }
+                if (!alternating) continue;
+                n++;
+                if (sequence[index + width] !== sequence[index + width - 1]) continued++;
+                else stopped++;
+            }
+            return { width, n, continued, stopped };
+        });
+
+        // A descriptive proxy only: a 3-run after choppy transitions is
+        // classified by the following run length, never treated as a forecast.
+        const threeRunAfterTurbulence = {
+            criterion: 'racha de longitud 3 precedida por al menos 6 eventos; cambios >=60% en hasta 8 eventos previos; se clasifica por longitud de la racha siguiente',
+            turbulentCases: 0,
+            following: { '1': 0, '2': 0, '3+': 0 }
+        };
+        for (let index = 0; index + 1 < runs.length; index++) {
+            if (runs[index].length !== 3) continue;
+            const leadIn = sequence.slice(Math.max(0, runs[index].start - 8), runs[index].start);
+            let switches = 0;
+            for (let cursor = 1; cursor < leadIn.length; cursor++) {
+                if (leadIn[cursor] !== leadIn[cursor - 1]) switches++;
+            }
+            if (leadIn.length < 6 || switches < Math.ceil((leadIn.length - 1) * 0.6)) continue;
+            threeRunAfterTurbulence.turbulentCases++;
+            threeRunAfterTurbulence.following[bucket(runs[index + 1].length)]++;
+        }
+        return {
+            key: dimension.key, label: dimension.label,
+            currentRun: runs.length ? { state: runs[runs.length - 1].symbol, length: runs[runs.length - 1].length } : null,
+            recentRuns: runs.slice(-10).map(run => ({ state: run.symbol, length: run.length })),
+            windows, zigzag, motifs: motifStats, threeRunAfterTurbulence
+        };
+    });
 }
 
 function startTrackerAnalystReview(snapshotId, evidence, apiKey, tableId, spinId) {
@@ -2089,7 +2473,7 @@ function startTrackerAnalystReview(snapshotId, evidence, apiKey, tableId, spinId
         trackerAnalystInFlight.delete(inFlightKey);
         TrackerAnalystSnapshot.updateOne({ _id: snapshotId }, {
             $set: { analyst_status: 'failed', analyst_error: 'OpenRouter API key faltante.', updated_at: new Date() }
-        }).catch(() => {});
+        }).then(() => syncTrackerAnalystResultToAudits(tableId, spinId)).catch(() => {});
         return;
     }
     (async () => {
@@ -2107,7 +2491,7 @@ function startTrackerAnalystReview(snapshotId, evidence, apiKey, tableId, spinId
                 body: JSON.stringify({
                     model: TRACKER_ANALYST_MODEL,
                     messages: [
-                        { role: 'system', content: 'Eres un analista descriptivo de secuencias de ruleta. No predigas números, no elijas centro, no recomiendes apuestas ni afirmes causalidad. Evalúa solo la evidencia numérica recibida; señala similitud, tamaño de muestra, distribución de resultados posteriores y fluctuación 15/60 min. Devuelve JSON compacto con las claves: hallazgo (string), confianza_evidencia (baja|media|alta), limite (string). Si no hay coincidencias suficientes, dilo claramente.' },
+                        { role: 'system', content: 'Eres un analista descriptivo de secuencias de ruleta. No predigas números, no elijas centro, no recomiendes apuestas ni afirmes causalidad. Compara por separado dirección, zona y nivel; resume muestras, dominancias, cambios, motivos de bloques, zigzag y observaciones de rachas de 3 tras turbulencia. Una racha de 3 tras turbulencia es una observación, no confirmes una falsa ruptura. Usa n, resultados posteriores y fluctuación 15/60 min; si la muestra es baja, dilo. Devuelve JSON compacto con: hallazgo (string con conteos concretos), confianza_evidencia (baja|media|alta), limite (string). Si no hay coincidencias suficientes, dilo claramente.' },
                         { role: 'user', content: JSON.stringify(evidence) }
                     ],
                     temperature: 0.1,
@@ -2130,17 +2514,42 @@ function startTrackerAnalystReview(snapshotId, evidence, apiKey, tableId, spinId
             await TrackerAnalystSnapshot.updateOne({ _id: snapshotId }, {
                 $set: { analyst_status: 'complete', analyst_summary: summary, analyst_error: '', updated_at: new Date() }
             });
+            await syncTrackerAnalystResultToAudits(tableId, spinId);
             console.log('[Tracker Analyst] Complete:', TRACKER_ANALYST_MODEL, 'table:', tableId, 'spin:', spinId, 'duration_ms:', Date.now() - new Date(evidence.generatedAt).getTime());
         } catch (error) {
             await TrackerAnalystSnapshot.updateOne({ _id: snapshotId }, {
                 $set: { analyst_status: 'failed', analyst_error: String(error.message || error).slice(0, 250), updated_at: new Date() }
             }).catch(() => {});
+            await syncTrackerAnalystResultToAudits(tableId, spinId).catch(() => {});
             console.warn('[Tracker Analyst] Review failed:', error.message);
         } finally {
             clearTimeout(timeout);
             trackerAnalystInFlight.delete(inFlightKey);
         }
     })();
+}
+
+async function syncTrackerAnalystResultToAudits(tableId, spinId) {
+    const snapshot = await TrackerAnalystSnapshot.findOne({ table_id: Number(tableId), spin_id: Number(spinId) })
+        .select('_id analyst_status analyst_model analyst_summary analyst_error').lean().exec();
+    if (!snapshot) return;
+    const analystFields = {
+        analyst_model: String(snapshot.analyst_model || '').slice(0, 120),
+        analyst_status: String(snapshot.analyst_status || 'pending'),
+        analyst_summary: String(snapshot.analyst_summary || '').slice(0, 1200),
+        analyst_error: String(snapshot.analyst_error || ''),
+        updated_at: new Date()
+    };
+    await TrackerPredictionAudit.updateMany({ table_id: Number(tableId), spin_id: Number(spinId) }, { $set: analystFields });
+    await TrackerBankrollEntry.updateMany({
+        table_id: Number(tableId),
+        'context_snapshot.analyst_base_spin_id': Number(spinId)
+    }, { $set: {
+        'context_snapshot.analyst_status': analystFields.analyst_status,
+        'context_snapshot.analyst_model': analystFields.analyst_model,
+        'context_snapshot.analyst_snapshot_id': String(snapshot._id),
+        'context_snapshot.analyst_summary': analystFields.analyst_summary
+    } });
 }
 
 app.post('/api/ai/tracker', async (req, res) => {
@@ -2177,6 +2586,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                     if (liveSpins.length) {
                         const evidence = buildTrackerAnalystEvidence(liveSpins);
                         const latestSpinId = Number(liveSpins[liveSpins.length - 1].id);
+                        const hasBankrollAudit = Boolean(await TrackerPredictionAudit.exists({ table_id: numericTableId, spin_id: latestSpinId }));
                         const previous = await TrackerAnalystSnapshot.findOne({ table_id: numericTableId, spin_id: latestSpinId })
                             .select('_id analyst_status').lean().exec();
                         const snapshot = await TrackerAnalystSnapshot.findOneAndUpdate(
@@ -2185,19 +2595,27 @@ app.post('/api/ai/tracker', async (req, res) => {
                                 $setOnInsert: {
                                     table_id: numericTableId,
                                     spin_id: latestSpinId,
-                                    latest_number: evidence.latestNumber,
-                                    evidence,
                                     analyst_model: TRACKER_ANALYST_MODEL,
                                     analyst_status: 'pending',
                                     created_at: new Date()
                                 },
-                                $set: { updated_at: new Date() }
+                                $set: {
+                                    latest_number: evidence.latestNumber,
+                                    evidence,
+                                    ...(hasBankrollAudit ? { has_bankroll_audit: true } : {}),
+                                    updated_at: new Date()
+                                }
                             },
                             { new: true, upsert: true, setDefaultsOnInsert: true }
                         ).lean().exec();
-                        if (!previous) {
+                        if (!previous || previous.analyst_status !== 'complete') {
                             startTrackerAnalystReview(snapshot._id, evidence, key, numericTableId, latestSpinId);
-                            TrackerAnalystSnapshot.deleteMany({ table_id: numericTableId, spin_id: { $lt: latestSpinId - 200 } })
+                            TrackerAnalystSnapshot.deleteMany({
+                                table_id: numericTableId,
+                                spin_id: { $lt: latestSpinId - 200 },
+                                has_bankroll_audit: { $ne: true },
+                                bankroll_session_id: { $in: ['', null] }
+                            })
                                 .catch(error => console.warn('[Tracker Analyst] Snapshot cleanup failed:', error.message));
                         }
                         const recentReviews = await TrackerAnalystSnapshot.find({
@@ -2225,26 +2643,90 @@ app.post('/api/ai/tracker', async (req, res) => {
                 console.warn('[Tracker Analyst] Evidence unavailable; Gemini continues with its current data:', analystError.message);
             }
             try {
-                const aiEntries = await TrackerBankrollEntry.find({
-                    table_id: Number(tableId),
-                    'context_snapshot.ai_won': { $in: [true, false] }
-                }).sort({ created_at: -1 }).limit(120).select('context_snapshot.ai_center context_snapshot.ai_won context_snapshot.history round created_at').lean().exec();
+                const tableNumber = Number(tableId);
+                const predictionMode = ['n4', 'n9', 'both'].includes(predictionContext?.mode) ? predictionContext.mode : null;
+                const modeFilter = predictionMode ? { prediction_mode: predictionMode } : {};
+                const [predictionAudits, legacyAudits] = await Promise.all([
+                    TrackerPredictionAudit.find({ table_id: tableNumber, result_spin_id: { $gt: 0 }, ...modeFilter })
+                        .sort({ result_spin_id: -1 }).limit(240).lean().exec(),
+                    TrackerAnalystSnapshot.find({
+                        table_id: tableNumber,
+                        result_spin_id: { $gt: 0 },
+                        bankroll_session_id: { $nin: ['', null] },
+                        ...modeFilter
+                    }).sort({ result_spin_id: -1 }).limit(240)
+                        .select('spin_id evidence.currentSequence evidence.regimes system_center system_metric_label system_reasoning system_won system_reward ai_center ai_metric_label ai_model ai_reasoning ai_won ai_reward result_spin_id result_number audited_at prediction_mode bankroll_session_id')
+                        .lean().exec()
+                ]);
+                const relevantBaseSpinIds = Array.from(new Set([
+                    ...predictionAudits.map(snapshot => Number(snapshot.spin_id)),
+                    ...legacyAudits.map(snapshot => Number(snapshot.spin_id))
+                ]));
+                const analystEvidenceDocs = relevantBaseSpinIds.length
+                    ? await TrackerAnalystSnapshot.find({ table_id: tableNumber, spin_id: { $in: relevantBaseSpinIds } })
+                        .select('spin_id evidence.currentSequence evidence.regimes').lean().exec()
+                    : [];
+                const evidenceByBaseSpin = new Map(analystEvidenceDocs.map(snapshot => [Number(snapshot.spin_id), snapshot.evidence || {}]));
+                const auditsByResult = new Map();
+                for (const snapshot of legacyAudits) auditsByResult.set(Number(snapshot.result_spin_id), snapshot);
+                for (const snapshot of predictionAudits) {
+                    auditsByResult.set(Number(snapshot.result_spin_id), {
+                        ...snapshot,
+                        evidence: evidenceByBaseSpin.get(Number(snapshot.spin_id)) || {}
+                    });
+                }
+                const auditSnapshots = Array.from(auditsByResult.values()).sort((left, right) => Number(right.result_spin_id) - Number(left.result_spin_id)).slice(0, 240);
+                /* Legacy V1 sessions may have bank entries but no standalone audit row. */
+                const auditedResults = new Set(auditSnapshots.map(snapshot => Number(snapshot.result_spin_id)));
+                const makeAuditedEntry = snapshot => ({
+                    _id: `audit:${snapshot.result_spin_id}`,
+                    number: Number(snapshot.result_number),
+                    round: Number(snapshot.result_spin_id),
+                    created_at: snapshot.audited_at,
+                    context_snapshot: {
+                        history: Array.isArray(snapshot.evidence?.currentSequence) ? snapshot.evidence.currentSequence : [],
+                        ai_center: snapshot.ai_center,
+                        ai_metric_label: snapshot.ai_metric_label,
+                        ai_model: snapshot.ai_model,
+                        ai_reasoning: snapshot.ai_reasoning,
+                        ai_won: snapshot.ai_won,
+                        ai_reward: snapshot.ai_reward,
+                        system_center: snapshot.system_center,
+                        system_metric_label: snapshot.system_metric_label,
+                        system_won: snapshot.system_won,
+                        system_reward: snapshot.system_reward,
+                        system_reasoning: snapshot.system_reasoning
+                    }
+                });
+                const legacyAiEntries = await TrackerBankrollEntry.find({
+                    table_id: tableNumber,
+                    'context_snapshot.ai_won': { $in: [true, false] },
+                    ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
+                }).sort({ created_at: -1 }).limit(240).select('spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.history round created_at').lean().exec();
+                const aiEntries = [
+                    ...auditSnapshots.filter(snapshot => typeof snapshot.ai_won === 'boolean').map(makeAuditedEntry),
+                    ...legacyAiEntries.filter(entry => !auditedResults.has(Number(String(entry.spin_key).split(':').pop())))
+                ].sort((a, b) => Number(b.round || 0) - Number(a.round || 0)).slice(0, 120);
                 const wins = aiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
                 const losses = aiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
                 const samples = aiEntries.slice(0, 12).reverse().map(entry => {
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-10).join(',') : '';
-                    return `centro IA ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto' : 'fallo'}${history ? ` (previos ${history})` : ''}`;
+                    const reasoning = String(entry.context_snapshot?.ai_reasoning || '').replace(/\s+/g, ' ').slice(0, 150);
+                    const metric = entry.context_snapshot.ai_metric_label || '?';
+                    const model = entry.context_snapshot.ai_model ? ` ${entry.context_snapshot.ai_model}` : '';
+                    return `${metric} IA${model}, centro ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto' : 'fallo'}${reasoning ? `; análisis: ${reasoning}` : ''}${history ? ` (previos ${history})` : ''}`;
                 });
                 const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Son datos de referencia; decide libremente según el análisis actual.`;
-                const systemEntries = await TrackerBankrollEntry.find({
-                    table_id: Number(tableId),
-                    'context_snapshot.system_center': { $gte: 0, $lte: 36 }
-                }).sort({ created_at: -1 }).limit(120)
-                    .select('number context_snapshot.system_center context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.history round created_at')
+                const legacySystemEntries = await TrackerBankrollEntry.find({
+                    table_id: tableNumber,
+                    'context_snapshot.system_center': { $gte: 0, $lte: 36 },
+                    ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
+                }).sort({ created_at: -1 }).limit(240)
+                    .select('_id spin_key number context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.history round created_at')
                     .lean().exec();
                 const systemBackfills = [];
-                systemEntries.forEach(entry => {
+                legacySystemEntries.forEach(entry => {
                     if (typeof entry.context_snapshot?.system_won === 'boolean') return;
                     const auditedHit = wheelNeighbors(Number(entry.context_snapshot.system_center), 4).includes(Number(entry.number));
                     entry.context_snapshot.system_won = auditedHit;
@@ -2267,6 +2749,10 @@ app.post('/api/ai/tracker', async (req, res) => {
                         console.warn('[Tracker AI] Could not persist legacy system audit backfill:', backfillError.message);
                     }
                 }
+                const systemEntries = [
+                    ...auditSnapshots.filter(snapshot => Number.isInteger(Number(snapshot.system_center)) && typeof snapshot.system_won === 'boolean').map(makeAuditedEntry),
+                    ...legacySystemEntries.filter(entry => !auditedResults.has(Number(String(entry.spin_key).split(':').pop())))
+                ].sort((a, b) => Number(b.round || 0) - Number(a.round || 0)).slice(0, 120);
                 const systemWins = systemEntries.filter(entry => entry.context_snapshot?.system_won === true).length;
                 const systemLosses = systemEntries.filter(entry => entry.context_snapshot?.system_won === false).length;
                 const systemReward = systemEntries.reduce((sum, entry) => sum + Number(entry.context_snapshot?.system_reward || 0), 0);
@@ -2278,11 +2764,39 @@ app.post('/api/ai/tracker', async (req, res) => {
                     const confidence = Number.isFinite(Number(reasoning.consensus_confidence))
                         ? ` conf ${Math.round(Number(reasoning.consensus_confidence))}%` : '';
                     const state = reasoning.direction_state ? ` estado ${reasoning.direction_state}` : '';
-                    return `centro sistema ${entry.context_snapshot.system_center}: ${entry.context_snapshot.system_won ? 'acierto (+1)' : 'fallo (-1)'}, ${direction}${confidence}${state}${history ? ` (previos ${history})` : ''}`;
+                    const metric = entry.context_snapshot.system_metric_label || '?';
+                    return `${metric} Sistema centro ${entry.context_snapshot.system_center}: ${entry.context_snapshot.system_won ? 'acierto (+1)' : 'fallo (-1)'}, ${direction}${confidence}${state}${history ? ` (previos ${history})` : ''}`;
                 });
                 const systemFeedback = `AUDITORÍA Y RECOMPENSA DEL SISTEMA: ${systemEntries.length} señales evaluadas (${systemWins} aciertos, ${systemLosses} fallos; recompensa acumulada ${systemReward >= 0 ? '+' : ''}${systemReward}, +1 acierto/-1 fallo). ${systemSamples.length ? `Muestras recientes con dirección, confianza y contexto: ${systemSamples.join(' | ')}.` : 'Aún no hay auditorías guardadas.'} Úsalo como evidencia secundaria para calibrar tu análisis; no copies automáticamente la señal del sistema ni trates la muestra como garantía.`;
+                const patternGroups = new Map();
+                const activeAiModel = `${provider}/${model}`;
+                const addPatternOutcomes = (snapshot, predictor, won, metric, modelName = '') => {
+                    if (typeof won !== 'boolean' || !metric) return;
+                    for (const regime of Array.isArray(snapshot.evidence?.regimes) ? snapshot.evidence.regimes : []) {
+                        const run = regime.currentRun;
+                        if (!run || !run.state || !Number.isInteger(Number(run.length))) continue;
+                        const length = Number(run.length) >= 3 ? '3+' : String(Number(run.length));
+                        const key = `${predictor}|${metric}|${modelName}|${regime.key}|${run.state}|${length}`;
+                        const group = patternGroups.get(key) || { predictor, metric, modelName, dimension: regime.key, state: run.state, length, n: 0, wins: 0 };
+                        group.n++;
+                        if (won) group.wins++;
+                        patternGroups.set(key, group);
+                    }
+                };
+                auditSnapshots.forEach(snapshot => {
+                    addPatternOutcomes(snapshot, 'SISTEMA', snapshot.system_won, snapshot.system_metric_label || '?');
+                    if (!snapshot.ai_model || snapshot.ai_model === activeAiModel) {
+                        addPatternOutcomes(snapshot, 'IA', snapshot.ai_won, snapshot.ai_metric_label || '?', snapshot.ai_model || activeAiModel);
+                    }
+                });
+                const patternLines = Array.from(patternGroups.values())
+                    .filter(group => group.n >= 4)
+                    .sort((left, right) => right.n - left.n || right.wins / right.n - left.wins / left.n)
+                    .slice(0, 10)
+                    .map(group => `${group.predictor} ${group.metric} ${group.dimension}=${group.state}×${group.length}: ${group.wins}/${group.n} (${Math.round(group.wins / group.n * 100)}%)`);
+                const patternFeedback = `APRENDIZAJE DESCRIPTIVO POR RÉGIMEN (solo grupos con n≥4, mismo filtro ${predictionMode || 'sin filtro'}; IA acotada al modelo actual cuando hay etiqueta): ${patternLines.length ? patternLines.join(' | ') : 'Aún no hay muestra suficiente de sesiones con régimen guardado para estimar aciertos condicionados.'} Son asociaciones históricas, no causas ni garantías; no subas la confianza con muestras pequeñas.`;
                 const lastMessage = requestMessages[requestMessages.length - 1];
-                if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}\n\n${systemFeedback}`;
+                if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}\n\n${systemFeedback}\n\n${patternFeedback}`;
             } catch (learningError) {
                 console.warn('[Tracker AI] No se pudo cargar aprendizaje de banca:', learningError.message);
             }

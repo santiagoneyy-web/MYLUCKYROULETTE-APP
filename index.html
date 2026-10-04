@@ -457,6 +457,11 @@
     .tracker-bank-table th { position:sticky;top:0;background:#172130;color:#adc0d4;padding:5px 4px; }
     .tracker-bank-table td { padding:5px 4px;border-top:1px solid rgba(255,255,255,.05); }
     .tracker-bank-foot { color:var(--muted);font-size:.58rem;line-height:1.45;margin-top:8px; }
+    .tracker-bank-audit { margin-top:8px;border:1px solid var(--border);border-radius:5px;background:rgba(255,255,255,.015); }
+    .tracker-bank-audit summary { cursor:pointer;padding:7px 8px;color:#adc0d4;font-size:.62rem;font-weight:700; }
+    .tracker-bank-audit-note { max-width:230px;white-space:normal;text-align:left!important;color:#9fb3c8; }
+    .tracker-bank-audit-note summary { max-width:230px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+    .tracker-bank-audit-note div { min-width:240px;max-width:360px;white-space:normal;overflow-wrap:anywhere;padding:5px 2px;line-height:1.45; }
     @media(max-width:480px) { .tracker-bank-overlay { padding:8px; }.tracker-bank-panel { max-height:calc(100dvh - 16px); } }
 
     /* â•â• CONFIG PANEL â•â• */
@@ -1189,6 +1194,15 @@
                                 <tbody id="tracker-bank-ledger"><tr><td colspan="6" style="text-align:center">Sin resultados</td></tr></tbody>
                             </table>
                         </div>
+                        <details class="tracker-bank-audit">
+                            <summary>Auditoría SISTEMA + IA + informe Qwen</summary>
+                            <div id="tracker-bank-audit-summary" style="padding:0 8px 6px;color:#adc0d4;font:.58rem var(--mono)">Sesión actual · SISTEMA -- · IA --</div>
+                            <div class="tracker-bank-table-wrap">
+                                <table class="tracker-bank-table"><thead><tr><th>Giro</th><th>Filtro</th><th>Real</th><th>SISTEMA</th><th>IA</th><th>Informe y razonamientos</th></tr></thead>
+                                    <tbody id="tracker-bank-audit-ledger"><tr><td colspan="6" style="text-align:center">Sin auditorías guardadas</td></tr></tbody>
+                                </table>
+                            </div>
+                        </details>
                         <div class="tracker-bank-foot">La sesión y cada resultado Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
                     </aside>
                 </div>
