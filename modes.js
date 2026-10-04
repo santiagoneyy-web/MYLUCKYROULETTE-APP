@@ -496,9 +496,9 @@ function trackerBankMergeSessions(current, incoming) {
         const newSpins = Number(candidate.total_spins || 0);
         const oldTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
         const newTime = new Date(candidate.updated_at || candidate.created_at || 0).getTime();
-        const newer = newSpins > oldSpins || (newSpins === oldSpins && (
-            newTime > oldTime || (newTime === oldTime && candidate.status === 'closed' && existing.status !== 'closed')
-        ));
+        const newer = candidate.status !== existing.status
+            ? newTime >= oldTime
+            : newSpins > oldSpins || newTime >= oldTime;
         if (newer) sessions.set(key, candidate);
     }
     return Array.from(sessions.values())
@@ -519,11 +519,16 @@ async function closeTrackerBankSessionOnReload() {
     if (navigation?.type !== 'reload') return;
     try {
         await flushTrackerBankQueue();
-        await flushTrackerPredictionAuditQueue();
-        if (trackerBankPending.length || trackerPredictionAuditPending.length) {
-            trackerBankSetMessage('Hay giros o auditorías pendientes. La sesión se conserva activa y se reintentará el guardado.');
+        // Persist predictions separately; a delayed/failed audit must not keep
+        // an otherwise settled bankroll session active after a reload.
+        flushTrackerPredictionAuditQueue().catch(() => {});
+        if (trackerBankPending.length) {
+            trackerBankSetMessage('Hay una liquidación Live pendiente. La sesión se conserva activa hasta guardar el giro.');
             return;
         }
+        // Audit snapshots are persisted in localStorage and can finish saving
+        // after the session closes; do not leave the bankroll session wedged.
+        trackerPersistPendingQueues();
         const response = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/stop-active`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', cache: 'no-store'
         });
@@ -538,13 +543,15 @@ function closeTrackerBankSessionOnPageHide() {
     const stop = () => fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/stop-active`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true
     }).catch(() => {});
-    if (trackerBankPending.length || trackerPredictionAuditPending.length) {
-        Promise.allSettled([trackerBankQueue, trackerPredictionAuditQueue]).then(() => {
+    if (trackerBankPending.length) {
+        Promise.allSettled([trackerBankQueue]).then(() => {
             trackerPersistPendingQueues();
-            if (!trackerBankPending.length && !trackerPredictionAuditPending.length) stop();
+            if (!trackerBankPending.length) stop();
         }, trackerPersistPendingQueues);
+    } else {
+        trackerPersistPendingQueues();
+        stop();
     }
-    else stop();
 }
 
 function trackerBankMergeAudits(current, incoming) {
@@ -810,10 +817,9 @@ async function loadTrackerBankSessions() {
         const response = await fetch(url, { cache: 'no-store' });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
-        trackerBankSessions = trackerBankMergeSessions(
-            trackerBankSessions,
-            Array.isArray(data.sessions) ? data.sessions : []
-        );
+        // MongoDB is authoritative for lifecycle status. Do not keep an old
+        // cached "active" session when the server now reports it closed/absent.
+        trackerBankSessions = Array.isArray(data.sessions) ? data.sessions : [];
         const active = trackerBankSessions.find(item => item.status === 'active') || null;
         const latestClosed = trackerBankSessions.find(item => item.status === 'closed') || null;
         const selected = active || latestClosed;
@@ -973,7 +979,6 @@ async function startTrackerBankSession() {
     const capital = Number(document.getElementById('tracker-bank-capital')?.value);
     const chip = Number(document.getElementById('tracker-bank-chip')?.value);
     const startButton = document.getElementById('tracker-bank-start');
-    if (trackerBankActiveSession()) return;
     if (startButton?.disabled) return;
     if (trackerSource !== 'live') {
         trackerBankSetMessage('Cambia el Tracker a LIVE antes de iniciar una sesión con IA.');
@@ -990,6 +995,20 @@ async function startTrackerBankSession() {
     if (startButton) startButton.disabled = true;
     trackerBankSetMessage('Iniciando sesión y guardándola en MongoDB...');
     try {
+        const stateResponse = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}`, { cache: 'no-store' });
+        const stateData = await stateResponse.json().catch(() => ({}));
+        if (!stateResponse.ok || stateData.storage !== 'mongodb') {
+            throw new Error(stateData.error || `HTTP ${stateResponse.status}`);
+        }
+        trackerBankSessions = Array.isArray(stateData.sessions) ? stateData.sessions : [];
+        trackerBankLoadedTableId = String(trackerBankTableId());
+        const authoritativeActive = trackerBankSessions.find(session => session.status === 'active') || null;
+        if (authoritativeActive) {
+            trackerBankSelectedSessionId = authoritativeActive._id;
+            renderTrackerBankroll();
+            trackerBankSetMessage(`La sesión ${authoritativeActive.session_no} sigue activa en MongoDB. Finalízala antes de abrir otra.`);
+            return;
+        }
         renderTracker();
         saveTrackerConfig();
         const createResponse = await fetch(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}`, {
@@ -1047,21 +1066,20 @@ async function closeTrackerBankSession() {
     if (finishButton) finishButton.disabled = true;
     try {
         await trackerBankQueue.catch(() => {});
-        await flushTrackerPredictionAuditQueue();
+        // Audit persistence must not hold up session close; its queue is saved
+        // locally and the API accepts delayed snapshots for closed sessions.
+        flushTrackerPredictionAuditQueue().catch(() => {});
         if (trackerBankPending.length) {
             trackerBankSetMessage('Hay tiradas Live pendientes de guardar en MongoDB. Reconecta antes de finalizar.');
             return;
         }
-        if (trackerPredictionAuditPending.length) {
-            trackerBankSetMessage('Hay auditorías pendientes de guardar en MongoDB. Reconecta antes de finalizar.');
-            return;
-        }
+        const pendingAuditCount = trackerPredictionAuditPending.length;
         const response = await fetch(trackerBankCloseUrl(session._id), { method: 'POST' });
         const data = await response.json();
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
         trackerBankSelectedSessionId = session._id;
         await loadTrackerBankSessions();
-        trackerBankSetMessage(`Sesión finalizada: ${trackerBankOutcomeLabel(data.session.final_outcome)} · ${trackerBankMoney(data.session.balance - data.session.initial_capital)} netos. Resultado guardado.`);
+        trackerBankSetMessage(`Sesión finalizada: ${trackerBankOutcomeLabel(data.session.final_outcome)} · ${trackerBankMoney(data.session.balance - data.session.initial_capital)} netos. Resultado guardado.${pendingAuditCount ? ` ${pendingAuditCount} auditorías siguen en cola y se reintentarán.` : ''}`);
     } catch (error) {
         trackerBankSetMessage(`No se pudo cerrar la sesión en MongoDB: ${error.message}`);
     } finally {

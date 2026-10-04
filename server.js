@@ -1808,10 +1808,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/forecast', async (req, res) 
     }
     try {
         const [session, baseSpin] = await Promise.all([
-            TrackerBankrollSession.findOne({ _id: sessionId, table_id: tableId, status: 'active' }).select('_id session_no').lean().exec(),
+            // A delayed audit can arrive after the user closes the session.
+            // Keep accepting it for the same completed session so the local queue can drain.
+            TrackerBankrollSession.findOne({ _id: sessionId, table_id: tableId, status: { $in: ['active', 'closed'] } }).select('_id session_no').lean().exec(),
             Spin.findOne({ id: baseSpinId, table_id: tableId, source_quality: 'live' }).select('id number').lean().exec()
         ]);
-        if (!session) return res.status(409).json({ error: 'No hay una sesión activa para guardar el pronóstico.' });
+        if (!session) return res.status(409).json({ error: 'No se encontró la sesión para guardar el pronóstico.' });
         if (!baseSpin) return res.status(409).json({ error: 'El giro base Live aún no está confirmado en MongoDB.' });
 
         const raw = req.body.context_snapshot && typeof req.body.context_snapshot === 'object' ? req.body.context_snapshot : {};
