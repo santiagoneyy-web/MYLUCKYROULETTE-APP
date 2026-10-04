@@ -1152,7 +1152,6 @@ function flushTrackerPredictionAuditQueue() {
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok || data.storage !== 'mongodb') {
                     console.warn('[Tracker audit] Snapshot pending:', data.error || `HTTP ${response.status}`);
-                    trackerBankSetMessage(`Registro pendiente para el giro ${audit.spinId}: ${data.error || `HTTP ${response.status}`}. Se conserva para reintentar.`);
                     break;
                 }
                 const savedAudit = data.audit || data.forecast;
