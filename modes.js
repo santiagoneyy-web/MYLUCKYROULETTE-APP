@@ -2053,9 +2053,10 @@ function detectTrackerTurbulence(travels, kind = 'dir') {
     const runSeq = runLens.join('');
     const label = kind === 'dir' ? 'dir' : kind === 'nivel' ? 'nivel' : 'zona';
 
-    // --- RUPTURA: aparicion de 3+ seguidos rompe la turbulencia base ---
+    // Una racha de 3 no confirma por sí sola un cambio de régimen. Se registra
+    // como observación y el analista contrasta bloques y frecuencias históricas.
     if (currentStreak >= 3) {
-        return { name: `RUPTURA ${label.toUpperCase()}`, type: 'breakout', desc: `${currentStreak} ${streakType} seguidos: fin turbulencia`, action: 'FOLLOW_STREAK', next: `seguir la racha de ${streakType}`, confidence: 75 };
+        return { name: `RACHA EN OBSERVACIÓN ${label.toUpperCase()}`, type: 'streak_observation', desc: `${currentStreak} ${streakType} seguidos: posible falsa ruptura; revisar el régimen`, action: 'OBSERVE', next: 'no confirmar ruptura por esta racha sola' };
     }
 
     // --- BLOQUES DE TAMANO VARIABLE (2-5, 3-1, 4-2, etc.) ---
@@ -2201,7 +2202,7 @@ function analyzeDominanceRegime(allTravels, lastTravels) {
         return {
             repeats: sameLen,
             similar: totalSimilar,
-            note: sameLen >= 4 ? 'PATRON UNIVERSAL: continua con alta recurrencia' : `Repite ${sameLen}/${totalSimilar} veces`
+            note: `bloques de tamaño parecido: mismo tipo ${sameLen}/${totalSimilar}; frecuencia descriptiva, no probabilidad de continuación`
         };
     }
 
@@ -2272,15 +2273,16 @@ function analyzeUnderOver(travels) {
         if (symbols[i] === curType) curStreak++; else break;
     }
 
-    // detectar ruptura: si la ultima racha cambio
-    let ruptura = false;
+    // Un bloque largo seguido por otro nivel puede ser transición o patrón;
+    // conservarlo como observación, no como ruptura confirmada.
+    let possibleSwitch = false;
     if (streaks.length >= 2) {
         const prev = streaks[streaks.length - 2];
-        if (prev.len >= 3 && curStreak <= 2 && prev.type !== curType) ruptura = true;
+        if (prev.len >= 3 && curStreak <= 2 && prev.type !== curType) possibleSwitch = true;
     }
 
     return {
-        domType, domPct, curStreak, curType, ruptura,
+        domType, domPct, curStreak, curType, possibleSwitch,
         last6: last.map(s => s.type[0] + s.len).join(' '),
         overCount, underCount
     };
@@ -2295,7 +2297,8 @@ function analyzeThreeVariables(ctx) {
     const patternScore = (pat) => {
         if (!pat) return 0;
         switch (pat.type) {
-            case 'breakout': return 30;         // ruptura: seguir la nueva racha
+            case 'breakout': return 0;          // una ruptura aislada no dirige la decisión
+            case 'streak_observation': return 0; // una racha de 3 no confirma cambio de régimen
             case 'block_complete': return 33;   // bloques variables: completar el bloque actual
             case 'block_switch': return 28;     // bloques variables: bloque completo, cambia
             case 'three_three': return 32;      // bloques 3-3: alternancia clara
@@ -2322,7 +2325,7 @@ function analyzeThreeVariables(ctx) {
     if (dr && dr.currentDirDom) {
         const c = dr.currentDirDom;
         dir.value = c.type === 'CW' ? 'derecha' : 'izquierda';
-        dir.score += Math.min(c.len, 8) * 2; // dominancia: factor medio
+        if (ctx.dirTurbulencePattern?.type !== 'streak_observation') dir.score += Math.min(c.len, 8) * 2; // una racha aislada sigue en observación
         dir.note += `${dir.note ? ' | ' : ''}dominancia ${c.len} ${dir.value}`;
         if (dr.dirPattern) dir.note += ` | historial: ${dr.dirPattern.note}`;
         if (!ctx.dirTurbulencePattern) {
@@ -2344,7 +2347,7 @@ function analyzeThreeVariables(ctx) {
     if (dr && dr.currentZoneDom) {
         const c = dr.currentZoneDom;
         zone.value = c.type === 'BIG' ? 'BIG' : 'SMALL';
-        zone.score += Math.min(c.len, 8) * 2;
+        if (ctx.zoneTurbulencePattern?.type !== 'streak_observation') zone.score += Math.min(c.len, 8) * 2;
         zone.note += `${zone.note ? ' | ' : ''}dominancia ${c.len} ${zone.value}`;
         if (dr.zonePattern) zone.note += ` | historial: ${dr.zonePattern.note}`;
         if (!ctx.zoneTurbulencePattern) {
@@ -2366,10 +2369,10 @@ function analyzeThreeVariables(ctx) {
     if (uo) {
         level.value = uo.domType;
         level.note += `${level.note ? ' | ' : ''}dominante ${uo.domType} ${uo.domPct}% racha ${uo.curType} x${uo.curStreak}`;
-        if (uo.ruptura) { level.score += 12; level.note += ' | RUPTURA UO: cambio inminente'; }
-        if (uo.curStreak >= 5) level.score += 8;
+        if (uo.possibleSwitch) level.note += ' | posible cambio UO: observación, no ruptura confirmada';
+        if (uo.curStreak >= 5 && ctx.uoTurbulencePattern?.type !== 'streak_observation') level.score += 8;
         if (!ctx.uoTurbulencePattern) {
-            if (uo.curStreak >= 3) { level.score += 15; level.note += ' (sin patron: pura dominancia)'; }
+            if (uo.curStreak >= 4 && uo.domPct >= 60) { level.score += 10; level.note += ' (racha y dominancia observadas; verificar historial)'; }
             else if (uo.domPct < 55) { level.score -= 5; level.note += ' (sin patron ni dominancia clara)'; }
         }
     }
@@ -2392,6 +2395,88 @@ function checkTripleConsistency(dir, zone, level) {
     if (!dir || !zone || !level) return false;
     const over = (dir === 'derecha' && zone === 'BIG') || (dir === 'izquierda' && zone === 'SMALL');
     return over ? level === 'OVER' : level === 'UNDER';
+}
+
+function buildTrackerPatternEvidence(spins) {
+    if (!Array.isArray(spins) || spins.length < 7) return 'Patrones históricos: muestra insuficiente para comparar bloques.';
+
+    const jumps = [];
+    for (let i = 1; i < spins.length; i++) jumps.push(calcDist(spins[i - 1], spins[i]));
+    const definitions = [
+        { key: 'DIR', label: { R: 'DER', L: 'IZQ' }, get: d => d >= 0 ? 'R' : 'L' },
+        { key: 'ZONA', label: { B: 'BIG', S: 'SMALL' }, get: d => Math.abs(d) >= 10 ? 'B' : 'S' },
+        { key: 'NIVEL', label: { O: 'OVER', U: 'UNDER' }, get: d => ((d >= 0 && Math.abs(d) >= 10) || (d < 0 && Math.abs(d) < 10)) ? 'O' : 'U' }
+    ];
+    const motifs = [[3, 3], [2, 1, 2, 1], [2, 1, 2, 1, 2, 1], [2, 2, 2, 2], [1, 3, 1, 3], [3, 3, 2, 3, 4]];
+    const sizes = [20, 50, 100, 400];
+
+    function runsFor(sequence) {
+        const runs = [];
+        for (const symbol of sequence) {
+            const last = runs[runs.length - 1];
+            if (last && last.type === symbol) last.len++;
+            else runs.push({ type: symbol, len: 1 });
+        }
+        return runs;
+    }
+
+    function formatMotifStats(runs, motif) {
+        const nextLengths = { '1': 0, '2': 0, '3+': 0 };
+        let n = 0;
+        for (let i = 0; i + motif.length < runs.length; i++) {
+            if (!motif.every((length, offset) => runs[i + offset].len === length)) continue;
+            const nextLength = runs[i + motif.length].len;
+            nextLengths[nextLength >= 3 ? '3+' : String(nextLength)]++;
+            n++;
+        }
+        return `${motif.join('-')}: n=${n}, siguiente bloque 1=${nextLengths['1']}, 2=${nextLengths['2']}, 3+=${nextLengths['3+']}`;
+    }
+
+    function zigzagStats(sequence, width) {
+        let n = 0, continued = 0, stopped = 0;
+        for (let i = 0; i + width < sequence.length; i++) {
+            let alternating = true;
+            for (let j = 1; j < width; j++) {
+                if (sequence[i + j] === sequence[i + j - 1]) { alternating = false; break; }
+            }
+            if (!alternating) continue;
+            n++;
+            if (sequence[i + width] !== sequence[i + width - 1]) continued++;
+            else stopped++;
+        }
+        return `zigzag-${width}: n=${n}, siguió=${continued}, cortó=${stopped}`;
+    }
+
+    const summaries = definitions.map(def => {
+        const sequence = jumps.map(def.get);
+        const runs = runsFor(sequence);
+        const latestRuns = runs.slice(-10).map(run => `${def.label[run.type]}×${run.len}`).join(' ');
+        const currentRun = runs[runs.length - 1];
+        const windows = sizes.map(size => {
+            const values = sequence.slice(-Math.max(0, size - 1));
+            if (!values.length) return `${size}:sin datos`;
+            const counts = {};
+            let switches = 0;
+            values.forEach((value, index) => {
+                counts[value] = (counts[value] || 0) + 1;
+                if (index > 0 && value !== values[index - 1]) switches++;
+            });
+            const shares = Object.entries(counts).map(([symbol, count]) => `${def.label[symbol]} ${count}/${values.length}`).join(', ');
+            return `${Math.min(size, values.length + 1)} giros (${shares}; cambios ${switches}/${Math.max(0, values.length - 1)})`;
+        }).join(' | ');
+        const matchedMotifs = motifs
+            .map(motif => formatMotifStats(runs, motif))
+            .filter(stat => !stat.endsWith('n=0, siguiente bloque 1=0, 2=0, 3+=0'));
+        const zig = [4, 6].map(width => zigzagStats(sequence, width));
+        const motifLine = matchedMotifs.length ? matchedMotifs.join(' ; ') : 'sin coincidencias históricas completas en los patrones consultados';
+        return `${def.key}: racha actual ${def.label[currentRun.type]}×${currentRun.len}; bloques recientes ${latestRuns}; ventanas [${windows}]; ${zig.join(' ; ')}; patrones con resultado posterior [${motifLine}].`;
+    });
+
+    return [
+        `ANÁLISIS DE REGÍMENES Y PATRONES (calculado sobre ${jumps.length} saltos disponibles; cada variable es independiente):`,
+        ...summaries,
+        'Interpretación: los conteos n son casos observados y los resultados siguientes cuentan longitudes del bloque posterior; no son garantías. Una racha de 3+ es observación, no ruptura confirmada. Contrasta turbulencia/zigzag reciente, dominancia y secuencias de bloques (incluidos 3-3, 2-1-2-1, 2-2-2-2, 1-3-1-3 y 3-3-2-3-4) antes de valorar un cambio de régimen. Si n es bajo, trátalo como evidencia débil.'
+    ].join('\n');
 }
 
 function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
@@ -2444,7 +2529,7 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
         const uo = ctx.uoData;
         lines.push(`UNDER/OVER dominante: ${uo.domType} ${uo.domPct}% | Racha: ${uo.curType} x${uo.curStreak}`);
         lines.push(`UO ultimos: ${uo.last6}`);
-        if (uo.ruptura) lines.push(`RUPTURA UO: SI`);
+        if (uo.possibleSwitch) lines.push(`POSIBLE CAMBIO UO: observar el siguiente bloque; no confirma ruptura`);
     }
     if (ctx.stats.jumpProb) {
         const jp = ctx.stats.jumpProb;
@@ -2459,7 +2544,7 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
         lines.push(`Media salto: ${ctx.sig.avgTravel} | Desviacion: ${ctx.sig.stdDev}`);
     }
     const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
-    let dataBlock = lines.join('\n');
+    let dataBlock = `${lines.join('\n')}\n${buildTrackerPatternEvidence(trackerHistory.slice(-400))}`;
     if (aiOnlyBankroll) {
         const history = trackerHistory.slice(-400);
         const recent = history.slice(-120);
@@ -2484,50 +2569,57 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
             `Últimos ${recent.length} giros: ${recent.join(', ')}`,
             `Saltos firmados de esa serie: ${recentJumps.map(jump => (jump > 0 ? '+' : '') + jump).join(', ')}`,
             ...windowStats,
-            'Definiciones: salto positivo = derecha y negativo = izquierda según el orden de la ruleta europea; BIG = salto absoluto de 10 o más, SMALL = menor que 10.'
+            'Definiciones: salto positivo = derecha y negativo = izquierda según el orden de la ruleta europea; BIG = salto absoluto de 10 o más, SMALL = menor que 10.',
+            buildTrackerPatternEvidence(history)
         ].join('\n');
     }
     if (aiPrediction) {
         dataBlock += `\nFILTRO ACTIVO ${outputMetricLabel}: elige únicamente una de estas métricas exactas: ${allowedMetrics.map(metric => `${metric.label}=${metric.number}`).join(' | ') || 'ninguna disponible'}. No uses valores de la otra familia ni inventes centros.`;
     }
 
-    const systemPrompt = `Sos experta en sistemas cilindricos rotacionales. Analiza con criterio propio y proyecta. No solo mires la dominancia: analiza DIRECCION y ZONA como dos sistemas separados que pueden estar en distintos regimenes. Habla SOLO de direccion (derecha/izquierda) y zona (BIG/SMALL). No uses la palabra "sector".
+    const systemPrompt = `Sos experta en sistemas cilindricos rotacionales. Analiza con criterio propio y proyecta. No solo mires la dominancia: analiza DIRECCION, ZONA y NIVEL (UNDER/OVER) como sistemas separados que pueden estar en distintos regimenes. No uses la palabra "sector".
+
+REGLA ESTADISTICA PRINCIPAL:
+- Las etiquetas y scores del detector son señales heurísticas, no probabilidades ni órdenes. Basa la fuerza en conteos históricos y resultados posteriores, considera n y permite que tu conclusión difiera del score.
+- Cuenta solo patrones con un resultado posterior observable. Si hay pocos casos, reduce su peso.
+- Una racha de 3 en turbulencia y un cambio reciente de nivel son observaciones; no son ruptura confirmada ni tienen una probabilidad fija.
+- Clasifica el régimen por separado para DIRECCIÓN, ZONA y NIVEL. No fuerces que las tres variables estén en el mismo régimen.
 
 REGLAS DE TURBULENCIA (patrones de rodillo):
-- Turbulencia base = rebotes con rachas de 1 o 2, sin 3 seguidos.
-- Patrones validos: 1-2-1-2 (alt), 1-1-2-1-1-2 (pares-1+2), 2-2-1-2-2-1 (pares-2+1), 2-2-2 (transicion a bloque), 3-3 (bloques alternados de 3).
-- Si aparece 3 seguidos en una direccion o zona, es RUPTURA: fin de la turbulencia, segui la nueva racha.
-- En turbulencia pura sin dominancia, anticipa el siguiente rebote (1 o 2) segun el patron activo.
+- Analiza DIRECCION, ZONA y NIVEL (UNDER/OVER) como variables separadas; una puede estar en turbulencia mientras otra conserva dominancia o bloques.
+- Una racha de 3 durante turbulencia es solo una observacion de posible falsa ruptura. No concluyas que cambió el régimen ni ordenes seguir la racha por ese dato aislado.
+- Evalúa si el patrón turbulento continúa o si varias longitudes de bloque consecutivas muestran un cambio (por ejemplo 3-3-2-3-4). Usa los conteos históricos, el número de casos y qué ocurrió después; no conviertas una regla en certeza.
+- Detecta zigzag y patrones de longitudes 3-3, 2-1-2-1, 2-1-2-1-2-1, 2-2-2-2 y 1-3-1-3 en las tres variables. Distingue la longitud del bloque del símbolo que representa ese bloque.
 
 REGLAS DE BLOQUES DE TAMANO VARIABLE (lo mas importante):
 - Los bloques pueden ser de cualquier tamano: 2-2, 3-3, 4-4, 2-5, 3-1, 5-2, etc. No solo 2 o 3.
-- Razonamiento clave: si los bloques alternan tipos y el bloque actual es MAS CORTO que el anterior del mismo tipo, el bloque se COMPLETA: sigue el mismo tipo.
-  Ej: under-under + over-over-over-over-over + under => el bloque de under (1) es menor al previo (2): sigue UNDER.
-- Si el bloque actual ya llego o supero al tamano del anterior del mismo tipo, el bloque esta COMPLETO: cambia al tipo opuesto.
-  Ej: big-big-big + small + big-big + small => los SMALL son singleton (1 = 1, ya completo): sigue BIG.
-- Los singletons (bloques de 1) suelen indicar el siguiente bloque grande del tipo opuesto. Ej: un solo SMALL suelto entre bloques BIG => lo que sigue es BIG.
-- Aplica este razonamiento en las 3 variables: direccion, zona y NIVEL (under/over).
+- Heurística a contrastar: si los bloques alternan y el actual es más corto que el anterior del mismo tipo, revisa en el historial si suele completarse.
+  Ej: under-under + over-over-over-over-over + under es un posible bloque UNDER incompleto; cuenta qué siguió en casos comparables.
+- Si el bloque actual iguala o supera al anterior del mismo tipo, evalúa un posible cambio al opuesto con sus frecuencias observadas.
+  Ej: big-big-big + small + big-big + small plantea si el bloque SMALL singleton suele preceder otro BIG; no lo des por seguro.
+- Los singletons pueden anticipar un bloque opuesto, pero verifica cuántas veces ocurrió en patrones comparables; un ejemplo aislado no demuestra la regla.
+- Aplica este razonamiento en las 3 variables: direccion, zona y NIVEL (under/over), evaluando cada una por separado.
 
 REGLAS DE ANTICIPACION (ningun patron dura para siempre):
-- Ningun patron de bloques es eterno: si el mismo tipo ya aparecio 3+ veces como bloque en la ventana (ciclo repetido 2+ veces) y el tipo opuesto viene apareciendo como singleton suelto, el patron ENVEJECE: el singleton puede empezar a crecer y romper hacia el tipo opuesto.
+- Ningun patron de bloques es eterno. Si el mismo tipo ya aparecio 3+ veces como bloque y el opuesto viene apareciendo como singleton, registra una posible señal de envejecimiento; compárala con casos previos y no la trates como ruptura segura.
 - Ej: under-under-under + over + under-under + over + under => el OVER suelto ya aparecio 2 veces: puede llegar OVER. NO siempre sigue UNDER.
-- Si el bloque "Patron rodillo" de una variable dice ANTICIPAR, el cambio hacia el tipo opuesto es una opcion REAL: evaluala en serio, no la descartes solo porque el bloque actual parece incompleto. El patron envejecido se rompe antes o despues: cuando se repite mucho, la ruptura gana.
-- Anticipar NO es inventar: solo aplica cuando el patron ya se repitio (el mismo tipo aparecio 3+ veces) y el opuesto viene suelto. Si el patron es fresco (1-2 ciclos), segui la regla de completar el bloque.
+- Si el bloque "Patron rodillo" indica ANTICIPAR, evalúa el cambio como hipótesis y compáralo con las frecuencias observadas. Un patrón repetido no garantiza que vaya a romperse.
+- Anticipar NO es inventar: considera esa hipótesis solo si los casos comparables registrados respaldan el cambio; si la muestra no lo respalda, conserva la incertidumbre.
 
 REGLAS DE CONFLICTO ENTRE VARIABLES (elegi la mejor senal, NO fuerces el encaje):
 - Las 3 variables a veces chocan: una dice que sigue (bloque incompleto), otra dice que cambia (direccion/ruptura/anticipacion). NO acomodes la idea para que "cuadre todo bonito".
-- Cuando chocan, NINGUNA variable es la "que debe cambiar": en un sistema aleatorio cualquiera de las 3 puede romper, incluso la dominante. No asumas que la dominancia se anula ni que la variable que choca es la que cambia.
+- Cuando chocan, NINGUNA variable es la "que debe cambiar". No asumas que la dominancia se anula ni que una racha aislada significa que una variable cambió de régimen.
 - Observa las 3 variables y busca CUAL tiene senales de debilidad: patron envejecido (ANTICIPAR), bloque ya completo, racha agotada sin patron de soporte, dominancia vieja que viene alternando, cambios recientes frecuentes. ESA es la candidata a cambiar: puede ser la dominancia, la direccion, la zona o el nivel.
 - La ecuacion x = a + b describe la RELACION entre variables, no quien cambia: si la direccion cambia y la zona se mantiene, el NIVEL derivado cambia (es matematica). Pero quien REALMENTE va a cambiar lo decide la evidencia de cada variable, no la ecuacion. Ej: dominancia UNDER vieja + direccion en bloque que apunta a izquierda + zona SMALL firme => la candidata a cambiar es la dominancia UNDER (la direccion ya venia cambiando), no la zona.
-- Jerarquia flexible de senales: anticipacion/ruptura/bloque completo pesan mas que dominancia y continuacion, PERO solo si estan bien fundamentadas. Si las senales estan balanceadas (una dice si, otra dice no, sin clara ventaja), reconoce la duda y elegi la combinacion con mejor evidencia.
+- Jerarquia flexible de senales: patrones repetidos con muestra suficiente y bloques completos pueden pesar más que dominancia y continuación. Una racha aislada o una hipótesis de ruptura no tiene prioridad automática. Si las señales están balanceadas, reconoce la duda y elige la combinación con mejor evidencia.
 - NUNCA modifiques el razonamiento para justificar un resultado previo: si no hay evidencia clara de cual variable cambiara, elegi la que tenga el patron mas concreto y menciona la duda brevemente.
 
 REGLAS DE UNDER/OVER:
 - OVER = (derecha && BIG) || (izquierda && SMALL). UNDER = (derecha && SMALL) || (izquierda && BIG).
 - Analiza dominancia UNDER/OVER, rachas, patrones y rupturas igual que direccion y zona.
-- Si hay RUPTURA de OVER/UNDER y la direccion es clara, proyecta el cambio de UO con la direccion. Ej: ruptura de OVER + direccion derecha clara = prediccion UNDER derecha.
+- Si aparece un posible cambio de OVER/UNDER, trátalo como observación y revisa los bloques y los resultados históricos antes de proyectar el nivel siguiente.
 - UNDER/OVER puede tener sus propios patrones independientes de direccion y zona.
-- Las rachas UO funcionan igual que las de direccion: "under over over over over under over over over" = un UNDER suelto seguido de rachas OVER = el OVER es dominante, anticipa OVER hasta ruptura.
+- Evalúa en UNDER/OVER dominancias, zigzag y longitudes de bloques (por ejemplo 2-1-2-1, 2-2-2-2 y 1-3-1-3). Dirección turbulenta no descarta una dominancia o patrón propio del nivel.
 
 ECUACION DE 3 VARIABLES (x = a + b, la base de todo):
 - Tenes 3 variables: DIRECCION (derecha/izquierda), ZONA (BIG/SMALL) y NIVEL (OVER/UNDER).
@@ -2539,17 +2631,17 @@ ECUACION DE 3 VARIABLES (x = a + b, la base de todo):
   2) Si detectas DIRECCION y NIVEL, derivas ZONA. Ej: derecha + (zigzag UO, sale UNDER probable OVER) => BIG. Prediccion: derecha BIG (OVER derecha).
   3) Si detectas DIRECCION y ZONA, derivas NIVEL y tenes la prediccion completa.
 - Lo determinante es la SUMA de las senales de cada variable: patrones de rodillo (1-2, 2-1, 2-2, 3-1, 3-3, bloques, zigzag), dominancias y rachas. Los porcentajes y la continuacion son solo UN factor mas de la suma, NUNCA el unico ni el determinante.
-- Ejemplos: si el NIVEL esta en bloques (under-under-over = bloques 2-2 o 3-3), lo que sigue es OVER. Si la ZONA esta en patron 3-3 (BIG BIG BIG / SMALL SMALL SMALL), lo que sigue es BIG. Si la DIRECCION esta en zigzag, alterna. Detecta el patron de cada variable y usa el que diga "que sigue".
-- Si una variable tiene patron claro (el bloque "Patron rodillo" de esa variable lo indica con "-> que sigue"), esa variable es de alta confianza: usala.
+- Trata los ejemplos de bloques y zigzag como hipótesis. Decide qué sigue usando los conteos de casos comparables y sus resultados posteriores.
+- Una etiqueta "Patron rodillo" no es por sí sola una señal de alta confianza; exige recurrencia observada y una muestra suficiente.
 - Si una variable esta en caos o sin patron, no la fuerces: usa las otras 2. A veces NO hay patrones y es pura dominancia: ahi la dominancia es la senal.
-- Los scores del bloque "ECUACION 3 VARIABLES" ya suman estas senales: elegi las 2 con score mas alto. Si las 3 son claras (consistencia OK), confirma con la ecuacion completa.
-- El bloque "ECUACION 3 VARIABLES" ya te da las 2 mejores y la derivada: usala como base de tu prediccion final.
+- Los scores del bloque "ECUACION 3 VARIABLES" son heurísticos; compáralos con los conteos empíricos y puedes discrepar de ellos.
+- La ecuación verifica la relación entre variables, pero no establece qué patrón continuará.
 
 REGLAS DE DOMINANCIA Y BLOQUES:
-- Una dominancia es una racha de 3+ en la misma direccion o zona.
+- Una racha de 3+ describe el bloque actual; si venía de turbulencia, no basta por sí sola para declarar dominancia o cambio de régimen.
 - Puede: (a) continuar, (b) saltar a la dominancia opuesta, (c) hacer una pequena transicion y volver, (d) convertirse en turbulencia de bloques (bloques 3+ alternados CW/CCW o BIG/SMALL).
-- El historial de continuacion/cambio es UN factor mas de la suma, no es determinante: si una dominancia de longitud similar repitio muchas veces el mismo comportamiento, sumale un poco de peso. Si ya se repitio 8+ veces igual, es un patron universal: avisalo.
-- La continuacion (porcentajes del filtro historial) es SOLO REFUERZO: cuando un patron concreto ya te dice que sigue, el porcentaje no lo contradice.
+- El historial de continuación/cambio es un factor más: reporta conteo y muestra, pero no llames universal a un patrón por repetirse ocho veces.
+- Compara la continuación observada con los resultados de patrones parecidos; ninguna etiqueta fija prevalece automáticamente.
 - Las zonas pueden estar en bloques mientras las direcciones estan en turbulencia, y viceversa: combina ambas senales. Lo mismo aplica al NIVEL.
 
 OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de golpe. No te dejes llevar ciegamente por la dominancia actual: primero busca patrones concretos en las 3 variables.
@@ -2557,7 +2649,7 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
     const finalSystemPrompt = aiPrediction
-        ? `Metodología ${outputMetricLabel}: analiza la serie y compara ventanas recientes con las amplias. Usa los datos como evidencia, pero elige exclusivamente una de las métricas ${outputMetricLabel} enumeradas en el mensaje del usuario. No selecciones métricas de la otra familia ni inventes un centro. Devuelve únicamente ${outputMetricLabel}: seguido del número exacto de la métrica elegida. Sin explicación ni texto adicional.`
+        ? `Metodología ${outputMetricLabel}: analiza por separado DIRECCIÓN, ZONA y NIVEL UNDER/OVER usando las estadísticas, los bloques, los zigzags y los conteos históricos incluidos en el mensaje. Una racha de 3 no confirma ruptura: durante turbulencia puede ser falsa; exige evidencia de secuencia para considerar un cambio de régimen. Usa n y resultados observados, reconoce internamente cuando la muestra es pequeña y no inventes porcentajes. Compara ventanas recientes con las amplias y elige exclusivamente una de las métricas ${outputMetricLabel} enumeradas. No selecciones métricas de otra familia ni inventes un centro. Devuelve únicamente ${outputMetricLabel}: seguido del número exacto elegido. Sin explicación ni texto adicional.`
         : systemPrompt;
     const predictionRequest = aiPrediction
         ? `Analiza solo estos datos y devuelve únicamente ${outputMetricLabel}: seguido del número exacto de una métrica ${outputMetricLabel} permitida. No escribas un marcador como NN.`
