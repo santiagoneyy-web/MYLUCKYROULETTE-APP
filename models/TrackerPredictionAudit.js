@@ -26,6 +26,7 @@ const TrackerPredictionAuditSchema = new mongoose.Schema({
     analyst_status: { type: String, enum: ['pending', 'complete', 'failed'], default: 'pending' },
     analyst_summary: { type: String, default: '' },
     analyst_error: { type: String, default: '' },
+    prediction_review: { type: mongoose.Schema.Types.Mixed, default: null },
     result_spin_id: { type: Number, default: null },
     result_number: { type: Number, min: 0, max: 36, default: null },
     audited_at: { type: Date, default: null },

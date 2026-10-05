@@ -38,6 +38,8 @@ assert.equal(report.pagination.total, 3, 'entry and audit rows must deduplicate 
 assert.equal(report.pagination.pages, 3);
 assert.equal(report.predictions.length, 1);
 assert.equal(report.predictions[0].mode, 'n4');
+const allN4 = buildTrackerReport({ sessions, audits, entries, window: 'all', mode: 'n4', pageSize: 50, wheelNeighbors });
+assert.ok(allN4.predictions.some(prediction => prediction.prediction_review), 'legacy records should get a factual comparison reconstructed from saved centers and result');
 
 const lastTen = buildTrackerReport({ sessions, audits, entries, window: '10', mode: 'all', wheelNeighbors });
 assert.equal(lastTen.prediction_summary.by_mode.n4.stored, 3);

@@ -957,6 +957,10 @@ function renderTrackerBankroll() {
             };
             let report = '';
             let confidence = '';
+            const reviewLesson = String(audit.prediction_review?.lesson || '');
+            const reviewAxes = Array.isArray(audit.prediction_review?.system?.axis_checks)
+                ? audit.prediction_review.system.axis_checks.map(check => `${check.axis}: predijo ${check.predicted}, salió ${check.observed} (${check.matched ? 'coincidió' : 'no coincidió'})`).join(' · ')
+                : '';
             try {
                 const parsed = JSON.parse(String(audit.analyst_summary || ''));
                 report = parsed.hallazgo || '';
@@ -965,7 +969,7 @@ function renderTrackerBankroll() {
             if (!report) report = audit.analyst_status === 'pending' ? 'Analizando' : audit.analyst_status === 'failed' ? (audit.analyst_error || 'Informe no disponible') : 'Sin hallazgo';
             const systemReasoning = audit.system_reasoning ? JSON.stringify(audit.system_reasoning).slice(0, 1000) : 'Sin razonamiento guardado.';
             const aiReasoning = audit.ai_reasoning || 'Sin razonamiento IA guardado.';
-            return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}</div></details></td></tr>`;
+            return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}${reviewLesson ? `<br><b>Revisión del resultado:</b> ${trackerEscapeHtml(reviewLesson)}` : ''}${reviewAxes ? `<br>${trackerEscapeHtml(reviewAxes)}` : ''}${audit.analyst_error ? `<br><b>Error Qwen:</b> ${trackerEscapeHtml(audit.analyst_error)}` : ''}</div></details></td></tr>`;
         }).join('')
         : '<tr><td colspan="6" style="text-align:center">Las auditorías de ambos predictores aparecerán al iniciar la sesión y al llegar el resultado.</td></tr>';
 }
@@ -1013,13 +1017,20 @@ async function loadTrackerBankReport(page = 1) {
             const label = predictor?.metric ? ` ${trackerEscapeHtml(predictor.metric)}` : '';
             return `${center}${label}${result}`;
         };
+        const reviewCell = review => {
+            if (!review || typeof review !== 'object') return 'Pendiente';
+            const axes = Array.isArray(review.system?.axis_checks)
+                ? review.system.axis_checks.map(check => `${check.axis}: ${check.predicted} → ${check.observed} ${check.matched ? '✓' : '×'}`).join(' · ')
+                : '';
+            return `<details><summary>${trackerEscapeHtml(String(review.comparison || 'revisado').replaceAll('_', ' '))}</summary><div>${trackerEscapeHtml(review.lesson || '')}${axes ? `<br>${trackerEscapeHtml(axes)}` : ''}</div></details>`;
+        };
         if (predictionsBody) predictionsBody.innerHTML = (report.predictions || []).length
             ? report.predictions.map(record => {
                 const qwenSummary = String(record.analyst?.summary || record.analyst?.error || (record.analyst?.status === 'pending' ? 'Analizando' : 'Sin informe'));
                 const status = record.analyst?.status || 'no disponible';
-                return `<tr><td>#${Number(record.session_no)} · ${Number(record.result_spin_id || record.forecast_spin_id || '--')}</td><td>${trackerEscapeHtml(String(record.mode || 'sin filtro').toUpperCase())}</td><td>${record.result_number == null ? '--' : Number(record.result_number)}</td><td>${predictionCell(record.system)}</td><td>${predictionCell(record.ai)}<br><small>${trackerEscapeHtml(record.ai?.model || '')}</small></td><td><details><summary>${trackerEscapeHtml(record.analyst?.model || 'Qwen')} · ${trackerEscapeHtml(status)}</summary><div>${trackerEscapeHtml(qwenSummary)}</div></details></td></tr>`;
+                return `<tr><td>#${Number(record.session_no)} · ${Number(record.result_spin_id || record.forecast_spin_id || '--')}</td><td>${trackerEscapeHtml(String(record.mode || 'sin filtro').toUpperCase())}</td><td>${record.result_number == null ? '--' : Number(record.result_number)}</td><td>${predictionCell(record.system)}</td><td>${predictionCell(record.ai)}<br><small>${trackerEscapeHtml(record.ai?.model || '')}</small></td><td><details><summary>${trackerEscapeHtml(record.analyst?.model || 'Qwen')} · ${trackerEscapeHtml(status)}</summary><div>${trackerEscapeHtml(qwenSummary)}${record.analyst?.error ? `<br>Error: ${trackerEscapeHtml(record.analyst.error)}` : ''}</div></details></td><td>${reviewCell(record.prediction_review)}</td></tr>`;
             }).join('')
-            : '<tr><td colspan="6" style="text-align:center">No hay pronósticos guardados en este filtro.</td></tr>';
+            : '<tr><td colspan="7" style="text-align:center">No hay pronósticos guardados en este filtro.</td></tr>';
         trackerBankReportPage = Number(report.pagination?.page || 1);
         const pageLabel = document.getElementById('tracker-bank-history-page');
         const previous = document.getElementById('tracker-bank-history-prev');
@@ -1030,7 +1041,7 @@ async function loadTrackerBankReport(page = 1) {
     } catch (error) {
         if (summary) summary.textContent = `No se pudo cargar el historial: ${error.message}`;
         if (sessionsBody) sessionsBody.innerHTML = '<tr><td colspan="5" style="text-align:center">Historial no disponible.</td></tr>';
-        if (predictionsBody) predictionsBody.innerHTML = '<tr><td colspan="6" style="text-align:center">Historial no disponible.</td></tr>';
+        if (predictionsBody) predictionsBody.innerHTML = '<tr><td colspan="7" style="text-align:center">Historial no disponible.</td></tr>';
     } finally {
         trackerBankReportLoading = false;
     }

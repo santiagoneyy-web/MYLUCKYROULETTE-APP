@@ -15,6 +15,7 @@ const TrackerAnalystSnapshot = require('./models/TrackerAnalystSnapshot');
 const TrackerPredictionAudit = require('./models/TrackerPredictionAudit');
 const trackerBankroll = require('./src/engine/tracker_bankroll');
 const { buildTrackerReport } = require('./src/engine/tracker_reporting');
+const { buildTrackerPredictionReview } = require('./src/engine/tracker_postmortem');
 const predictor = require('./src/engine/predictor'); // Agents 1-4
 const { WHEEL_ORDER, WHEEL_INDEX } = predictor;
 const agent5  = require('./src/engine/agent5');      // Autonomous AI & Physics
@@ -1693,17 +1694,17 @@ async function loadTrackerReport(tableId, options = {}) {
     const selectedSessions = safeWindow === 'all' ? sessions : sessions.slice(0, Number(safeWindow));
     const sessionIds = selectedSessions.map(session => String(session._id));
     if (!sessionIds.length) {
-        return buildTrackerReport({ sessions, audits: [], entries: [], ...options, wheelNeighbors });
+        return buildTrackerReport({ sessions, audits: [], entries: [], ...options, wheelNeighbors, wheelStep: trackerWheelStep });
     }
     const [audits, entries] = await Promise.all([
         TrackerPredictionAudit.find({ bankroll_session_id: { $in: sessionIds } })
-            .select('bankroll_session_id bankroll_session_no spin_id latest_number prediction_mode system_center system_status system_metric_label system_reasoning system_won ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won analyst_model analyst_status analyst_summary analyst_error result_spin_id result_number audited_at created_at')
+            .select('bankroll_session_id bankroll_session_no spin_id latest_number prediction_mode system_center system_status system_metric_label system_reasoning system_won ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won analyst_model analyst_status analyst_summary analyst_error prediction_review result_spin_id result_number audited_at created_at')
             .lean().exec(),
         TrackerBankrollEntry.find({ session_id: { $in: selectedSessions.map(session => session._id) } })
             .select('session_id session_no spin_key number context_snapshot created_at')
             .lean().exec()
     ]);
-    return buildTrackerReport({ sessions, audits, entries, ...options, wheelNeighbors });
+    return buildTrackerReport({ sessions, audits, entries, ...options, wheelNeighbors, wheelStep: trackerWheelStep });
 }
 
 app.get('/api/tracker/bankroll/:tableId/report', async (req, res) => {
@@ -2103,18 +2104,38 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
         return res.status(400).json({ error: 'Tirada o predicción N4 inválida.' });
     }
     try {
-        const spin = await Spin.findOne({ id: spinId, table_id: tableId, number, source_quality: 'live' }).lean().exec();
+        const [spin, forecastBaseSpin] = await Promise.all([
+            Spin.findOne({ id: spinId, table_id: tableId, number, source_quality: 'live' }).lean().exec(),
+            forecastBaseSpinId === null ? Promise.resolve(null)
+                : Spin.findOne({ id: forecastBaseSpinId, table_id: tableId, source_quality: 'live' }).select('id number').lean().exec()
+        ]);
         if (!spin) return res.status(409).json({ error: 'La tirada Live no está confirmada en MongoDB.' });
         if (forecastBaseSpinId !== null) {
             const analystSnapshot = await TrackerAnalystSnapshot.findOne({ table_id: tableId, spin_id: forecastBaseSpinId })
-                .select('_id analyst_status analyst_model analyst_summary').lean().exec();
+                .select('_id analyst_status analyst_model analyst_summary analyst_error').lean().exec();
             if (analystSnapshot) {
                 contextSnapshot.analyst_status = String(analystSnapshot.analyst_status || 'pending');
                 contextSnapshot.analyst_model = String(analystSnapshot.analyst_model || '').slice(0, 120);
                 contextSnapshot.analyst_snapshot_id = String(analystSnapshot._id);
                 contextSnapshot.analyst_summary = String(analystSnapshot.analyst_summary || '').slice(0, 1200);
+                contextSnapshot.analyst_error = String(analystSnapshot.analyst_error || '').slice(0, 250);
             }
         }
+        contextSnapshot.prediction_review = buildTrackerPredictionReview({
+            previousNumber: forecastBaseSpin?.number ?? contextSnapshot.history[contextSnapshot.history.length - 1],
+            resultNumber: number,
+            systemCenter: validSystemCenter,
+            systemMetric: validSystemMetricLabel || '',
+            systemReasoning,
+            systemWon,
+            aiCenter: validAiCenter,
+            aiMetric: validAiMetricLabel || '',
+            aiModel: contextSnapshot.ai_model || '',
+            aiReasoning: contextSnapshot.ai_reasoning,
+            aiWon,
+            actualTransition: forecastBaseSpin ? trackerWheelStep(forecastBaseSpin.number, number) : null,
+            wheelNeighbors
+        });
 
         const mongoSession = await mongoose.startSession();
         let result;
@@ -2238,6 +2259,23 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
         const aiCenter = center(raw.ai_center) ?? center(previous?.ai_center);
         const systemWon = systemCenter === null ? null : wheelNeighbors(systemCenter, 4).includes(resultNumber);
         const aiWon = aiCenter === null ? null : wheelNeighbors(aiCenter, 4).includes(resultNumber);
+        const systemReasoning = raw.system_reasoning || previous?.system_reasoning || null;
+        const aiReasoning = String(raw.ai_reasoning || previous?.ai_reasoning || '').slice(0, 1800);
+        const predictionReview = buildTrackerPredictionReview({
+            previousNumber: Number(baseSpin.number),
+            resultNumber,
+            systemCenter,
+            systemMetric: labels.has(raw.system_metric_label) ? raw.system_metric_label : previous?.system_metric_label || '',
+            systemReasoning,
+            systemWon,
+            aiCenter,
+            aiMetric: labels.has(raw.ai_metric_label) ? raw.ai_metric_label : previous?.ai_metric_label || '',
+            aiModel: String(raw.ai_model || previous?.ai_model || '').slice(0, 120),
+            aiReasoning,
+            aiWon,
+            actualTransition: trackerWheelStep(baseSpin.number, resultNumber),
+            wheelNeighbors
+        });
         const audit = await TrackerPredictionAudit.findOneAndUpdate(
             key,
             {
@@ -2257,16 +2295,17 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
                     system_center: systemCenter,
                     system_status: systemCenter === null ? (raw.system_status === 'late' ? 'late' : previous?.system_status || 'unavailable') : 'ready',
                     system_metric_label: labels.has(raw.system_metric_label) ? raw.system_metric_label : previous?.system_metric_label || '',
-                    system_reasoning: systemCenter === null ? previous?.system_reasoning || null : (raw.system_reasoning || previous?.system_reasoning || null),
+                    system_reasoning: systemCenter === null ? previous?.system_reasoning || null : systemReasoning,
                     system_won: systemWon,
                     system_reward: systemWon === null ? null : systemWon ? 1 : -1,
                     ai_center: aiCenter,
                     ai_metric_label: labels.has(raw.ai_metric_label) ? raw.ai_metric_label : previous?.ai_metric_label || '',
                     ai_model: aiCenter === null ? previous?.ai_model || '' : String(raw.ai_model || previous?.ai_model || '').slice(0, 120),
-                    ai_reasoning: aiCenter === null ? previous?.ai_reasoning || '' : String(raw.ai_reasoning || previous?.ai_reasoning || '').slice(0, 1800),
+                    ai_reasoning: aiCenter === null ? previous?.ai_reasoning || '' : aiReasoning,
                     ai_status: aiCenter === null ? (raw.ai_status === 'late' ? 'late' : previous?.ai_status || 'unavailable') : 'ready',
                     ai_won: aiWon,
                     ai_reward: aiWon === null ? null : aiWon ? 1 : -1,
+                    prediction_review: predictionReview,
                     result_spin_id: resultSpinId,
                     result_number: resultNumber,
                     audited_at: new Date(),
@@ -2287,6 +2326,11 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
                 updated_at: new Date()
             } });
         }
+        await TrackerBankrollEntry.updateOne({
+            session_id: session._id,
+            table_id: tableId,
+            spin_key: `${tableId}:${resultSpinId}`
+        }, { $set: { 'context_snapshot.prediction_review': predictionReview } }).exec();
         const savedAudit = analystSnapshot
             ? { ...audit, analyst_model: analystSnapshot.analyst_model, analyst_status: analystSnapshot.analyst_status, analyst_summary: analystSnapshot.analyst_summary, analyst_error: analystSnapshot.analyst_error }
             : audit;
@@ -2318,6 +2362,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
                 ai_status: savedAudit.ai_status,
                 ai_won: savedAudit.ai_won,
                 ai_reward: savedAudit.ai_reward,
+                prediction_review: predictionReview,
                 result_spin_id: savedAudit.result_spin_id,
                 result_number: savedAudit.result_number,
                 audited_at: savedAudit.audited_at
@@ -2755,14 +2800,15 @@ app.post('/api/ai/tracker', async (req, res) => {
                         system_metric_label: snapshot.system_metric_label,
                         system_won: snapshot.system_won,
                         system_reward: snapshot.system_reward,
-                        system_reasoning: snapshot.system_reasoning
+                        system_reasoning: snapshot.system_reasoning,
+                        prediction_review: snapshot.prediction_review
                     }
                 });
                 const legacyAiEntries = await TrackerBankrollEntry.find({
                     table_id: tableNumber,
                     'context_snapshot.ai_won': { $in: [true, false] },
                     ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
-                }).sort({ created_at: -1 }).limit(240).select('session_id spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.history context_snapshot.analyst_snapshot_id round created_at').lean().exec();
+                }).sort({ created_at: -1 }).limit(240).select('session_id spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_reasoning context_snapshot.system_won context_snapshot.prediction_review context_snapshot.history context_snapshot.analyst_snapshot_id round created_at').lean().exec();
                 const activeAiModel = `${provider}/${orModel}`;
                 const aiEntries = [
                     ...auditSnapshots.filter(snapshot => typeof snapshot.ai_won === 'boolean').map(makeAuditedEntry),
@@ -2774,22 +2820,49 @@ app.post('/api/ai/tracker', async (req, res) => {
                 const selfAiEntries = aiEntries
                     .filter(entry => entry.context_snapshot?.ai_model === activeAiModel)
                     .slice(0, 120);
+                const reviewForEntry = entry => entry.context_snapshot?.prediction_review || buildTrackerPredictionReview({
+                    previousNumber: Array.isArray(entry.context_snapshot?.history)
+                        ? entry.context_snapshot.history[entry.context_snapshot.history.length - 1] : null,
+                    resultNumber: entry.number,
+                    systemCenter: entry.context_snapshot?.system_center,
+                    systemMetric: entry.context_snapshot?.system_metric_label,
+                    systemReasoning: entry.context_snapshot?.system_reasoning,
+                    systemWon: entry.context_snapshot?.system_won,
+                    aiCenter: entry.context_snapshot?.ai_center,
+                    aiMetric: entry.context_snapshot?.ai_metric_label,
+                    aiModel: entry.context_snapshot?.ai_model,
+                    aiReasoning: entry.context_snapshot?.ai_reasoning,
+                    aiWon: entry.context_snapshot?.ai_won,
+                    actualTransition: Array.isArray(entry.context_snapshot?.history) && entry.context_snapshot.history.length
+                        ? trackerWheelStep(entry.context_snapshot.history[entry.context_snapshot.history.length - 1], entry.number) : null,
+                    wheelNeighbors
+                });
                 const wins = selfAiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
                 const losses = selfAiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
                 const samples = selfAiEntries.slice(0, 12).reverse().map(entry => {
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-10).join(',') : '';
-                    const reasoning = String(entry.context_snapshot?.ai_reasoning || '').replace(/\s+/g, ' ').slice(0, 150);
+                    const reasoning = String(entry.context_snapshot?.ai_reasoning || '').replace(/\s+/g, ' ').slice(0, 125);
                     const metric = entry.context_snapshot.ai_metric_label || '?';
-                    return `${metric} IA ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto (+1)' : 'fallo (-1)'}${reasoning ? `; análisis: ${reasoning}` : ''}${history ? ` (previos ${history})` : ''}`;
+                    const review = reviewForEntry(entry);
+                    const actual = review.result_number ?? entry.number;
+                    const systemMetric = entry.context_snapshot?.system_metric_label || '?';
+                    const systemOutcome = typeof entry.context_snapshot?.system_won === 'boolean'
+                        ? (entry.context_snapshot.system_won ? 'acierto' : 'fallo') : 'sin señal';
+                    const systemReason = entry.context_snapshot?.system_reasoning || {};
+                    const systemAxes = [systemReason.direction && `dir ${systemReason.direction}`,
+                        systemReason.zone_projection && `zona ${systemReason.zone_projection}`,
+                        systemReason.level_projection && `nivel ${systemReason.level_projection}`].filter(Boolean).join('/');
+                    const lesson = String(review.lesson || '').replace(/\s+/g, ' ').slice(0, 145);
+                    return `Real ${actual}; IA ${metric} centro ${entry.context_snapshot.ai_center} ${entry.context_snapshot.ai_won ? 'acierto (+1)' : 'fallo (-1)'}${reasoning ? `; su análisis: ${reasoning}` : ''}; SISTEMA ${systemMetric} centro ${entry.context_snapshot.system_center ?? '--'} ${systemOutcome}${systemAxes ? ` (${systemAxes})` : ''}${lesson ? `; revisión: ${lesson}` : ''}${history ? `; previos ${history}` : ''}`;
                 });
-                const feedback = `RECOMPENSA Y APRENDIZAJE PROPIO DE IA (${activeAiModel}, filtro ${predictionMode || 'sin filtro'}): ${selfAiEntries.length} predicciones evaluadas, ${wins} aciertos (+1) y ${losses} fallos (-1). ${samples.length ? `Experiencias recientes del mismo modelo: ${samples.join(' | ')}.` : 'Aún no hay experiencias auditadas de este modelo y filtro.'} Usa estas experiencias para calibrar tu decisión actual; no las mezcles con las de otros modelos.`;
+                const feedback = `RECOMPENSA Y APRENDIZAJE PROPIO DE IA (${activeAiModel}, filtro ${predictionMode || 'sin filtro'}): ${selfAiEntries.length} predicciones evaluadas, ${wins} aciertos (+1) y ${losses} fallos (-1). Cada experiencia incluye el número real, el análisis que se había guardado antes del resultado, el cotejo SISTEMA vs IA y una revisión factual posterior cuando está disponible. ${samples.length ? `Experiencias recientes del mismo modelo: ${samples.join(' | ')}.` : 'Aún no hay experiencias auditadas de este modelo y filtro.'} Compara aciertos y contraejemplos de contextos similares, explica qué parte del razonamiento coincidió o no con lo observado y calibra tu análisis sin copiar una señal ni convertir una observación aislada en regla.`;
                 const legacySystemEntries = await TrackerBankrollEntry.find({
                     table_id: tableNumber,
                     'context_snapshot.system_center': { $gte: 0, $lte: 36 },
                     ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
                 }).sort({ created_at: -1 }).limit(240)
-                    .select('_id session_id spin_key number context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.history context_snapshot.analyst_snapshot_id round created_at')
+                    .select('_id session_id spin_key number context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.prediction_review context_snapshot.history context_snapshot.analyst_snapshot_id round created_at')
                     .lean().exec();
                 const systemBackfills = [];
                 legacySystemEntries.forEach(entry => {
@@ -2832,9 +2905,12 @@ app.post('/api/ai/tracker', async (req, res) => {
                         ? ` conf ${Math.round(Number(reasoning.consensus_confidence))}%` : '';
                     const state = reasoning.direction_state ? ` estado ${reasoning.direction_state}` : '';
                     const metric = entry.context_snapshot.system_metric_label || '?';
-                    return `${metric} Sistema centro ${entry.context_snapshot.system_center}: ${entry.context_snapshot.system_won ? 'acierto (+1)' : 'fallo (-1)'}, ${direction}${confidence}${state}${history ? ` (previos ${history})` : ''}`;
+                    const aiOutcome = typeof entry.context_snapshot?.ai_won === 'boolean'
+                        ? (entry.context_snapshot.ai_won ? 'acierto' : 'fallo') : 'sin señal';
+                    const review = String(reviewForEntry(entry)?.lesson || '').replace(/\s+/g, ' ').slice(0, 120);
+                    return `real ${entry.number}; ${metric} SISTEMA centro ${entry.context_snapshot.system_center}: ${entry.context_snapshot.system_won ? 'acierto (+1)' : 'fallo (-1)'}, ${direction}${confidence}${state}; IA ${entry.context_snapshot?.ai_metric_label || '?'} centro ${entry.context_snapshot?.ai_center ?? '--'} ${aiOutcome}${review ? `; cotejo: ${review}` : ''}${history ? ` (previos ${history})` : ''}`;
                 });
-                const systemFeedback = `AUDITORÍA Y RECOMPENSA DEL SISTEMA: ${systemEntries.length} señales evaluadas (${systemWins} aciertos, ${systemLosses} fallos; recompensa acumulada ${systemReward >= 0 ? '+' : ''}${systemReward}, +1 acierto/-1 fallo). ${systemSamples.length ? `Muestras recientes con dirección, confianza y contexto: ${systemSamples.join(' | ')}.` : 'Aún no hay auditorías guardadas.'} Úsalo como evidencia secundaria para calibrar tu análisis; no copies automáticamente la señal del sistema ni trates la muestra como garantía.`;
+                const systemFeedback = `AUDITORÍA Y RECOMPENSA DEL SISTEMA: ${systemEntries.length} señales evaluadas (${systemWins} aciertos, ${systemLosses} fallos; recompensa acumulada ${systemReward >= 0 ? '+' : ''}${systemReward}, +1 acierto/-1 fallo). Las experiencias conservan el número real, la dirección/confianza del análisis SISTEMA y si IA acertó en ese mismo giro, para comparar qué razonamiento acompañó cada resultado. ${systemSamples.length ? `Muestras recientes: ${systemSamples.join(' | ')}.` : 'Aún no hay auditorías guardadas.'} Usa estas comparaciones como evidencia secundaria para calibrar tu análisis; conserva tanto aciertos como contraejemplos, sin copiar automáticamente la señal del sistema ni tratar una muestra como garantía.`;
                 const legacyAnalystIds = Array.from(new Set([...legacyAiEntries, ...legacySystemEntries]
                     .map(entry => String(entry.context_snapshot?.analyst_snapshot_id || ''))
                     .filter(id => mongoose.Types.ObjectId.isValid(id))));

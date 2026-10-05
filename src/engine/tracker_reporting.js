@@ -47,7 +47,9 @@ function summarizeModels(forecasts) {
     })).sort((left, right) => right.forecasts - left.forecasts);
 }
 
-function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 'all', page = 1, pageSize = 50, wheelNeighbors }) {
+const { buildTrackerPredictionReview } = require('./tracker_postmortem');
+
+function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 'all', page = 1, pageSize = 50, wheelNeighbors, wheelStep }) {
     const orderedSessions = [...sessions].sort((left, right) => Number(right.session_no || 0) - Number(left.session_no || 0));
     const safeWindow = ['10', '20'].includes(String(window)) ? String(window) : 'all';
     const selectedSessions = safeWindow === 'all' ? orderedSessions : orderedSessions.slice(0, Number(safeWindow));
@@ -67,6 +69,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         system: { center: null, metric: '', won: null, status: '', reasoning: null },
         ai: { center: null, metric: '', model: '', won: null, status: '', reasoning: '' },
         analyst: { model: '', status: '', summary: '', error: '' },
+        prediction_review: null,
         created_at: null
     });
 
@@ -97,6 +100,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
             model: String(audit.analyst_model || ''), status: String(audit.analyst_status || ''),
             summary: String(audit.analyst_summary || ''), error: String(audit.analyst_error || '')
         };
+        record.prediction_review = audit.prediction_review || null;
         record.created_at = audit.audited_at || audit.created_at || null;
         recordsByKey.set(recordKey, record);
     }
@@ -111,6 +115,10 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         const record = recordsByKey.get(key) || makeRecord(key, sessionId, entry.session_no || session?.session_no);
         record.mode = record.mode || validMode(context.prediction_mode);
         record.forecast_spin_id = record.forecast_spin_id || (Number(context.forecast_base_spin_id) > 0 ? Number(context.forecast_base_spin_id) : null);
+        if (record.base_number == null && Array.isArray(context.history) && context.history.length) {
+            const previousNumber = Number(context.history[context.history.length - 1]);
+            if (Number.isInteger(previousNumber) && previousNumber >= 0 && previousNumber <= 36) record.base_number = previousNumber;
+        }
         record.result_spin_id = record.result_spin_id || resultSpinId;
         record.result_number = record.result_number == null ? Number(entry.number) : record.result_number;
         record.created_at = record.created_at || entry.created_at || null;
@@ -137,6 +145,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
             summary: record.analyst.summary || String(context.analyst_summary || ''),
             error: record.analyst.error || ''
         };
+        record.prediction_review = record.prediction_review || context.prediction_review || null;
         recordsByKey.set(key, record);
     }
 
@@ -146,6 +155,23 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         for (const predictor of ['system', 'ai']) {
             if (validCenter(record[predictor].center) === null || typeof record[predictor].won === 'boolean') continue;
             record[predictor].won = wheelNeighbors(record[predictor].center, 4).includes(record.result_number);
+        }
+        if (!record.prediction_review) {
+            record.prediction_review = buildTrackerPredictionReview({
+                previousNumber: record.base_number,
+                resultNumber: record.result_number,
+                systemCenter: record.system.center,
+                systemMetric: record.system.metric,
+                systemReasoning: record.system.reasoning,
+                systemWon: record.system.won,
+                aiCenter: record.ai.center,
+                aiMetric: record.ai.metric,
+                aiModel: record.ai.model,
+                aiReasoning: record.ai.reasoning,
+                aiWon: record.ai.won,
+                actualTransition: typeof wheelStep === 'function' ? wheelStep(record.base_number, record.result_number) : null,
+                wheelNeighbors
+            });
         }
     }
     records.sort((left, right) => Number(right.result_spin_id || right.forecast_spin_id || 0) - Number(left.result_spin_id || left.forecast_spin_id || 0)

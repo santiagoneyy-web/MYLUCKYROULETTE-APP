@@ -15,7 +15,7 @@
     "diagnose": "node src/tools/test_crawler_diagnosis.js",
     "postinstall": "node -e \"if(process.env.INSTALL_PUPPETEER_BROWSER==='true' && process.env.PUPPETEER_SKIP_DOWNLOAD!=='true'){require('child_process').execSync('npx puppeteer browsers install chrome',{stdio:'inherit'})}\"",
     "build": "npm install",
-    "test": "node test-tracker-bankroll.js && node test-tracker-reporting.js"
+    "test": "node test-tracker-bankroll.js && node test-tracker-reporting.js && node test-tracker-postmortem.js"
   },
   "type": "commonjs",
   "dependencies": {
