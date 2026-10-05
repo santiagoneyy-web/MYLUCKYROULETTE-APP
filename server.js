@@ -2713,21 +2713,26 @@ app.post('/api/ai/tracker', async (req, res) => {
                     'context_snapshot.ai_won': { $in: [true, false] },
                     ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
                 }).sort({ created_at: -1 }).limit(240).select('spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.history round created_at').lean().exec();
+                const activeAiModel = `${provider}/${orModel}`;
                 const aiEntries = [
                     ...auditSnapshots.filter(snapshot => typeof snapshot.ai_won === 'boolean').map(makeAuditedEntry),
                     ...legacyAiEntries.filter(entry => !auditedResults.has(Number(String(entry.spin_key).split(':').pop())))
-                ].sort((a, b) => Number(b.round || 0) - Number(a.round || 0)).slice(0, 120);
-                const wins = aiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
-                const losses = aiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
-                const samples = aiEntries.slice(0, 12).reverse().map(entry => {
+                ].sort((a, b) => Number(b.round || 0) - Number(a.round || 0));
+                // Train the active model from its own scored predictions only;
+                // other models and SISTEMA remain comparison evidence, not its reward history.
+                const selfAiEntries = aiEntries
+                    .filter(entry => entry.context_snapshot?.ai_model === activeAiModel)
+                    .slice(0, 120);
+                const wins = selfAiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
+                const losses = selfAiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
+                const samples = selfAiEntries.slice(0, 12).reverse().map(entry => {
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-10).join(',') : '';
                     const reasoning = String(entry.context_snapshot?.ai_reasoning || '').replace(/\s+/g, ' ').slice(0, 150);
                     const metric = entry.context_snapshot.ai_metric_label || '?';
-                    const model = entry.context_snapshot.ai_model ? ` ${entry.context_snapshot.ai_model}` : '';
-                    return `${metric} IA${model}, centro ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto' : 'fallo'}${reasoning ? `; análisis: ${reasoning}` : ''}${history ? ` (previos ${history})` : ''}`;
+                    return `${metric} IA ${entry.context_snapshot.ai_center}, ${entry.context_snapshot.ai_won ? 'acierto (+1)' : 'fallo (-1)'}${reasoning ? `; análisis: ${reasoning}` : ''}${history ? ` (previos ${history})` : ''}`;
                 });
-                const feedback = `RESULTADOS IA EN SESIONES: ${aiEntries.length} predicciones evaluadas, ${wins} aciertos y ${losses} fallos. ${samples.length ? `Muestras recientes: ${samples.join(' | ')}.` : 'Aún no hay resultados IA evaluados.'} Son datos de referencia; decide libremente según el análisis actual.`;
+                const feedback = `RECOMPENSA Y APRENDIZAJE PROPIO DE IA (${activeAiModel}, filtro ${predictionMode || 'sin filtro'}): ${selfAiEntries.length} predicciones evaluadas, ${wins} aciertos (+1) y ${losses} fallos (-1). ${samples.length ? `Experiencias recientes del mismo modelo: ${samples.join(' | ')}.` : 'Aún no hay experiencias auditadas de este modelo y filtro.'} Usa estas experiencias para calibrar tu decisión actual; no las mezcles con las de otros modelos.`;
                 const legacySystemEntries = await TrackerBankrollEntry.find({
                     table_id: tableNumber,
                     'context_snapshot.system_center': { $gte: 0, $lte: 36 },
@@ -2779,7 +2784,6 @@ app.post('/api/ai/tracker', async (req, res) => {
                 });
                 const systemFeedback = `AUDITORÍA Y RECOMPENSA DEL SISTEMA: ${systemEntries.length} señales evaluadas (${systemWins} aciertos, ${systemLosses} fallos; recompensa acumulada ${systemReward >= 0 ? '+' : ''}${systemReward}, +1 acierto/-1 fallo). ${systemSamples.length ? `Muestras recientes con dirección, confianza y contexto: ${systemSamples.join(' | ')}.` : 'Aún no hay auditorías guardadas.'} Úsalo como evidencia secundaria para calibrar tu análisis; no copies automáticamente la señal del sistema ni trates la muestra como garantía.`;
                 const patternGroups = new Map();
-                const activeAiModel = `${provider}/${model}`;
                 const addPatternOutcomes = (snapshot, predictor, won, metric, modelName = '') => {
                     if (typeof won !== 'boolean' || !metric) return;
                     for (const regime of Array.isArray(snapshot.evidence?.regimes) ? snapshot.evidence.regimes : []) {
@@ -2795,16 +2799,16 @@ app.post('/api/ai/tracker', async (req, res) => {
                 };
                 auditSnapshots.forEach(snapshot => {
                     addPatternOutcomes(snapshot, 'SISTEMA', snapshot.system_won, snapshot.system_metric_label || '?');
-                    if (!snapshot.ai_model || snapshot.ai_model === activeAiModel) {
-                        addPatternOutcomes(snapshot, 'IA', snapshot.ai_won, snapshot.ai_metric_label || '?', snapshot.ai_model || activeAiModel);
+                    if (snapshot.ai_model === activeAiModel) {
+                        addPatternOutcomes(snapshot, 'IA', snapshot.ai_won, snapshot.ai_metric_label || '?', snapshot.ai_model);
                     }
                 });
                 const patternLines = Array.from(patternGroups.values())
-                    .filter(group => group.n >= 4)
+                    .filter(group => group.predictor === 'IA' && group.modelName === activeAiModel && group.n >= 4)
                     .sort((left, right) => right.n - left.n || right.wins / right.n - left.wins / left.n)
                     .slice(0, 10)
                     .map(group => `${group.predictor} ${group.metric} ${group.dimension}=${group.state}×${group.length}: ${group.wins}/${group.n} (${Math.round(group.wins / group.n * 100)}%)`);
-                const patternFeedback = `APRENDIZAJE DESCRIPTIVO POR RÉGIMEN (solo grupos con n≥4, mismo filtro ${predictionMode || 'sin filtro'}; IA acotada al modelo actual cuando hay etiqueta): ${patternLines.length ? patternLines.join(' | ') : 'Aún no hay muestra suficiente de sesiones con régimen guardado para estimar aciertos condicionados.'} Son asociaciones históricas, no causas ni garantías; no subas la confianza con muestras pequeñas.`;
+                const patternFeedback = `RESULTADOS PROPIOS DE IA POR RÉGIMEN (solo este modelo, mismo filtro ${predictionMode || 'sin filtro'} y grupos con n≥4): ${patternLines.length ? patternLines.join(' | ') : 'Aún no hay muestra suficiente de predicciones auditadas de este modelo para calibrar patrones por régimen.'} Usa el acierto observado para orientar el análisis del patrón comparable; n pequeño es evidencia débil, no regla ni garantía.`;
                 const lastMessage = requestMessages[requestMessages.length - 1];
                 if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}\n\n${systemFeedback}\n\n${patternFeedback}`;
             } catch (learningError) {

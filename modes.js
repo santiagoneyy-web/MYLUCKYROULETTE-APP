@@ -2975,6 +2975,7 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
             `Saltos firmados de esa serie: ${recentJumps.map(jump => (jump > 0 ? '+' : '') + jump).join(', ')}`,
             ...windowStats,
             'Definiciones: salto positivo = derecha y negativo = izquierda según el orden de la ruleta europea; BIG = salto absoluto de 10 o más, SMALL = menor que 10.',
+            `Lectura actual por variables:\n${lines.slice(1).join('\n')}`,
             buildTrackerPatternEvidence(history)
         ].join('\n');
     }
@@ -3054,7 +3055,17 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
     const finalSystemPrompt = aiPrediction
-        ? `Metodología ${outputMetricLabel}: analiza por separado DIRECCIÓN, ZONA y NIVEL UNDER/OVER usando las estadísticas, los bloques, los zigzags y los conteos históricos incluidos en el mensaje. Una racha de 3 no confirma ruptura: durante turbulencia puede ser falsa; exige evidencia de secuencia para considerar un cambio de régimen. Usa n y resultados observados, reconoce internamente cuando la muestra es pequeña y no inventes porcentajes. Compara ventanas recientes con las amplias y elige exclusivamente una de las métricas permitidas enumeradas. Devuelve únicamente la etiqueta exacta de la métrica y el número, por ejemplo N4: 17 o N9: 8. Sin explicación ni texto adicional.`
+        ? `Eres el predictor IA independiente de SISTEMA. En cada predicción analiza DIRECCIÓN, ZONA y NIVEL UNDER/OVER por separado y elige un centro de la lista permitida ${outputMetricLabel}. No copies el centro de SISTEMA: usa tu propio análisis y las auditorías de tus predicciones anteriores.
+
+ORDEN PARA DECIDIR:
+1. PATRÓN: si detectas una secuencia recurrente y sus resultados posteriores apoyan qué sigue, fluye con ese patrón en esa variable. Basa su fuerza en n y en los resultados observados, no solo en el nombre del detector.
+2. DOMINANCIA: si no hay patrón accionable en esa variable, sigue su dominancia clara y reciente. No vayas contra una dominancia estable por una señal aislada.
+3. ANÁLISIS PROPIO: si tampoco hay patrón respaldado ni dominancia clara, estima la mejor continuación con las ventanas 20/50/100/400, transiciones similares, zigzag, fluctuación reciente y tus resultados condicionados guardados.
+Puedes cambiar de un patrón o dominancia solo cuando evidencia concreta de secuencias comparables y resultados posteriores muestre debilitamiento o cambio. No fuerces que dirección, zona y nivel tengan el mismo régimen; combina las dos variables mejor respaldadas y deriva la tercera con su relación matemática.
+
+APRENDIZAJE PROPIO: trata los resultados etiquetados IA como recompensa de tus propias predicciones (+1 acierto, -1 fallo). Da más peso a tu historial del mismo modelo, filtro y régimen; úsalo para ajustar qué patrones y contextos consideras confiables. Si n es pequeño, reduce su peso. SISTEMA sirve como comparación, nunca como sustituto de tu decisión. No afirmes que estás reentrenando los pesos del modelo.
+
+Una racha de 3 tras turbulencia es observación, no ruptura confirmada; por sí sola no vence el patrón o dominancia establecidos. No inventes porcentajes. Elige únicamente la etiqueta exacta y el número de una métrica permitida; respeta N4/N9/Both. Devuelve solo, por ejemplo, N4: 17 o N9: 8, sin explicación.`
         : systemPrompt;
     const predictionRequest = aiPrediction
         ? `Analiza solo estos datos y devuelve únicamente N4: o N9: seguido del número exacto de una métrica permitida. Respeta la lista del filtro activo. No escribas un marcador como NN.`
