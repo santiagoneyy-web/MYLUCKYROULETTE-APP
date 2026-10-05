@@ -2144,7 +2144,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 const session = await TrackerBankrollSession.findOne({
                     _id: req.params.sessionId,
                     table_id: tableId,
-                    status: 'active'
+                    status: { $in: ['active', 'closed'] }
                 }).session(mongoSession);
                 if (!session) {
                     result = { error: 'No hay una sesión activa para esta mesa.', status: 409 };
@@ -2153,6 +2153,15 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 const existing = await TrackerBankrollEntry.findOne({ session_id: session._id, spin_key: spinKey }).session(mongoSession);
                 if (existing) {
                     result = { session, entry: existing, duplicate: true };
+                    return;
+                }
+                if (session.status === 'closed') {
+                    result = {
+                        session,
+                        stopped: true,
+                        insufficient_capital: Number(session.last_settled_spin_id) === spinId,
+                        duplicate: true
+                    };
                     return;
                 }
                 if (session.last_settled_spin_id == null) {
@@ -2169,7 +2178,16 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 }
                 const stake = trackerBankroll.getStake(session.chip_value, session.current_round);
                 if (session.balance + 1e-9 < stake) {
-                    result = { error: 'Capital insuficiente para la siguiente apuesta.', status: 409, insufficient_capital: true };
+                    // No wager was possible for this spin. Close and persist the
+                    // bankroll session, but do not count the spin as a bet/loss.
+                    const stoppedAt = new Date();
+                    session.status = 'closed';
+                    session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
+                    session.closed_at = stoppedAt;
+                    session.updated_at = stoppedAt;
+                    session.last_settled_spin_id = spinId;
+                    await session.save({ session: mongoSession });
+                    result = { session, stopped: true, insufficient_capital: true };
                     return;
                 }
                 const settlement = trackerBankroll.calculateSettlement(session, number, predictionNumbers);
@@ -2853,8 +2871,11 @@ app.post('/api/ai/tracker', async (req, res) => {
                     const systemAxes = [systemReason.direction && `dir ${systemReason.direction}`,
                         systemReason.zone_projection && `zona ${systemReason.zone_projection}`,
                         systemReason.level_projection && `nivel ${systemReason.level_projection}`].filter(Boolean).join('/');
+                    const aiAxisChecks = Array.isArray(review.ai?.axis_checks)
+                        ? review.ai.axis_checks.map(check => `${check.axis} ${check.matched ? 'acertó' : 'falló'} (${check.predicted}→${check.observed})`).join('/')
+                        : '';
                     const lesson = String(review.lesson || '').replace(/\s+/g, ' ').slice(0, 145);
-                    return `Real ${actual}; IA ${metric} centro ${entry.context_snapshot.ai_center} ${entry.context_snapshot.ai_won ? 'acierto (+1)' : 'fallo (-1)'}${reasoning ? `; su análisis: ${reasoning}` : ''}; SISTEMA ${systemMetric} centro ${entry.context_snapshot.system_center ?? '--'} ${systemOutcome}${systemAxes ? ` (${systemAxes})` : ''}${lesson ? `; revisión: ${lesson}` : ''}${history ? `; previos ${history}` : ''}`;
+                    return `Real ${actual}; IA ${metric} centro ${entry.context_snapshot.ai_center} ${entry.context_snapshot.ai_won ? 'acierto (+1)' : 'fallo (-1)'}${reasoning ? `; su análisis: ${reasoning}` : ''}${aiAxisChecks ? `; cotejo ejes IA: ${aiAxisChecks}` : ''}; SISTEMA ${systemMetric} centro ${entry.context_snapshot.system_center ?? '--'} ${systemOutcome}${systemAxes ? ` (${systemAxes})` : ''}${lesson ? `; revisión: ${lesson}` : ''}${history ? `; previos ${history}` : ''}`;
                 });
                 const feedback = `RECOMPENSA Y APRENDIZAJE PROPIO DE IA (${activeAiModel}, filtro ${predictionMode || 'sin filtro'}): ${selfAiEntries.length} predicciones evaluadas, ${wins} aciertos (+1) y ${losses} fallos (-1). Cada experiencia incluye el número real, el análisis que se había guardado antes del resultado, el cotejo SISTEMA vs IA y una revisión factual posterior cuando está disponible. ${samples.length ? `Experiencias recientes del mismo modelo: ${samples.join(' | ')}.` : 'Aún no hay experiencias auditadas de este modelo y filtro.'} Compara aciertos y contraejemplos de contextos similares, explica qué parte del razonamiento coincidió o no con lo observado y calibra tu análisis sin copiar una señal ni convertir una observación aislada en regla.`;
                 const legacySystemEntries = await TrackerBankrollEntry.find({
@@ -3064,8 +3085,9 @@ app.post('/api/ai/tracker', async (req, res) => {
                 : `El modelo no generó texto (finish_reason: ${finishReason}). Prueba de nuevo o selecciona otro modelo.`;
             throw new Error(detail);
         }
-        const predictedCenter = responseText.match(/\bN4\s*:\s*(3[0-6]|[0-2]?\d)\b/i)?.[1] || 'invalid';
-        console.log('[Tracker AI] OpenRouter success:', orModel, 'N4:', predictedCenter,
+        const predictedTarget = responseText.match(/\bN[49]\s*:\s*(3[0-6]|[0-2]?\d)\b/i)?.[0] || 'invalid';
+        const predictedMetric = responseText.match(/^\s*METRICA\s*:\s*([A-Z0-9_]+)/im)?.[1] || 'sin etiqueta';
+        console.log('[Tracker AI] OpenRouter success:', orModel, predictedTarget, 'metric:', predictedMetric,
             'historyLength:', predictionContext?.history_length,
             'latestSpin:', predictionContext?.latest_spin,
             'response length:', responseText.length, 'duration_ms:', Date.now() - requestStartedAt);

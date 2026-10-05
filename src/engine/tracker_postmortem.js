@@ -44,6 +44,18 @@ function buildTrackerPredictionReview({
         ['nivel', String(reasoning.level_projection || ''), observedAxes.level]
     ].filter(([, predicted, observed]) => predicted && observed)
         .map(([axis, predicted, observed]) => ({ axis, predicted, observed, matched: predicted === observed }));
+    const aiAxesMatch = String(aiReasoning || '').match(/^\s*EJES\s*:\s*DIR\s*=\s*(CW|CCW).*?ZONA\s*=\s*(BIG|SMALL).*?NIVEL\s*=\s*(OVER|UNDER)/im);
+    const aiAxisPredictions = aiAxesMatch ? {
+        direction: aiAxesMatch[1].toUpperCase(),
+        zone: aiAxesMatch[2].toUpperCase(),
+        level: aiAxesMatch[3].toUpperCase()
+    } : null;
+    const aiAxisChecks = aiAxisPredictions ? [
+        ['dirección', aiAxisPredictions.direction, observedAxes.direction],
+        ['zona', aiAxisPredictions.zone, observedAxes.zone],
+        ['nivel', aiAxisPredictions.level, observedAxes.level]
+    ].filter(([, predicted, observed]) => predicted && observed)
+        .map(([axis, predicted, observed]) => ({ axis, predicted, observed, matched: predicted === observed })) : [];
     const outcome = (hit, target) => target === null ? 'sin señal' : hit === null ? 'sin resultado' : hit ? 'acierto' : 'fallo';
     const comparison = systemHit === true && aiHit === false ? 'system_only_hit'
         : aiHit === true && systemHit === false ? 'ai_only_hit'
@@ -82,7 +94,9 @@ function buildTrackerPredictionReview({
             model: String(aiModel || ''),
             outcome: outcome(aiHit, aiTarget),
             won: aiHit,
-            reasoning: String(aiReasoning || '').slice(0, 1800)
+            reasoning: String(aiReasoning || '').slice(0, 1800),
+            axis_predictions: aiAxisPredictions,
+            axis_checks: aiAxisChecks
         },
         comparison,
         lesson,

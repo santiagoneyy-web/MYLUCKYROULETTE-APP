@@ -769,9 +769,13 @@ function trackerSystemReasoningSnapshot() {
 function trackerPredictionAuditSnapshot(targetSpinId = null, forecastAvailable = true) {
     const systemMetric = forecastAvailable ? trackerSystemPredictionMetric() : null;
     const aiReady = forecastAvailable && Number.isInteger(trackerAiN4Center) && trackerAiPredictionHistoryLength === trackerHistory.length;
+    const reasoningText = String(trackerAiPredictionReasoning || '');
+    const correctedMetricLabel = reasoningText.match(/se auditó como\s+([A-Z0-9_]+)/i)?.[1]?.toUpperCase() || null;
+    const aiMetricLabel = correctedMetricLabel || reasoningText.match(/^\s*METRICA\s*:\s*([A-Z0-9_]+)/im)?.[1]?.toUpperCase() || null;
     const aiMetric = aiReady
         ? trackerPredictionMetricCandidates(trackerConfig.prediction).find(metric =>
-            metric.family === String(trackerAiPredictionMetric || '').toLowerCase() && metric.number === trackerAiN4Center)
+            (aiMetricLabel ? metric.label === aiMetricLabel : metric.family === String(trackerAiPredictionMetric || '').toLowerCase()) &&
+            metric.number === trackerAiN4Center)
         : null;
     const targetId = Number(targetSpinId);
     const eligibleSpinIds = Array.from(trackerLiveSpinIds).map(Number)
@@ -958,9 +962,13 @@ function renderTrackerBankroll() {
             let report = '';
             let confidence = '';
             const reviewLesson = String(audit.prediction_review?.lesson || '');
-            const reviewAxes = Array.isArray(audit.prediction_review?.system?.axis_checks)
-                ? audit.prediction_review.system.axis_checks.map(check => `${check.axis}: predijo ${check.predicted}, salió ${check.observed} (${check.matched ? 'coincidió' : 'no coincidió'})`).join(' · ')
-                : '';
+            const formatAxisChecks = (name, checks) => Array.isArray(checks)
+                ? checks.map(check => `${name} ${check.axis}: predijo ${check.predicted}, salió ${check.observed} (${check.matched ? 'coincidió' : 'no coincidió'})`)
+                : [];
+            const reviewAxes = [
+                ...formatAxisChecks('SISTEMA', audit.prediction_review?.system?.axis_checks),
+                ...formatAxisChecks('IA', audit.prediction_review?.ai?.axis_checks)
+            ].join(' · ');
             try {
                 const parsed = JSON.parse(String(audit.analyst_summary || ''));
                 report = parsed.hallazgo || '';
@@ -1145,9 +1153,11 @@ async function closeTrackerBankSession() {
     if (finishButton) finishButton.disabled = true;
     try {
         await trackerBankQueue.catch(() => {});
+        if (trackerBankPending.length) await flushTrackerBankQueue().catch(() => {});
         // Audit persistence must not hold up session close; its queue is saved
         // locally and the API accepts delayed snapshots for closed sessions.
         flushTrackerPredictionAuditQueue().catch(() => {});
+        if (!trackerBankActiveSession()) return;
         if (trackerBankPending.length) {
             trackerBankSetMessage('Hay tiradas Live pendientes de guardar en MongoDB. Reconecta antes de finalizar.');
             return;
@@ -1292,6 +1302,27 @@ function flushTrackerBankQueue() {
             }
             trackerBankPending.shift();
             trackerBankPendingKeys.delete(pendingKey);
+            if (data.stopped && data.session) {
+                const stoppedSessionId = String(data.session._id);
+                for (let index = trackerBankPending.length - 1; index >= 0; index--) {
+                    if (String(trackerBankPending[index].sessionId) !== stoppedSessionId) continue;
+                    trackerBankPendingKeys.delete(`${trackerBankPending[index].sessionId}:${trackerBankPending[index].spinId}`);
+                    trackerBankPending.splice(index, 1);
+                }
+                trackerPersistPendingQueues();
+                trackerBankSessions = trackerBankMergeSessions(trackerBankSessions, [data.session]);
+                if (String(trackerBankEntriesSessionId || '') !== stoppedSessionId) {
+                    trackerBankEntries = [];
+                    trackerBankEntriesSessionId = data.session._id;
+                }
+                trackerBankSelectedSessionId = data.session._id;
+                renderTrackerBankroll();
+                const stopReason = data.insufficient_capital
+                    ? `se cerró por capital insuficiente (${trackerBankOutcomeLabel(data.session.final_outcome)})`
+                    : `ya estaba cerrada (${trackerBankOutcomeLabel(data.session.final_outcome)})`;
+                trackerBankSetMessage(`Sesión guardada; ${stopReason}. La tirada sin apuesta no se contó; ya puedes iniciar otra sesión.`);
+                continue;
+            }
             trackerPersistPendingQueues();
             trackerBankSessions = trackerBankMergeSessions(trackerBankSessions, [data.session]);
             if (String(trackerBankEntriesSessionId || '') !== String(data.session._id)) {
@@ -2407,14 +2438,14 @@ function buildTrackerAIContext() {
 
     // â”€â”€ PATRONES DE RODILLO / TURBULENCIA â”€â”€
     const dirTurbulencePattern = detectTrackerTurbulence(allTravels, 'dir');
-    const zoneTurbulencePattern = detectTrackerTurbulence(lastTravels.map(t => Math.abs(t)), 'zone');
+    const zoneTurbulencePattern = detectTrackerTurbulence(allTravels.map(t => Math.abs(t)), 'zone');
     const uoTurbulencePattern = detectTrackerTurbulence(allTravels, 'nivel');
 
     // â”€â”€ REGIMEN DE DOMINANCIA Y TURBULENCIA DE BLOQUES â”€â”€
     const dominanceRegime = analyzeDominanceRegime(allTravels, lastTravels);
 
     // â”€â”€ ANALISIS UNDER/OVER â”€â”€
-    const uoData = analyzeUnderOver(lastTravels);
+    const uoData = analyzeUnderOver(allTravels);
 
     // â”€â”€ BLOQUES DE ZONA â”€â”€
     const zoneBlocks = [];
@@ -2931,6 +2962,39 @@ function buildTrackerPatternEvidence(spins) {
         return `zigzag-${width}: n=${n}, siguió=${continued}, cortó=${stopped}`;
     }
 
+    function nextSpinStats(sequence, runs) {
+        const currentRun = runs[runs.length - 1];
+        const priorRunLengths = runs.slice(0, -1).slice(-4).map(run => run.len);
+        const matchedHistory = priorRunLengths.slice(-Math.min(4, priorRunLengths.length));
+        let same = 0, changed = 0, n = 0;
+        if (matchedHistory.length && currentRun) {
+            for (let index = 0; index < sequence.length - 1; index++) {
+                let runStart = index;
+                while (runStart > 0 && sequence[runStart - 1] === sequence[index]) runStart--;
+                const runAge = index - runStart + 1;
+                if (runAge !== currentRun.len) continue;
+
+                const previousLengths = [];
+                let cursor = runStart - 1;
+                while (cursor >= 0 && previousLengths.length < matchedHistory.length) {
+                    const type = sequence[cursor];
+                    let previousStart = cursor;
+                    while (previousStart > 0 && sequence[previousStart - 1] === type) previousStart--;
+                    previousLengths.unshift(cursor - previousStart + 1);
+                    cursor = previousStart - 1;
+                }
+                if (previousLengths.length !== matchedHistory.length ||
+                    previousLengths.some((length, offset) => length !== matchedHistory[offset])) continue;
+
+                n++;
+                if (sequence[index + 1] === sequence[index]) same++;
+                else changed++;
+            }
+        }
+        const context = matchedHistory.length ? `${matchedHistory.join('-')} → ${currentRun?.len || 0}` : 'sin bloques previos suficientes';
+        return `contexto actual ${context}; siguiente giro comparable n=${n}, siguió mismo=${same}, cambió=${changed}`;
+    }
+
     const summaries = definitions.map(def => {
         const sequence = jumps.map(def.get);
         const runs = runsFor(sequence);
@@ -2953,7 +3017,7 @@ function buildTrackerPatternEvidence(spins) {
             .filter(stat => !stat.endsWith('n=0, siguiente bloque 1=0, 2=0, 3+=0'));
         const zig = [4, 6].map(width => zigzagStats(sequence, width));
         const motifLine = matchedMotifs.length ? matchedMotifs.join(' ; ') : 'sin coincidencias históricas completas en los patrones consultados';
-        return `${def.key}: racha actual ${def.label[currentRun.type]}×${currentRun.len}; bloques recientes ${latestRuns}; ventanas [${windows}]; ${zig.join(' ; ')}; patrones con resultado posterior [${motifLine}].`;
+        return `${def.key}: racha actual ${def.label[currentRun.type]}×${currentRun.len}; bloques recientes ${latestRuns}; ventanas [${windows}]; ${zig.join(' ; ')}; ${nextSpinStats(sequence, runs)}; patrones con resultado posterior [${motifLine}].`;
     });
 
     return [
@@ -3133,7 +3197,7 @@ OJO: la dominancia puede persistir mucho tiempo, pero tambien puede cambiar de g
 
 Antes de responder, razona internamente en este orden: 1) detecta el patron de cada variable (rodillo/bloques/zigzag/dominancia), 2) suma las senales de las 3 variables, 3) elegi las 2 mas claras y deriva la tercera con la ecuacion x = a + b, 4) contradicciones entre seÃ±ales: identifica CUAL variable muestra senales de debilidad (patron envejecido, bloque completo, dominancia agotada): esa es la candidata a cambiar, sea cual sea, 5) prediccion final. No escribas el razonamiento interno, solo la conclusion final. Elige UNO de los targets listados en "Targets disponibles". Tu respuesta DEBE incluir el numero especifico del target elegido. NO inventes numeros ni elijas numeros fuera de esa lista. Responde MUY CORTO: maximo 2 oraciones cortas. Preferible 1 prediccion + 1 justificacion (menciona el patron o ecuacion usada). Podes ser conversacional y natural, pero sin salirte del analisis. Nunca hables de soporte, resistencia, juegos, apuestas ni azar. Nunca uses la palabra "sector".`;
 
-    const finalSystemPrompt = aiPrediction
+    const legacyFinalSystemPrompt = aiPrediction
         ? `Eres el predictor IA independiente de SISTEMA. En cada predicción analiza DIRECCIÓN, ZONA y NIVEL UNDER/OVER por separado y elige un centro de la lista permitida ${outputMetricLabel}. No copies el centro de SISTEMA: usa tu propio análisis y las auditorías de tus predicciones anteriores.
 
 ORDEN PARA DECIDIR:
@@ -3146,8 +3210,23 @@ APRENDIZAJE PROPIO: trata los resultados etiquetados IA como recompensa de tus p
 
 Una racha de 3 tras turbulencia es observación, no ruptura confirmada; por sí sola no vence el patrón o dominancia establecidos. No inventes porcentajes. Elige únicamente la etiqueta exacta y el número de una métrica permitida; respeta N4/N9/Both. Devuelve solo, por ejemplo, N4: 17 o N9: 8, sin explicación.`
         : systemPrompt;
+    const finalSystemPrompt = aiPrediction
+        ? `Eres el predictor IA independiente de SISTEMA. Usa el historial y las estadísticas incluidas; analiza DIRECCIÓN, ZONA y NIVEL UNDER/OVER como tres variables independientes. No copies la predicción de SISTEMA.
+
+DECISIÓN POR CADA EJE:
+1. Identifica su secuencia reciente, bloques, zigzag/turbulencia y dominancia propia. Compara con las ventanas y con los conteos de siguientes giros/bloques similares de EVIDENCIA. Un patrón solo pesa si sus casos observados respaldan qué sigue; n pequeño es evidencia débil.
+2. Si hay un patrón repetido respaldado, fluye con él en ese eje, aunque los otros ejes estén en otro régimen. Si no, sigue una dominancia reciente clara. Si tampoco existe, usa tu mejor estimación con fluctuación reciente e historial propio del mismo modelo y filtro.
+3. Una racha de 3 tras turbulencia es observación, no ruptura confirmada; no abandones un patrón o dominancia por esa racha sola. No fuerces que los tres ejes compartan patrón ni dirección.
+4. Elige por separado DIRECCIÓN, ZONA y NIVEL. Usa la relación matemática solo para comprobar coherencia: OVER=(CW+BIG)||(CCW+SMALL); UNDER=(CW+SMALL)||(CCW+BIG). Para N4, la etiqueta de métrica fija DIRECCIÓN y ZONA; para N9, fija DIRECCIÓN. El centro y la etiqueta deben ser exactamente una pareja permitida.
+
+Registra una justificación breve y verificable por eje (patrón/dominancia/estimación y n cuando exista). No reveles razonamiento interno paso a paso, no inventes porcentajes y no afirmes que se reentrenaron los pesos. SISTEMA es solo comparación; usa auditorías IA como evidencia secundaria y conserva contraejemplos.`
+        : legacyFinalSystemPrompt;
     const predictionRequest = aiPrediction
-        ? `Analiza solo estos datos y devuelve únicamente N4: o N9: seguido del número exacto de una métrica permitida. Respeta la lista del filtro activo. No escribas un marcador como NN.`
+        ? `Analiza DIRECCIÓN, ZONA y NIVEL por separado. Escoge una pareja exacta etiqueta/número de la lista de candidatos y responde exactamente con estas 3 líneas:
+N4: 17 (o N9: 17 si corresponde al filtro; reemplaza el número de ejemplo)
+METRICA: <etiqueta exacta>
+EJES: DIR=<CW|CCW> (<base breve>; n=<muestra o ?>); ZONA=<BIG|SMALL> (<base breve>; n=<muestra o ?>); NIVEL=<OVER|UNDER> (<base breve>; n=<muestra o ?>)
+Usa una sola etiqueta N4 o N9 en la primera línea, según el filtro activo. El centro y METRICA deben coincidir exactamente con una opción permitida. Reemplaza todos los ejemplos y marcadores; nada de texto adicional.`
         : 'Proyecta UN target específico con su número. Justifica en una oración.';
     if (userMessage) {
         return {
@@ -3257,13 +3336,44 @@ function syncPredictionFromAI(responseText, backgroundPrediction = false) {
     const center = match ? Number(match[2]) : null;
     const allowedMetrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
     const allowedFamilies = trackerPredictionMetricFamilies(trackerConfig.prediction).map(family => family.toUpperCase());
+    const declaredMetricLabel = String(responseText || '').match(/^\s*METRICA\s*:\s*([A-Z0-9_]+)/im)?.[1]?.toUpperCase() || null;
+    const metricByDeclaredLabel = declaredMetricLabel
+        ? allowedMetrics.find(metric => metric.label === declaredMetricLabel && metric.number === center && metric.family.toUpperCase() === metricFamily)
+        : null;
+    const metricByNumber = allowedMetrics.find(metric => metric.family.toUpperCase() === metricFamily && metric.number === center) || null;
+    const chosenMetric = metricByDeclaredLabel || metricByNumber;
     const metricAllowed = Number.isInteger(center) && center >= 0 && center <= 36 &&
-        allowedFamilies.includes(metricFamily) &&
-        allowedMetrics.some(metric => metric.family === metricFamily.toLowerCase() && metric.number === center);
+        allowedFamilies.includes(metricFamily) && Boolean(chosenMetric);
     trackerAiN4Center = metricAllowed ? center : null;
     trackerAiPredictionMetric = metricAllowed ? metricFamily : null;
     trackerAiPredictionModel = metricAllowed ? `${trackerConfig.provider}/${trackerConfig.model}` : null;
-    trackerAiPredictionReasoning = metricAllowed ? String(responseText || '').trim().slice(0, 1800) : null;
+    let auditReasoning = String(responseText || '').trim();
+    const axes = auditReasoning.match(/^\s*EJES\s*:\s*DIR\s*=\s*(CW|CCW).*?ZONA\s*=\s*(BIG|SMALL).*?NIVEL\s*=\s*(OVER|UNDER)/im);
+    if (metricAllowed && declaredMetricLabel && chosenMetric && declaredMetricLabel !== chosenMetric.label) {
+        auditReasoning += `\nVALIDACIÓN: METRICA ${declaredMetricLabel} no coincide con el centro permitido; se auditó como ${chosenMetric.label}.`;
+    }
+    if (metricAllowed && axes && chosenMetric) {
+        const expectedLevel = ((axes[1].toUpperCase() === 'CW' && axes[2].toUpperCase() === 'BIG') ||
+            (axes[1].toUpperCase() === 'CCW' && axes[2].toUpperCase() === 'SMALL')) ? 'OVER' : 'UNDER';
+        if (axes[3].toUpperCase() !== expectedLevel) {
+            auditReasoning += `\nVALIDACIÓN: EJES no respetan la relación DIRECCIÓN+ZONA; con ${axes[1].toUpperCase()} y ${axes[2].toUpperCase()} el NIVEL debe ser ${expectedLevel}.`;
+        }
+        const labelAxes = chosenMetric.label.match(/^(CW|CCW)_N4([SB])$/);
+        if (labelAxes) {
+            const impliedDirection = labelAxes[1];
+            const impliedZone = labelAxes[2] === 'B' ? 'BIG' : 'SMALL';
+            const impliedLevel = ((impliedDirection === 'CW' && impliedZone === 'BIG') || (impliedDirection === 'CCW' && impliedZone === 'SMALL')) ? 'OVER' : 'UNDER';
+            if (axes[1].toUpperCase() !== impliedDirection || axes[2].toUpperCase() !== impliedZone || axes[3].toUpperCase() !== impliedLevel) {
+                auditReasoning += `\nVALIDACIÓN: EJES declarados no coinciden con ${chosenMetric.label}; métricas implican DIR=${impliedDirection}, ZONA=${impliedZone}, NIVEL=${impliedLevel}.`;
+            }
+        } else if (chosenMetric.label.endsWith('_N9')) {
+            const impliedDirection = chosenMetric.label.split('_')[0];
+            if (axes[1].toUpperCase() !== impliedDirection) {
+                auditReasoning += `\nVALIDACIÓN: DIR declarada no coincide con ${chosenMetric.label}; métrica implica ${impliedDirection}.`;
+            }
+        }
+    }
+    trackerAiPredictionReasoning = metricAllowed ? auditReasoning.slice(0, 1800) : null;
     trackerAiPredictionHistoryLength = trackerAiN4Center === null ? -1 : trackerHistory.length;
     if (trackerPredictionSource === 'ai') {
         predEl.innerText = trackerAiN4Center === null ? 'ANALIZANDO IA ?' : `IA · ${trackerAiPredictionMetric}: ${trackerAiN4Center}`;
