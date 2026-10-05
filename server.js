@@ -2486,6 +2486,51 @@ function buildTrackerAnalystEvidence(spins) {
     };
 }
 
+function compactTrackerAnalystEvidence(evidence) {
+    const summarizeWindow = window => ({
+        spins: window.spins,
+        counts: window.counts,
+        switches: window.switches,
+        dominant: window.dominant,
+        dominantPercent: window.dominantPercent
+    });
+    const summarizeFluctuation = window => ({
+        spins: window.spins,
+        transitions: window.transitions,
+        clockwise: window.clockwise,
+        counterclockwise: window.counterclockwise,
+        big: window.big,
+        small: window.small,
+        averageWheelDistance: window.averageWheelDistance,
+        commonTransitions: (window.mostCommonTransitions || []).slice(0, 3)
+    });
+    return {
+        historySize: evidence.historySize,
+        latestNumber: evidence.latestNumber,
+        currentSequence: evidence.currentSequence,
+        currentTransitionPattern: evidence.currentTransitionPattern,
+        similarSequences: {
+            occurrences: evidence.similarity?.occurrences || 0,
+            followingTransitionCounts: evidence.similarity?.followingTransitionCounts || [],
+            examples: (evidence.similarity?.examples || []).slice(-3)
+        },
+        axes: (evidence.regimes || []).map(regime => ({
+            axis: regime.key,
+            currentRun: regime.currentRun,
+            recentRuns: (regime.recentRuns || []).slice(-6),
+            windows: (regime.windows || []).map(summarizeWindow),
+            zigzag: regime.zigzag,
+            motifs: (regime.motifs || []).filter(item => item.n >= 2)
+                .sort((left, right) => right.n - left.n).slice(0, 3),
+            threeRunAfterTurbulence: regime.threeRunAfterTurbulence
+        })),
+        fluctuation: {
+            last15Minutes: summarizeFluctuation(evidence.fluctuation?.last15Minutes || {}),
+            last60Minutes: summarizeFluctuation(evidence.fluctuation?.last60Minutes || {})
+        }
+    };
+}
+
 function buildTrackerRegimeEvidence(steps) {
     const dimensions = [
         { key: 'direction', label: 'dirección', value: step => step.direction },
@@ -2675,6 +2720,7 @@ async function syncTrackerAnalystResultToAudits(tableId, spinId) {
 
 app.post('/api/ai/tracker', async (req, res) => {
     const requestStartedAt = Date.now();
+    let providerStartedAt = 0;
     const { provider, model, apiKey, system, messages, purpose, tableId, prediction_context: predictionContext } = req.body;
     let requestTimeout = null;
     let requestTimedOut = false;
@@ -2744,11 +2790,11 @@ app.post('/api/ai/tracker', async (req, res) => {
                             spin_id: { $lt: latestSpinId },
                             analyst_status: 'complete',
                             analyst_summary: { $ne: '' }
-                        }).sort({ spin_id: -1 }).limit(2).select('spin_id analyst_model analyst_summary').lean().exec();
+                        }).sort({ spin_id: -1 }).limit(1).select('spin_id analyst_model analyst_summary').lean().exec();
                         const analystContext = [
                             'EVIDENCIA DEL ANALISTA (descriptiva; no es una predicción ni una orden):',
-                            JSON.stringify(evidence),
-                            ...recentReviews.reverse().map(report => `Revision Qwen ${report.analyst_model} del giro ${report.spin_id}: ${report.analyst_summary}`),
+                            JSON.stringify(compactTrackerAnalystEvidence(evidence)),
+                            ...recentReviews.map(report => `Revision Qwen ${report.analyst_model} del giro ${report.spin_id}: ${String(report.analyst_summary || '').slice(0, 500)}`),
                             'Usa las coincidencias solo si tienen muestra concreta; distingue datos recientes de históricos y considera el tamaño de muestra. Gemini conserva la decisión final.'
                         ].join('\n');
                         const lastMessage = requestMessages[requestMessages.length - 1];
@@ -2769,13 +2815,13 @@ app.post('/api/ai/tracker', async (req, res) => {
                 const modeFilter = predictionMode ? { prediction_mode: predictionMode } : {};
                 const [predictionAudits, legacyAudits] = await Promise.all([
                     TrackerPredictionAudit.find({ table_id: tableNumber, result_spin_id: { $gt: 0 }, ...modeFilter })
-                        .sort({ result_spin_id: -1 }).limit(240).lean().exec(),
+                        .sort({ result_spin_id: -1 }).limit(120).lean().exec(),
                     TrackerAnalystSnapshot.find({
                         table_id: tableNumber,
                         result_spin_id: { $gt: 0 },
                         bankroll_session_id: { $nin: ['', null] },
                         ...modeFilter
-                    }).sort({ result_spin_id: -1 }).limit(240)
+                    }).sort({ result_spin_id: -1 }).limit(120)
                         .select('spin_id evidence.currentSequence evidence.regimes system_center system_metric_label system_reasoning system_won system_reward ai_center ai_metric_label ai_model ai_reasoning ai_won ai_reward result_spin_id result_number audited_at prediction_mode bankroll_session_id')
                         .lean().exec()
                 ]);
@@ -2797,7 +2843,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                         evidence: evidenceByBaseSpin.get(Number(snapshot.spin_id)) || {}
                     });
                 }
-                const auditSnapshots = Array.from(auditsByResult.values()).sort((left, right) => Number(right.result_spin_id) - Number(left.result_spin_id)).slice(0, 240);
+                const auditSnapshots = Array.from(auditsByResult.values()).sort((left, right) => Number(right.result_spin_id) - Number(left.result_spin_id)).slice(0, 120);
                 /* Legacy V1 sessions may have bank entries but no standalone audit row. */
                 const auditedResults = new Set(auditSnapshots.map(auditResultKey));
                 const makeAuditedEntry = snapshot => ({
@@ -2826,7 +2872,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                     table_id: tableNumber,
                     'context_snapshot.ai_won': { $in: [true, false] },
                     ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
-                }).sort({ created_at: -1 }).limit(240).select('session_id spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_reasoning context_snapshot.system_won context_snapshot.prediction_review context_snapshot.history context_snapshot.analyst_snapshot_id round created_at').lean().exec();
+                }).sort({ created_at: -1 }).limit(120).select('session_id spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_reasoning context_snapshot.system_won context_snapshot.prediction_review context_snapshot.history context_snapshot.analyst_snapshot_id round created_at').lean().exec();
                 const activeAiModel = `${provider}/${orModel}`;
                 const aiEntries = [
                     ...auditSnapshots.filter(snapshot => typeof snapshot.ai_won === 'boolean').map(makeAuditedEntry),
@@ -2857,7 +2903,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                 });
                 const wins = selfAiEntries.filter(entry => entry.context_snapshot?.ai_won === true).length;
                 const losses = selfAiEntries.filter(entry => entry.context_snapshot?.ai_won === false).length;
-                const samples = selfAiEntries.slice(0, 12).reverse().map(entry => {
+                const samples = selfAiEntries.slice(0, 6).reverse().map(entry => {
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-10).join(',') : '';
                     const reasoning = String(entry.context_snapshot?.ai_reasoning || '').replace(/\s+/g, ' ').slice(0, 125);
@@ -2882,7 +2928,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                     table_id: tableNumber,
                     'context_snapshot.system_center': { $gte: 0, $lte: 36 },
                     ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
-                }).sort({ created_at: -1 }).limit(240)
+                }).sort({ created_at: -1 }).limit(120)
                     .select('_id session_id spin_key number context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.prediction_review context_snapshot.history context_snapshot.analyst_snapshot_id round created_at')
                     .lean().exec();
                 const systemBackfills = [];
@@ -2917,7 +2963,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                 const systemWins = systemEntries.filter(entry => entry.context_snapshot?.system_won === true).length;
                 const systemLosses = systemEntries.filter(entry => entry.context_snapshot?.system_won === false).length;
                 const systemReward = systemEntries.reduce((sum, entry) => sum + Number(entry.context_snapshot?.system_reward || 0), 0);
-                const systemSamples = systemEntries.slice(0, 8).reverse().map(entry => {
+                const systemSamples = systemEntries.slice(0, 4).reverse().map(entry => {
                     const reasoning = entry.context_snapshot?.system_reasoning || {};
                     const history = Array.isArray(entry.context_snapshot?.history)
                         ? entry.context_snapshot.history.slice(-8).join(',') : '';
@@ -2973,7 +3019,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                 const patternLines = Array.from(patternGroups.values())
                     .filter(group => group.predictor === 'IA' && group.modelName === activeAiModel && group.n >= 4)
                     .sort((left, right) => right.n - left.n || right.wins / right.n - left.wins / left.n)
-                    .slice(0, 10)
+                    .slice(0, 6)
                     .map(group => `${group.predictor} ${group.metric} ${group.dimension}=${group.state}×${group.length}: ${group.wins}/${group.n} (${Math.round(group.wins / group.n * 100)}%)`);
                 const patternFeedback = `RESULTADOS PROPIOS DE IA POR RÉGIMEN (solo este modelo, mismo filtro ${predictionMode || 'sin filtro'} y grupos con n≥4): ${patternLines.length ? patternLines.join(' | ') : 'Aún no hay muestra suficiente de predicciones auditadas de este modelo para calibrar patrones por régimen.'} Usa el acierto observado para orientar el análisis del patrón comparable; n pequeño es evidencia débil, no regla ni garantía.`;
                 const lastMessage = requestMessages[requestMessages.length - 1];
@@ -3036,6 +3082,18 @@ app.post('/api/ai/tracker', async (req, res) => {
                     max_completion_tokens: purpose === 'prediction' ? 1536 : 1024
                 })
         };
+        const promptChars = requestMessages.reduce((total, message) =>
+            total + (typeof message?.content === 'string' ? message.content.length : 0), 0);
+        console.log('[Tracker AI] Context ready:', {
+            model: orModel,
+            purpose: purpose || 'chat',
+            preparation_ms: Date.now() - requestStartedAt,
+            system_chars: String(system || '').length,
+            message_chars: promptChars,
+            request_chars: JSON.stringify(orBody).length,
+            history_length: predictionContext?.history_length,
+            revision: predictionContext?.revision
+        });
         const orHeaders = {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + key,
@@ -3047,6 +3105,7 @@ app.post('/api/ai/tracker', async (req, res) => {
             requestTimedOut = true;
             requestController.abort();
         }, purpose === 'prediction' ? 14000 : 60000);
+        providerStartedAt = Date.now();
         const orResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: orHeaders,
@@ -3090,14 +3149,18 @@ app.post('/api/ai/tracker', async (req, res) => {
         console.log('[Tracker AI] OpenRouter success:', orModel, predictedTarget, 'metric:', predictedMetric,
             'historyLength:', predictionContext?.history_length,
             'latestSpin:', predictionContext?.latest_spin,
-            'response length:', responseText.length, 'duration_ms:', Date.now() - requestStartedAt);
+            'response length:', responseText.length,
+            'openrouter_ms:', Date.now() - providerStartedAt,
+            'total_ms:', Date.now() - requestStartedAt);
         res.json({ success: true, response: responseText });
     } catch (err) {
         clearTimeout(requestTimeout);
         const errorMessage = requestTimedOut || err.name === 'AbortError'
             ? 'OpenRouter no completó la predicción dentro del límite de 15 segundos.'
             : err.message;
-        console.error('[Tracker AI] ERROR:', errorMessage, 'duration_ms:', Date.now() - requestStartedAt);
+        console.error('[Tracker AI] ERROR:', errorMessage,
+            'openrouter_ms:', providerStartedAt ? Date.now() - providerStartedAt : null,
+            'total_ms:', Date.now() - requestStartedAt);
         res.json({ success: false, error: errorMessage, provider: provider || 'openrouter' });
     }
 });

@@ -1859,7 +1859,6 @@ async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
                 latest_spin: trackerHistory[trackerHistory.length - 1],
                 mode: trackerConfig.prediction
             } : undefined,
-            spinHistory: aiPrediction ? trackerHistory.slice(-80) : undefined,
             messages: aiPrediction
                 ? promptObj.messages
                 : [...(requestSource === 'live' && !aiOnlyBankroll ? requestMemory.messages.slice(-8) : []), ...promptObj.messages],
@@ -3092,35 +3091,22 @@ function buildTrackerPrompt(ctx, userMessage, forceAiPrediction = false) {
         lines.push(`Media salto: ${ctx.sig.avgTravel} | Desviacion: ${ctx.sig.stdDev}`);
     }
     const aiOnlyBankroll = trackerSource === 'live' && trackerBankActiveSession();
-    let dataBlock = `${lines.join('\n')}\n${buildTrackerPatternEvidence(trackerHistory.slice(-400))}`;
+    let dataBlock;
     if (aiOnlyBankroll) {
         const history = trackerHistory.slice(-400);
-        const recent = history.slice(-120);
+        const recent = history.slice(-80);
         const recentJumps = [];
         for (let i = 1; i < recent.length; i++) recentJumps.push(calcDist(recent[i - 1], recent[i]));
-        const windowStats = [20, 50, 100, 400].map(size => {
-            const spins = history.slice(-size);
-            const jumps = [];
-            for (let i = 1; i < spins.length; i++) jumps.push(calcDist(spins[i - 1], spins[i]));
-            const directional = jumps.filter(jump => jump !== 0);
-            const right = directional.filter(jump => jump > 0).length;
-            const left = directional.length - right;
-            const big = jumps.filter(jump => Math.abs(jump) >= 10).length;
-            const small = jumps.length - big;
-            const avgDistance = jumps.length
-                ? (jumps.reduce((sum, jump) => sum + Math.abs(jump), 0) / jumps.length).toFixed(1)
-                : '0.0';
-            return `Ventana ${spins.length}/${size}: derecha ${right}/${directional.length}, izquierda ${left}/${directional.length}; BIG ${big}/${jumps.length}, SMALL ${small}/${jumps.length}; salto medio ${avgDistance}.`;
-        });
         dataBlock = [
             `Historial Live disponible: ${history.length} giros (máximo 400; serie antigua a reciente).`,
             `Últimos ${recent.length} giros: ${recent.join(', ')}`,
             `Saltos firmados de esa serie: ${recentJumps.map(jump => (jump > 0 ? '+' : '') + jump).join(', ')}`,
-            ...windowStats,
             'Definiciones: salto positivo = derecha y negativo = izquierda según el orden de la ruleta europea; BIG = salto absoluto de 10 o más, SMALL = menor que 10.',
-            `Lectura actual por variables:\n${lines.slice(1).join('\n')}`,
+            `Lectura actual por variables:\n${[...new Set(lines.slice(4))].join('\n')}`,
             buildTrackerPatternEvidence(history)
         ].join('\n');
+    } else {
+        dataBlock = `${lines.join('\n')}\n${buildTrackerPatternEvidence(trackerHistory.slice(-400))}`;
     }
     if (aiPrediction) {
         dataBlock += `\nFILTRO ACTIVO ${outputMetricLabel}: elige únicamente una de estas métricas exactas: ${allowedMetrics.map(metric => `${metric.label}=${metric.number}`).join(' | ') || 'ninguna disponible'}. No uses valores fuera de esta lista ni inventes centros.`;
@@ -3269,7 +3255,6 @@ async function callTrackerAI(promptObj, isAuto) {
             apiKey: trackerConfig.apiKey,
             purpose: isAuto && trackerPredictionSource === 'ai' ? 'prediction' : 'chat',
             tableId: trackerBankTableId(),
-            spinHistory: isAuto && trackerPredictionSource === 'ai' ? trackerHistory.slice(-80) : undefined,
             messages: isAuto && trackerPredictionSource === 'ai'
                 ? promptObj.messages
                 : [...(requestSource === 'live' ? requestMemory.messages.slice(-8) : []), ...promptObj.messages],
