@@ -14,6 +14,7 @@ const TrackerBankrollEntry = require('./models/TrackerBankrollEntry');
 const TrackerAnalystSnapshot = require('./models/TrackerAnalystSnapshot');
 const TrackerPredictionAudit = require('./models/TrackerPredictionAudit');
 const trackerBankroll = require('./src/engine/tracker_bankroll');
+const { buildTrackerReport } = require('./src/engine/tracker_reporting');
 const predictor = require('./src/engine/predictor'); // Agents 1-4
 const { WHEEL_ORDER, WHEEL_INDEX } = predictor;
 const agent5  = require('./src/engine/agent5');      // Autonomous AI & Physics
@@ -1686,6 +1687,43 @@ app.put('/api/tracker/memory/:tableId/:source', async (req, res) => {
 });
 
 // Tracker bankroll records are intentionally MongoDB-only. Manual spins never reach these routes.
+async function loadTrackerReport(tableId, options = {}) {
+    const sessions = await TrackerBankrollSession.find({ table_id: tableId }).sort({ session_no: -1 }).lean().exec();
+    const safeWindow = ['10', '20'].includes(String(options.window)) ? String(options.window) : 'all';
+    const selectedSessions = safeWindow === 'all' ? sessions : sessions.slice(0, Number(safeWindow));
+    const sessionIds = selectedSessions.map(session => String(session._id));
+    if (!sessionIds.length) {
+        return buildTrackerReport({ sessions, audits: [], entries: [], ...options, wheelNeighbors });
+    }
+    const [audits, entries] = await Promise.all([
+        TrackerPredictionAudit.find({ bankroll_session_id: { $in: sessionIds } })
+            .select('bankroll_session_id bankroll_session_no spin_id latest_number prediction_mode system_center system_status system_metric_label system_reasoning system_won ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won analyst_model analyst_status analyst_summary analyst_error result_spin_id result_number audited_at created_at')
+            .lean().exec(),
+        TrackerBankrollEntry.find({ session_id: { $in: selectedSessions.map(session => session._id) } })
+            .select('session_id session_no spin_key number context_snapshot created_at')
+            .lean().exec()
+    ]);
+    return buildTrackerReport({ sessions, audits, entries, ...options, wheelNeighbors });
+}
+
+app.get('/api/tracker/bankroll/:tableId/report', async (req, res) => {
+    if (!db.getUseMongo()) return res.status(503).json({ error: 'MongoDB Atlas no está conectado.' });
+    const tableId = Number(req.params.tableId);
+    if (!Number.isInteger(tableId)) return res.status(400).json({ error: 'Mesa inválida.' });
+    try {
+        const report = await loadTrackerReport(tableId, {
+            window: req.query.window,
+            mode: req.query.mode,
+            page: req.query.page,
+            pageSize: req.query.page_size
+        });
+        res.json({ success: true, storage: 'mongodb', report });
+    } catch (error) {
+        console.error('[Tracker report] Load failed:', error.message);
+        res.status(500).json({ error: 'No se pudo preparar la comparación histórica.' });
+    }
+});
+
 app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
     const tableId = Number(req.params.tableId);
     if (!Number.isInteger(tableId)) return res.status(400).json({ error: 'Mesa inválida.' });
@@ -2050,7 +2088,8 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
         analyst_status: 'unavailable',
         analyst_model: '',
         analyst_snapshot_id: '',
-        analyst_summary: ''
+        analyst_summary: '',
+        analyst_error: ''
     };
     const predictionNumbers = Number.isInteger(predictionCenter) && predictionCenter >= 0 && predictionCenter <= 36
         ? wheelNeighbors(predictionCenter, 4)
@@ -2516,6 +2555,14 @@ function startTrackerAnalystReview(snapshotId, evidence, apiKey, tableId, spinId
             if (!text) throw new Error('Qwen devolvió el análisis vacío.');
             let parsed;
             try { parsed = JSON.parse(text); } catch { parsed = { hallazgo: text.slice(0, 500) }; }
+            // Some OpenRouter/Qwen responses wrap the requested JSON object in
+            // the hallazgo string. Unwrap that layer so the saved report is readable.
+            if (typeof parsed.hallazgo === 'string' && /^\s*\{/.test(parsed.hallazgo)) {
+                try {
+                    const nested = JSON.parse(parsed.hallazgo);
+                    if (nested && typeof nested === 'object') parsed = { ...parsed, ...nested };
+                } catch { /* Preserve the original concise finding if it is plain text. */ }
+            }
             const summary = JSON.stringify({
                 hallazgo: String(parsed.hallazgo || '').slice(0, 500),
                 confianza_evidencia: ['baja', 'media', 'alta'].includes(parsed.confianza_evidencia) ? parsed.confianza_evidencia : 'baja',
@@ -2558,7 +2605,8 @@ async function syncTrackerAnalystResultToAudits(tableId, spinId) {
         'context_snapshot.analyst_status': analystFields.analyst_status,
         'context_snapshot.analyst_model': analystFields.analyst_model,
         'context_snapshot.analyst_snapshot_id': String(snapshot._id),
-        'context_snapshot.analyst_summary': analystFields.analyst_summary
+        'context_snapshot.analyst_summary': analystFields.analyst_summary,
+        'context_snapshot.analyst_error': analystFields.analyst_error
     } });
 }
 
@@ -2678,18 +2726,20 @@ app.post('/api/ai/tracker', async (req, res) => {
                     : [];
                 const evidenceByBaseSpin = new Map(analystEvidenceDocs.map(snapshot => [Number(snapshot.spin_id), snapshot.evidence || {}]));
                 const auditsByResult = new Map();
-                for (const snapshot of legacyAudits) auditsByResult.set(Number(snapshot.result_spin_id), snapshot);
+                const auditResultKey = snapshot => `${String(snapshot.bankroll_session_id || 'legacy')}:${Number(snapshot.result_spin_id)}`;
+                for (const snapshot of legacyAudits) auditsByResult.set(auditResultKey(snapshot), snapshot);
                 for (const snapshot of predictionAudits) {
-                    auditsByResult.set(Number(snapshot.result_spin_id), {
+                    auditsByResult.set(auditResultKey(snapshot), {
                         ...snapshot,
                         evidence: evidenceByBaseSpin.get(Number(snapshot.spin_id)) || {}
                     });
                 }
                 const auditSnapshots = Array.from(auditsByResult.values()).sort((left, right) => Number(right.result_spin_id) - Number(left.result_spin_id)).slice(0, 240);
                 /* Legacy V1 sessions may have bank entries but no standalone audit row. */
-                const auditedResults = new Set(auditSnapshots.map(snapshot => Number(snapshot.result_spin_id)));
+                const auditedResults = new Set(auditSnapshots.map(auditResultKey));
                 const makeAuditedEntry = snapshot => ({
                     _id: `audit:${snapshot.result_spin_id}`,
+                    session_id: String(snapshot.bankroll_session_id || ''),
                     number: Number(snapshot.result_number),
                     round: Number(snapshot.result_spin_id),
                     created_at: snapshot.audited_at,
@@ -2712,11 +2762,12 @@ app.post('/api/ai/tracker', async (req, res) => {
                     table_id: tableNumber,
                     'context_snapshot.ai_won': { $in: [true, false] },
                     ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
-                }).sort({ created_at: -1 }).limit(240).select('spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.history round created_at').lean().exec();
+                }).sort({ created_at: -1 }).limit(240).select('session_id spin_key number context_snapshot.ai_center context_snapshot.ai_metric_label context_snapshot.ai_model context_snapshot.ai_reasoning context_snapshot.ai_won context_snapshot.history context_snapshot.analyst_snapshot_id round created_at').lean().exec();
                 const activeAiModel = `${provider}/${orModel}`;
                 const aiEntries = [
                     ...auditSnapshots.filter(snapshot => typeof snapshot.ai_won === 'boolean').map(makeAuditedEntry),
-                    ...legacyAiEntries.filter(entry => !auditedResults.has(Number(String(entry.spin_key).split(':').pop())))
+                    ...legacyAiEntries.filter(entry => !auditedResults.has(`${String(entry.session_id || '')}:${Number(String(entry.spin_key).split(':').pop())}`))
+                        .map(entry => ({ ...entry, round: Number(String(entry.spin_key).split(':').pop()) || Number(entry.round || 0) }))
                 ].sort((a, b) => Number(b.round || 0) - Number(a.round || 0));
                 // Train the active model from its own scored predictions only;
                 // other models and SISTEMA remain comparison evidence, not its reward history.
@@ -2738,7 +2789,7 @@ app.post('/api/ai/tracker', async (req, res) => {
                     'context_snapshot.system_center': { $gte: 0, $lte: 36 },
                     ...(predictionMode ? { 'context_snapshot.prediction_mode': predictionMode } : {})
                 }).sort({ created_at: -1 }).limit(240)
-                    .select('_id spin_key number context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.history round created_at')
+                    .select('_id session_id spin_key number context_snapshot.system_center context_snapshot.system_metric_label context_snapshot.system_won context_snapshot.system_reward context_snapshot.system_reasoning context_snapshot.history context_snapshot.analyst_snapshot_id round created_at')
                     .lean().exec();
                 const systemBackfills = [];
                 legacySystemEntries.forEach(entry => {
@@ -2766,7 +2817,8 @@ app.post('/api/ai/tracker', async (req, res) => {
                 }
                 const systemEntries = [
                     ...auditSnapshots.filter(snapshot => Number.isInteger(Number(snapshot.system_center)) && typeof snapshot.system_won === 'boolean').map(makeAuditedEntry),
-                    ...legacySystemEntries.filter(entry => !auditedResults.has(Number(String(entry.spin_key).split(':').pop())))
+                    ...legacySystemEntries.filter(entry => !auditedResults.has(`${String(entry.session_id || '')}:${Number(String(entry.spin_key).split(':').pop())}`))
+                        .map(entry => ({ ...entry, round: Number(String(entry.spin_key).split(':').pop()) || Number(entry.round || 0) }))
                 ].sort((a, b) => Number(b.round || 0) - Number(a.round || 0)).slice(0, 120);
                 const systemWins = systemEntries.filter(entry => entry.context_snapshot?.system_won === true).length;
                 const systemLosses = systemEntries.filter(entry => entry.context_snapshot?.system_won === false).length;
@@ -2783,6 +2835,13 @@ app.post('/api/ai/tracker', async (req, res) => {
                     return `${metric} Sistema centro ${entry.context_snapshot.system_center}: ${entry.context_snapshot.system_won ? 'acierto (+1)' : 'fallo (-1)'}, ${direction}${confidence}${state}${history ? ` (previos ${history})` : ''}`;
                 });
                 const systemFeedback = `AUDITORÍA Y RECOMPENSA DEL SISTEMA: ${systemEntries.length} señales evaluadas (${systemWins} aciertos, ${systemLosses} fallos; recompensa acumulada ${systemReward >= 0 ? '+' : ''}${systemReward}, +1 acierto/-1 fallo). ${systemSamples.length ? `Muestras recientes con dirección, confianza y contexto: ${systemSamples.join(' | ')}.` : 'Aún no hay auditorías guardadas.'} Úsalo como evidencia secundaria para calibrar tu análisis; no copies automáticamente la señal del sistema ni trates la muestra como garantía.`;
+                const legacyAnalystIds = Array.from(new Set([...legacyAiEntries, ...legacySystemEntries]
+                    .map(entry => String(entry.context_snapshot?.analyst_snapshot_id || ''))
+                    .filter(id => mongoose.Types.ObjectId.isValid(id))));
+                const legacyAnalystDocs = legacyAnalystIds.length
+                    ? await TrackerAnalystSnapshot.find({ _id: { $in: legacyAnalystIds } }).select('_id evidence').lean().exec()
+                    : [];
+                const legacyEvidenceById = new Map(legacyAnalystDocs.map(snapshot => [String(snapshot._id), snapshot.evidence || {}]));
                 const patternGroups = new Map();
                 const addPatternOutcomes = (snapshot, predictor, won, metric, modelName = '') => {
                     if (typeof won !== 'boolean' || !metric) return;
@@ -2803,6 +2862,17 @@ app.post('/api/ai/tracker', async (req, res) => {
                         addPatternOutcomes(snapshot, 'IA', snapshot.ai_won, snapshot.ai_metric_label || '?', snapshot.ai_model);
                     }
                 });
+                legacySystemEntries.forEach(entry => {
+                    const evidence = legacyEvidenceById.get(String(entry.context_snapshot?.analyst_snapshot_id || ''));
+                    if (evidence) addPatternOutcomes({ evidence }, 'SISTEMA', entry.context_snapshot?.system_won,
+                        entry.context_snapshot?.system_metric_label || '?');
+                });
+                legacyAiEntries.forEach(entry => {
+                    if (entry.context_snapshot?.ai_model !== activeAiModel) return;
+                    const evidence = legacyEvidenceById.get(String(entry.context_snapshot?.analyst_snapshot_id || ''));
+                    if (evidence) addPatternOutcomes({ evidence }, 'IA', entry.context_snapshot?.ai_won,
+                        entry.context_snapshot?.ai_metric_label || '?', entry.context_snapshot?.ai_model);
+                });
                 const patternLines = Array.from(patternGroups.values())
                     .filter(group => group.predictor === 'IA' && group.modelName === activeAiModel && group.n >= 4)
                     .sort((left, right) => right.n - left.n || right.wins / right.n - left.wins / left.n)
@@ -2813,6 +2883,47 @@ app.post('/api/ai/tracker', async (req, res) => {
                 if (typeof lastMessage.content === 'string') lastMessage.content += `\n\n${feedback}\n\n${systemFeedback}\n\n${patternFeedback}`;
             } catch (learningError) {
                 console.warn('[Tracker AI] No se pudo cargar aprendizaje de banca:', learningError.message);
+            }
+        }
+        if (purpose === 'chat' && requestMessages.length && Number.isInteger(Number(tableId))) {
+            try {
+                const userMessage = [...requestMessages].reverse().find(message => message?.role === 'user');
+                const question = typeof userMessage?.content === 'string' ? userMessage.content : '';
+                const asksForHistory = /compar|historial|pron[oó]stic|aciert|fall|sesion|sesi[oó]n|ganad|perdid|ultim|últim|qwen|aprend/i.test(question);
+                if (asksForHistory) {
+                    const windowMatch = question.match(/(?:ultim[oa]s?|últim[oa]s?)\D{0,8}(10|20)\b/i);
+                    const bothModes = /\b(?:ambos|both)\b|\bn4\b[\s\S]*\bn9\b|\bn9\b[\s\S]*\bn4\b/i.test(question);
+                    const mode = bothModes ? 'all'
+                        : /\bn4\b/i.test(question) && !/\bn9\b/i.test(question) ? 'n4'
+                            : /\bn9\b/i.test(question) && !/\bn4\b/i.test(question) ? 'n9' : 'all';
+                    const report = await loadTrackerReport(Number(tableId), {
+                        window: windowMatch?.[1] || 'all', mode, page: 1, pageSize: 1
+                    });
+                    const money = amount => `S/ ${Number(amount || 0).toFixed(2)}`;
+                    const predictorLine = (name, summary) => `${name}: ${summary.forecasts} pronósticos con centro guardado; ${summary.evaluated} evaluados (${summary.wins} aciertos, ${summary.losses} fallos, ${summary.pending} pendientes); precisión ${summary.accuracy == null ? 'sin muestra' : `${summary.accuracy}%`}.`;
+                    const modelLines = report.prediction_summary.ai.models.map(item =>
+                        `IA ${item.model}: ${item.forecasts} pronósticos, ${item.wins}/${item.evaluated} aciertos (${item.accuracy == null ? 'sin muestra' : `${item.accuracy}%`}), ${item.pending} pendientes.`
+                    );
+                    const modeLines = Object.entries(report.prediction_summary.by_mode).map(([name, item]) =>
+                        `${name.toUpperCase()} guardados=${item.stored}; SISTEMA ${item.system.wins}/${item.system.evaluated} (${item.system.accuracy == null ? 'sin muestra' : `${item.system.accuracy}%`}); IA ${item.ai.wins}/${item.ai.evaluated} (${item.ai.accuracy == null ? 'sin muestra' : `${item.ai.accuracy}%`}).`
+                    );
+                    const latestSessions = report.sessions.slice(0, 20).map(session =>
+                        `#${session.session_no} ${session.final_outcome}/${session.status}, apuestas ${session.total_spins}, neto ${money(session.net_profit)}`
+                    );
+                    const historicalContext = [
+                        'DATOS HISTÓRICOS VERIFICADOS DE MONGODB. Responde la pregunta comparando únicamente estos conteos; separa aciertos evaluados de pronósticos pendientes y sesiones de banca de precisión de predictores. No afirmes entrenamiento del modelo base.',
+                        `Ventana: ${report.window === 'all' ? 'todas las sesiones guardadas' : `últimas ${report.window} sesiones`}; filtro: ${report.mode}. Sesiones ${report.session_summary.total} (cerradas: ${report.session_summary.closed}; ganadas ${report.session_summary.won}, perdidas ${report.session_summary.lost}, empate ${report.session_summary.break_even}; activas ${report.session_summary.active}, pausadas ${report.session_summary.paused}, borrador ${report.session_summary.draft}); neto agregado ${money(report.session_summary.net_profit)}.`,
+                        predictorLine('SISTEMA', report.prediction_summary.system),
+                        predictorLine('IA total', report.prediction_summary.ai),
+                        ...modelLines,
+                        `Qwen: informes completos ${report.analyst_summary.complete}, pendientes ${report.analyst_summary.pending}, fallidos ${report.analyst_summary.failed}, no disponibles ${report.analyst_summary.unavailable}. Qwen analiza evidencia; el predictor final sigue siendo ${orModel}.`,
+                        `Desglose por filtro: ${modeLines.join(' ') || 'sin pronósticos guardados en esta ventana.'}`,
+                        `Sesiones recientes: ${latestSessions.join(' | ') || 'ninguna.'}`
+                    ].join('\n');
+                    if (typeof userMessage.content === 'string') userMessage.content += `\n\n${historicalContext}`;
+                }
+            } catch (reportError) {
+                console.warn('[Tracker report] Could not attach history to AI chat:', reportError.message);
             }
         }
         const orBody = {

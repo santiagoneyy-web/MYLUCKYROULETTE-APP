@@ -1,0 +1,212 @@
+function validCenter(value) {
+    const number = value == null || value === '' ? null : Number(value);
+    return Number.isInteger(number) && number >= 0 && number <= 36 ? number : null;
+}
+
+function validMode(value) {
+    return ['n4', 'n9', 'both'].includes(value) ? value : null;
+}
+
+function parseSpinId(spinKey) {
+    const value = Number(String(spinKey || '').split(':').pop());
+    return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function summarizePredictor(records, key, wheelNeighbors) {
+    const forecasts = records.filter(record => validCenter(record[key]?.center) !== null);
+    const evaluated = forecasts.filter(record => typeof record[key]?.won === 'boolean');
+    const wins = evaluated.filter(record => record[key].won).length;
+    const losses = evaluated.length - wins;
+    return {
+        forecasts: forecasts.length,
+        evaluated: evaluated.length,
+        wins,
+        losses,
+        pending: forecasts.length - evaluated.length,
+        accuracy: evaluated.length ? Math.round(wins / evaluated.length * 1000) / 10 : null,
+        models: key === 'ai' ? summarizeModels(forecasts, wheelNeighbors) : undefined
+    };
+}
+
+function summarizeModels(forecasts) {
+    const groups = new Map();
+    for (const record of forecasts) {
+        const name = record.ai?.model || 'Modelo no identificado';
+        const group = groups.get(name) || { model: name, forecasts: 0, evaluated: 0, wins: 0, losses: 0, pending: 0 };
+        group.forecasts++;
+        if (typeof record.ai?.won === 'boolean') {
+            group.evaluated++;
+            if (record.ai.won) group.wins++;
+            else group.losses++;
+        } else group.pending++;
+        groups.set(name, group);
+    }
+    return Array.from(groups.values()).map(group => ({
+        ...group,
+        accuracy: group.evaluated ? Math.round(group.wins / group.evaluated * 1000) / 10 : null
+    })).sort((left, right) => right.forecasts - left.forecasts);
+}
+
+function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 'all', page = 1, pageSize = 50, wheelNeighbors }) {
+    const orderedSessions = [...sessions].sort((left, right) => Number(right.session_no || 0) - Number(left.session_no || 0));
+    const safeWindow = ['10', '20'].includes(String(window)) ? String(window) : 'all';
+    const selectedSessions = safeWindow === 'all' ? orderedSessions : orderedSessions.slice(0, Number(safeWindow));
+    const selectedIds = new Set(selectedSessions.map(session => String(session._id)));
+    const selectedMode = ['n4', 'n9', 'both'].includes(mode) ? mode : 'all';
+    const recordsByKey = new Map();
+
+    const makeRecord = (key, sessionId, sessionNo) => ({
+        id: key,
+        session_id: String(sessionId || ''),
+        session_no: Number(sessionNo || 0),
+        mode: null,
+        forecast_spin_id: null,
+        result_spin_id: null,
+        base_number: null,
+        result_number: null,
+        system: { center: null, metric: '', won: null, status: '', reasoning: null },
+        ai: { center: null, metric: '', model: '', won: null, status: '', reasoning: '' },
+        analyst: { model: '', status: '', summary: '', error: '' },
+        created_at: null
+    });
+
+    for (const audit of audits) {
+        const sessionId = String(audit.bankroll_session_id || '');
+        if (!selectedIds.has(sessionId)) continue;
+        const resultSpinId = Number(audit.result_spin_id) > 0 ? Number(audit.result_spin_id) : null;
+        const forecastSpinId = Number(audit.spin_id) > 0 ? Number(audit.spin_id) : null;
+        const recordKey = resultSpinId ? `${sessionId}:result:${resultSpinId}` : `${sessionId}:forecast:${forecastSpinId}`;
+        const session = selectedSessions.find(item => String(item._id) === sessionId);
+        const record = makeRecord(recordKey, sessionId, audit.bankroll_session_no || session?.session_no);
+        record.mode = validMode(audit.prediction_mode);
+        record.forecast_spin_id = forecastSpinId;
+        record.result_spin_id = resultSpinId;
+        record.base_number = audit.latest_number == null ? null : Number(audit.latest_number);
+        record.result_number = audit.result_number == null ? null : Number(audit.result_number);
+        record.system = {
+            center: validCenter(audit.system_center), metric: String(audit.system_metric_label || ''),
+            won: typeof audit.system_won === 'boolean' ? audit.system_won : null,
+            status: String(audit.system_status || ''), reasoning: audit.system_reasoning || null
+        };
+        record.ai = {
+            center: validCenter(audit.ai_center), metric: String(audit.ai_metric_label || ''),
+            model: String(audit.ai_model || ''), won: typeof audit.ai_won === 'boolean' ? audit.ai_won : null,
+            status: String(audit.ai_status || ''), reasoning: String(audit.ai_reasoning || '')
+        };
+        record.analyst = {
+            model: String(audit.analyst_model || ''), status: String(audit.analyst_status || ''),
+            summary: String(audit.analyst_summary || ''), error: String(audit.analyst_error || '')
+        };
+        record.created_at = audit.audited_at || audit.created_at || null;
+        recordsByKey.set(recordKey, record);
+    }
+
+    for (const entry of entries) {
+        const sessionId = String(entry.session_id || '');
+        if (!selectedIds.has(sessionId)) continue;
+        const context = entry.context_snapshot || {};
+        const resultSpinId = parseSpinId(entry.spin_key);
+        const key = resultSpinId ? `${sessionId}:result:${resultSpinId}` : `${sessionId}:entry:${entry._id}`;
+        const session = selectedSessions.find(item => String(item._id) === sessionId);
+        const record = recordsByKey.get(key) || makeRecord(key, sessionId, entry.session_no || session?.session_no);
+        record.mode = record.mode || validMode(context.prediction_mode);
+        record.forecast_spin_id = record.forecast_spin_id || (Number(context.forecast_base_spin_id) > 0 ? Number(context.forecast_base_spin_id) : null);
+        record.result_spin_id = record.result_spin_id || resultSpinId;
+        record.result_number = record.result_number == null ? Number(entry.number) : record.result_number;
+        record.created_at = record.created_at || entry.created_at || null;
+        record.system = {
+            ...record.system,
+            center: record.system.center ?? validCenter(context.system_center),
+            metric: record.system.metric || String(context.system_metric_label || ''),
+            won: typeof record.system.won === 'boolean' ? record.system.won : typeof context.system_won === 'boolean' ? context.system_won : null,
+            status: record.system.status || String(context.system_status || ''),
+            reasoning: record.system.reasoning || context.system_reasoning || null
+        };
+        record.ai = {
+            ...record.ai,
+            center: record.ai.center ?? validCenter(context.ai_center),
+            metric: record.ai.metric || String(context.ai_metric_label || ''),
+            model: record.ai.model || String(context.ai_model || ''),
+            won: typeof record.ai.won === 'boolean' ? record.ai.won : typeof context.ai_won === 'boolean' ? context.ai_won : null,
+            status: record.ai.status || String(context.ai_status || ''),
+            reasoning: record.ai.reasoning || String(context.ai_reasoning || '')
+        };
+        record.analyst = {
+            model: record.analyst.model || String(context.analyst_model || ''),
+            status: record.analyst.status || String(context.analyst_status || ''),
+            summary: record.analyst.summary || String(context.analyst_summary || ''),
+            error: record.analyst.error || ''
+        };
+        recordsByKey.set(key, record);
+    }
+
+    let records = Array.from(recordsByKey.values()).filter(record => selectedMode === 'all' || record.mode === selectedMode);
+    for (const record of records) {
+        if (record.result_number == null || typeof wheelNeighbors !== 'function') continue;
+        for (const predictor of ['system', 'ai']) {
+            if (validCenter(record[predictor].center) === null || typeof record[predictor].won === 'boolean') continue;
+            record[predictor].won = wheelNeighbors(record[predictor].center, 4).includes(record.result_number);
+        }
+    }
+    records.sort((left, right) => Number(right.result_spin_id || right.forecast_spin_id || 0) - Number(left.result_spin_id || left.forecast_spin_id || 0)
+        || right.session_no - left.session_no);
+
+    const closed = selectedSessions.filter(session => session.status === 'closed');
+    const sessionSummary = {
+        total: selectedSessions.length,
+        won: closed.filter(session => session.final_outcome === 'won').length,
+        lost: closed.filter(session => session.final_outcome === 'lost').length,
+        break_even: closed.filter(session => session.final_outcome === 'break_even').length,
+        active: selectedSessions.filter(session => session.status === 'active').length,
+        paused: selectedSessions.filter(session => session.status === 'paused').length,
+        draft: selectedSessions.filter(session => session.status === 'draft').length,
+        closed: closed.length,
+        net_profit: Number(selectedSessions.reduce((sum, session) => sum + Number(session.balance || 0) - Number(session.initial_capital || 0), 0).toFixed(2))
+    };
+    const system = summarizePredictor(records, 'system', wheelNeighbors);
+    const ai = summarizePredictor(records, 'ai', wheelNeighbors);
+    const agreement = records.filter(record => validCenter(record.system.center) !== null && validCenter(record.ai.center) !== null);
+    const analyst = {
+        complete: records.filter(record => record.analyst.status === 'complete').length,
+        pending: records.filter(record => record.analyst.status === 'pending').length,
+        failed: records.filter(record => record.analyst.status === 'failed').length,
+        unavailable: records.filter(record => !record.analyst.status || record.analyst.status === 'unavailable').length
+    };
+    const modeBreakdown = {};
+    for (const key of ['n4', 'n9', 'both', 'unknown']) {
+        const group = records.filter(record => (record.mode || 'unknown') === key);
+        if (group.length) modeBreakdown[key] = {
+            stored: group.length,
+            system: summarizePredictor(group, 'system', wheelNeighbors),
+            ai: summarizePredictor(group, 'ai', wheelNeighbors)
+        };
+    }
+    const pagination = {
+        page: Math.max(1, Number.parseInt(page, 10) || 1),
+        page_size: Math.max(1, Math.min(100, Number.parseInt(pageSize, 10) || 50)),
+        total: records.length
+    };
+    pagination.pages = Math.max(1, Math.ceil(pagination.total / pagination.page_size));
+    pagination.page = Math.min(pagination.page, pagination.pages);
+    const offset = (pagination.page - 1) * pagination.page_size;
+
+    return {
+        window: safeWindow,
+        mode: selectedMode,
+        sessions: selectedSessions.map(session => ({
+            id: String(session._id), session_no: Number(session.session_no), status: String(session.status),
+            final_outcome: String(session.final_outcome || 'pending'),
+            initial_capital: Number(session.initial_capital || 0), balance: Number(session.balance || 0),
+            net_profit: Number((Number(session.balance || 0) - Number(session.initial_capital || 0)).toFixed(2)),
+            total_spins: Number(session.total_spins || 0), wins: Number(session.wins || 0), losses: Number(session.losses || 0),
+            starts_at: session.starts_at || session.created_at || null, closed_at: session.closed_at || null
+        })),
+        session_summary: sessionSummary,
+        prediction_summary: { system, ai, compared: agreement.length, by_mode: modeBreakdown },
+        analyst_summary: analyst,
+        pagination,
+        predictions: records.slice(offset, offset + pagination.page_size)
+    };
+}
+
+module.exports = { buildTrackerReport };

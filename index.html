@@ -1203,6 +1203,38 @@
                                 </table>
                             </div>
                         </details>
+                        <details class="tracker-bank-audit tracker-bank-history" id="tracker-bank-history-panel">
+                            <summary>Comparación histórica · todas las sesiones</summary>
+                            <div style="display:flex;gap:6px;align-items:end;padding:8px;flex-wrap:wrap">
+                                <label class="tracker-bank-field" style="flex:1;min-width:110px">Sesiones
+                                    <select id="tracker-bank-history-window" class="tracker-select">
+                                        <option value="all">Todas</option><option value="10">Últimas 10</option><option value="20">Últimas 20</option>
+                                    </select>
+                                </label>
+                                <label class="tracker-bank-field" style="flex:1;min-width:90px">Filtro
+                                    <select id="tracker-bank-history-mode" class="tracker-select">
+                                        <option value="all">Todos</option><option value="n4">N4</option><option value="n9">N9</option><option value="both">Both</option>
+                                    </select>
+                                </label>
+                                <button class="tracker-btn tracker-btn-secondary" type="button" onclick="loadTrackerBankReport(1)">Consultar</button>
+                            </div>
+                            <div id="tracker-bank-history-summary" style="padding:0 8px 8px;color:#adc0d4;font:.58rem var(--mono)">Carga todas las sesiones ganadas y perdidas y compara los pronósticos auditados de SISTEMA e IA.</div>
+                            <div class="tracker-bank-table-wrap">
+                                <table class="tracker-bank-table"><thead><tr><th>Sesión</th><th>Estado</th><th>Apuestas</th><th>Aciertos / fallos</th><th>Neto</th></tr></thead>
+                                    <tbody id="tracker-bank-history-sessions"><tr><td colspan="5" style="text-align:center">Pulsa Consultar para cargar el historial</td></tr></tbody>
+                                </table>
+                            </div>
+                            <div class="tracker-bank-table-wrap">
+                                <table class="tracker-bank-table"><thead><tr><th>Sesión · giro</th><th>Filtro</th><th>Real</th><th>SISTEMA</th><th>IA / modelo</th><th>Qwen</th></tr></thead>
+                                    <tbody id="tracker-bank-history-predictions"><tr><td colspan="6" style="text-align:center">Sin pronósticos cargados</td></tr></tbody>
+                                </table>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;color:#adc0d4;font:.58rem var(--mono)">
+                                <button id="tracker-bank-history-prev" class="tracker-btn tracker-btn-secondary" type="button" onclick="loadTrackerBankReport(trackerBankReportPage-1)" disabled>Anterior</button>
+                                <span id="tracker-bank-history-page">--</span>
+                                <button id="tracker-bank-history-next" class="tracker-btn tracker-btn-secondary" type="button" onclick="loadTrackerBankReport(trackerBankReportPage+1)" disabled>Siguiente</button>
+                            </div>
+                        </details>
                         <div class="tracker-bank-foot">La sesión y cada resultado Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
                     </aside>
                 </div>

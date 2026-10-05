@@ -97,6 +97,8 @@ let trackerBankAuditsSessionId = null;
 let trackerBankLoadedTableId = null;
 let trackerBankQueue = Promise.resolve();
 let trackerBankLoading = false;
+let trackerBankReportPage = 1;
+let trackerBankReportLoading = false;
 let trackerLiveSyncTimer = null;
 let trackerLiveSyncInFlight = false;
 let trackerLiveEventRevision = 0;
@@ -966,6 +968,72 @@ function renderTrackerBankroll() {
             return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}</div></details></td></tr>`;
         }).join('')
         : '<tr><td colspan="6" style="text-align:center">Las auditorías de ambos predictores aparecerán al iniciar la sesión y al llegar el resultado.</td></tr>';
+}
+
+async function loadTrackerBankReport(page = 1) {
+    if (trackerBankReportLoading) return;
+    const summary = document.getElementById('tracker-bank-history-summary');
+    const sessionsBody = document.getElementById('tracker-bank-history-sessions');
+    const predictionsBody = document.getElementById('tracker-bank-history-predictions');
+    const windowFilter = document.getElementById('tracker-bank-history-window')?.value || 'all';
+    const modeFilter = document.getElementById('tracker-bank-history-mode')?.value || 'all';
+    trackerBankReportLoading = true;
+    trackerBankReportPage = Math.max(1, Number(page) || 1);
+    if (summary) summary.textContent = 'Cargando sesiones y pronósticos guardados desde MongoDB...';
+    try {
+        const url = new URL(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}/report`, location.origin);
+        url.searchParams.set('window', windowFilter);
+        url.searchParams.set('mode', modeFilter);
+        url.searchParams.set('page', String(trackerBankReportPage));
+        url.searchParams.set('page_size', '50');
+        const response = await fetch(url, { cache: 'no-store' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
+        const report = data.report || {};
+        const sessions = report.session_summary || {};
+        const scores = report.prediction_summary || {};
+        const formatAccuracy = score => score.accuracy == null ? 'sin muestra' : `${score.accuracy}%`;
+        const predictorText = (name, score) => `${name}: ${score.wins}/${score.evaluated} aciertos (${formatAccuracy(score)}), ${score.losses} fallos, ${score.pending} pendientes de ${score.forecasts} predicciones.`;
+        const modelScores = (scores.ai?.models || []).map(model =>
+            `IA ${trackerEscapeHtml(model.model)} ${model.wins}/${model.evaluated} (${formatAccuracy(model)}), ${model.pending} pendientes`
+        ).join(' · ');
+        const modeScores = Object.entries(scores.by_mode || {}).map(([mode, group]) =>
+            `${mode.toUpperCase()}: SISTEMA ${group.system.wins}/${group.system.evaluated} (${formatAccuracy(group.system)}), IA ${group.ai.wins}/${group.ai.evaluated} (${formatAccuracy(group.ai)})`
+        ).join(' · ');
+        if (summary) summary.innerHTML = `<b>${report.window === 'all' ? 'Todas las sesiones' : `Últimas ${trackerEscapeHtml(report.window)} sesiones`}:</b> ${sessions.total || 0} · cerradas ${sessions.closed || 0} (ganadas ${sessions.won || 0}, perdidas ${sessions.lost || 0}, empate ${sessions.break_even || 0}) · activas ${sessions.active || 0} · neto banca ${trackerBankMoney(sessions.net_profit)}.<br><b>Pronósticos guardados:</b> ${report.pagination?.total || 0} en este filtro. ${trackerEscapeHtml(predictorText('SISTEMA', scores.system || {}))} ${trackerEscapeHtml(predictorText('IA', scores.ai || {}))}<br>${modelScores}<br><b>Qwen:</b> completos ${report.analyst_summary?.complete || 0}, pendientes ${report.analyst_summary?.pending || 0}, fallidos ${report.analyst_summary?.failed || 0}, no disponibles ${report.analyst_summary?.unavailable || 0}. ${modeScores ? `<br><b>Por filtro:</b> ${modeScores}` : ''}`;
+        const outcomeLabel = session => session.status === 'closed'
+            ? ({ won: 'GANADA', lost: 'PERDIDA', break_even: 'EMPATE' }[session.final_outcome] || 'CERRADA')
+            : ({ active: 'EN CURSO', paused: 'PAUSADA', draft: 'BORRADOR' }[session.status] || session.status);
+        if (sessionsBody) sessionsBody.innerHTML = (report.sessions || []).length
+            ? report.sessions.map(session => `<tr><td>#${Number(session.session_no)}</td><td>${trackerEscapeHtml(outcomeLabel(session))}</td><td>${Number(session.total_spins || 0)} (${Number(session.wins || 0)}✓/${Number(session.losses || 0)}×)</td><td>${Number(session.wins || 0)} / ${Number(session.losses || 0)}</td><td>${trackerBankMoney(session.net_profit)}</td></tr>`).join('')
+            : '<tr><td colspan="5" style="text-align:center">No hay sesiones guardadas para esta mesa.</td></tr>';
+        const predictionCell = predictor => {
+            const center = Number.isInteger(Number(predictor?.center)) && predictor.center !== null ? Number(predictor.center) : '--';
+            const result = predictor?.won === true ? ' ✓' : predictor?.won === false ? ' ×' : '';
+            const label = predictor?.metric ? ` ${trackerEscapeHtml(predictor.metric)}` : '';
+            return `${center}${label}${result}`;
+        };
+        if (predictionsBody) predictionsBody.innerHTML = (report.predictions || []).length
+            ? report.predictions.map(record => {
+                const qwenSummary = String(record.analyst?.summary || record.analyst?.error || (record.analyst?.status === 'pending' ? 'Analizando' : 'Sin informe'));
+                const status = record.analyst?.status || 'no disponible';
+                return `<tr><td>#${Number(record.session_no)} · ${Number(record.result_spin_id || record.forecast_spin_id || '--')}</td><td>${trackerEscapeHtml(String(record.mode || 'sin filtro').toUpperCase())}</td><td>${record.result_number == null ? '--' : Number(record.result_number)}</td><td>${predictionCell(record.system)}</td><td>${predictionCell(record.ai)}<br><small>${trackerEscapeHtml(record.ai?.model || '')}</small></td><td><details><summary>${trackerEscapeHtml(record.analyst?.model || 'Qwen')} · ${trackerEscapeHtml(status)}</summary><div>${trackerEscapeHtml(qwenSummary)}</div></details></td></tr>`;
+            }).join('')
+            : '<tr><td colspan="6" style="text-align:center">No hay pronósticos guardados en este filtro.</td></tr>';
+        trackerBankReportPage = Number(report.pagination?.page || 1);
+        const pageLabel = document.getElementById('tracker-bank-history-page');
+        const previous = document.getElementById('tracker-bank-history-prev');
+        const next = document.getElementById('tracker-bank-history-next');
+        if (pageLabel) pageLabel.textContent = `${report.pagination?.total ? (trackerBankReportPage - 1) * report.pagination.page_size + 1 : 0}–${Math.min(trackerBankReportPage * report.pagination?.page_size, report.pagination?.total || 0)} de ${report.pagination?.total || 0} pronósticos · página ${trackerBankReportPage}/${report.pagination?.pages || 1}`;
+        if (previous) previous.disabled = trackerBankReportPage <= 1;
+        if (next) next.disabled = trackerBankReportPage >= Number(report.pagination?.pages || 1);
+    } catch (error) {
+        if (summary) summary.textContent = `No se pudo cargar el historial: ${error.message}`;
+        if (sessionsBody) sessionsBody.innerHTML = '<tr><td colspan="5" style="text-align:center">Historial no disponible.</td></tr>';
+        if (predictionsBody) predictionsBody.innerHTML = '<tr><td colspan="6" style="text-align:center">Historial no disponible.</td></tr>';
+    } finally {
+        trackerBankReportLoading = false;
+    }
 }
 
 function toggleTrackerBankPanel(open) {
