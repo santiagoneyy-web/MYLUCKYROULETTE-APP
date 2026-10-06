@@ -221,6 +221,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         mode: selectedMode,
         sessions: selectedSessions.map(session => ({
             id: String(session._id), session_no: Number(session.session_no), status: String(session.status),
+            predictor: session.predictor === 'ai' ? 'ai' : 'system',
             final_outcome: String(session.final_outcome || 'pending'),
             initial_capital: Number(session.initial_capital || 0), balance: Number(session.balance || 0),
             net_profit: Number((Number(session.balance || 0) - Number(session.initial_capital || 0)).toFixed(2)),

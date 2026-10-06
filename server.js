@@ -1733,7 +1733,8 @@ app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
             .sort({ session_no: -1 }).limit(100).lean().exec();
         const selected = (req.query.session_id
             ? sessions.find(item => String(item._id) === String(req.query.session_id))
-            : null) || sessions.find(item => item.status === 'active');
+            : null) || sessions.find(item => item.status === 'active' &&
+                (item.predictor === 'ai' ? 'ai' : 'system') === (req.query.predictor === 'ai' ? 'ai' : 'system'));
         const [entries, sessionAudits, legacyAudits] = selected ? await Promise.all([
             TrackerBankrollEntry.find({ session_id: selected._id }).sort({ created_at: -1 }).limit(30).lean().exec(),
             TrackerPredictionAudit.find({ bankroll_session_id: String(selected._id) })
@@ -1762,6 +1763,7 @@ app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
     let sessionNo = req.body.session_no === undefined ? null : Number(req.body.session_no);
     const capital = Number(req.body.initial_capital);
     const chipValue = Number(req.body.chip_value);
+    const predictor = req.body.predictor === 'ai' ? 'ai' : 'system';
     if (!Number.isInteger(tableId) || (sessionNo !== null && (!Number.isInteger(sessionNo) || sessionNo < 1)) ||
         !Number.isFinite(capital) || capital <= 0 || !Number.isFinite(chipValue) || chipValue <= 0) {
         return res.status(400).json({ error: 'Ingresa un capital y valor de ficha válidos.' });
@@ -1784,6 +1786,7 @@ app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
                 [created] = await TrackerBankrollSession.create([{
                     table_id: tableId,
                     session_no: sessionNo,
+                    predictor,
                     initial_capital: capital,
                     balance: capital,
                     chip_value: chipValue,
@@ -1816,8 +1819,14 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/activate', async (req, res) 
                     selected.start_spin_id = Number(latestSpin?.id || 0);
                     selected.last_settled_spin_id = selected.start_spin_id;
                 }
+                const predictor = selected.predictor === 'ai' ? 'ai' : 'system';
                 await TrackerBankrollSession.updateMany(
-                    { table_id: tableId, status: 'active' },
+                    {
+                        table_id: tableId, status: 'active',
+                        ...(predictor === 'system'
+                            ? { $or: [{ predictor: 'system' }, { predictor: { $exists: false } }] }
+                            : { predictor: 'ai' })
+                    },
                     { $set: { status: 'paused', updated_at: new Date() } },
                     { session: mongoSession }
                 );
@@ -1888,7 +1897,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/forecast', async (req, res) 
                     prediction_source: raw.prediction_source === 'ai' ? 'ai' : 'system',
                     forecast_history_length: raw.forecast_history_length != null && Number.isInteger(Number(raw.forecast_history_length)) ? Number(raw.forecast_history_length) : null,
                     system_center: systemCenter,
-                    system_status: systemCenter === null ? (raw.system_status === 'late' ? 'late' : 'unavailable') : 'ready',
+                    system_status: systemCenter === null ? (['late', 'no_signal'].includes(raw.system_status) ? raw.system_status : 'unavailable') : 'ready',
                     system_metric_label: labels.has(raw.system_metric_label) ? raw.system_metric_label : '',
                     system_reasoning: systemCenter === null ? null : (raw.system_reasoning || null),
                     system_won: systemWon,
@@ -2012,6 +2021,46 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/close', async (req, res) => 
     }
 });
 
+app.post('/api/tracker/bankroll/:tableId/:sessionId/skip', async (req, res) => {
+    if (!db.getUseMongo()) return res.status(503).json({ error: 'MongoDB Atlas no está conectado.' });
+    const tableId = Number(req.params.tableId);
+    const sessionId = String(req.params.sessionId || '');
+    const spinId = Number(req.body.spin_id);
+    if (!Number.isInteger(tableId) || tableId < 1 || !sessionId || !Number.isInteger(spinId) || spinId < 1) {
+        return res.status(400).json({ error: 'Omisión de ronda inválida.' });
+    }
+    try {
+        const mongoSession = await mongoose.startSession();
+        let result;
+        try {
+            await mongoSession.withTransaction(async () => {
+                const [session, spin] = await Promise.all([
+                    TrackerBankrollSession.findOne({ _id: sessionId, table_id: tableId })
+                        .session(mongoSession).exec(),
+                    Spin.findOne({ id: spinId, table_id: tableId, source_quality: 'live' })
+                        .select('id').session(mongoSession).lean().exec()
+                ]);
+                if (!session) { result = { error: 'No se encontró la sesión.', status: 404 }; return; }
+                if (!spin) { result = { error: 'La tirada Live aún no está confirmada en MongoDB.', status: 409, retryable: true }; return; }
+                const settledThrough = Number(session.last_settled_spin_id ?? session.start_spin_id ?? 0);
+                if (spinId <= settledThrough) { result = { session, duplicate: true, skipped: true }; return; }
+                if (session.status !== 'active') { result = { session, skipped: true, stopped: true }; return; }
+                session.last_settled_spin_id = spinId;
+                session.updated_at = new Date();
+                await session.save({ session: mongoSession });
+                result = { session, skipped: true };
+            });
+        } finally {
+            await mongoSession.endSession();
+        }
+        if (result?.error) return res.status(result.status).json(result);
+        res.json({ success: true, ...result, storage: 'mongodb' });
+    } catch (error) {
+        console.error('[Tracker bankroll] Skip failed:', error.message);
+        res.status(500).json({ error: 'No se pudo registrar la ronda sin señal.' });
+    }
+});
+
 app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) => {
     const tableId = Number(req.params.tableId);
     const spinId = Number(req.body.spin_id);
@@ -2074,7 +2123,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
             ? Number(rawContext.forecast_history_length) : null,
         system_center: validSystemCenter,
         system_metric_label: validSystemMetricLabel,
-        system_status: validSystemCenter === null ? (rawContext.system_status === 'late' ? 'late' : 'unavailable') : 'ready',
+        system_status: validSystemCenter === null ? (['late', 'no_signal'].includes(rawContext.system_status) ? rawContext.system_status : 'unavailable') : 'ready',
         system_reasoning: systemReasoning,
         system_won: systemWon,
         system_reward: systemWon === null ? null : systemWon ? 1 : -1,
@@ -2148,6 +2197,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 }).session(mongoSession);
                 if (!session) {
                     result = { error: 'No hay una sesión activa para esta mesa.', status: 409 };
+                    return;
+                }
+                const sessionPredictor = session.predictor === 'ai' ? 'ai' : 'system';
+                const expectedCenter = sessionPredictor === 'ai' ? validAiCenter : validSystemCenter;
+                if (expectedCenter === null || predictionCenter !== expectedCenter) {
+                    result = { error: `La predicción no corresponde a la sesión ${sessionPredictor === 'ai' ? 'IA' : 'SISTEMA'}.`, status: 409 };
                     return;
                 }
                 const existing = await TrackerBankrollEntry.findOne({ session_id: session._id, spin_key: spinKey }).session(mongoSession);
@@ -2311,7 +2366,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
                     prediction_source: ['ai', 'system'].includes(raw.prediction_source) ? raw.prediction_source : previous?.prediction_source || 'system',
                     forecast_history_length: raw.forecast_history_length != null && Number.isInteger(Number(raw.forecast_history_length)) ? Number(raw.forecast_history_length) : null,
                     system_center: systemCenter,
-                    system_status: systemCenter === null ? (raw.system_status === 'late' ? 'late' : previous?.system_status || 'unavailable') : 'ready',
+                    system_status: systemCenter === null ? (['late', 'no_signal'].includes(raw.system_status) ? raw.system_status : previous?.system_status || 'unavailable') : 'ready',
                     system_metric_label: labels.has(raw.system_metric_label) ? raw.system_metric_label : previous?.system_metric_label || '',
                     system_reasoning: systemCenter === null ? previous?.system_reasoning || null : systemReasoning,
                     system_won: systemWon,

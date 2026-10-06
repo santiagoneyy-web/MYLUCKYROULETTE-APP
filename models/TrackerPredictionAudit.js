@@ -10,7 +10,7 @@ const TrackerPredictionAuditSchema = new mongoose.Schema({
     prediction_source: { type: String, enum: ['system', 'ai'], default: null },
     forecast_history_length: { type: Number, default: null },
     system_center: { type: Number, min: 0, max: 36, default: null },
-    system_status: { type: String, enum: ['ready', 'unavailable', 'late'], default: 'unavailable' },
+    system_status: { type: String, enum: ['ready', 'unavailable', 'no_signal', 'late'], default: 'unavailable' },
     system_metric_label: { type: String, default: '' },
     system_reasoning: { type: mongoose.Schema.Types.Mixed, default: null },
     system_won: { type: Boolean, default: null },
