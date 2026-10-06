@@ -474,7 +474,7 @@ function trackerBankTableId() {
 
 function trackerBankActiveSession(predictor = trackerPredictionSource) {
     return trackerBankSessions.find(session => session.status === 'active' &&
-        (session.predictor === 'ai' ? 'ai' : 'system') === predictor) || null;
+        trackerBankSessionPredictor(session) === predictor) || null;
 }
 
 function trackerBankActiveSessions() {
@@ -486,7 +486,15 @@ function trackerBankHasActiveSessions() {
 }
 
 function trackerBankSessionPredictor(session) {
-    return session?.predictor === 'ai' ? 'ai' : 'system';
+    return ['ai', 'system_pattern'].includes(session?.predictor) ? session.predictor : 'system';
+}
+
+function trackerBankPredictorLabel(predictor) {
+    return ({
+        system: 'SISTEMA · TODAS',
+        system_pattern: 'SISTEMA · PATRÓN',
+        ai: 'IA'
+    })[predictor] || 'SISTEMA · TODAS';
 }
 
 function trackerBankSelectedSession() {
@@ -624,7 +632,9 @@ function trackerBankPredictionCenter(predictor = trackerPredictionSource) {
         return trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) &&
             trackerAiPredictionHistoryLength === trackerHistory.length ? trackerAiN4Center : null;
     }
-    return trackerSystemPredictionCenter();
+    return predictor === 'system_pattern'
+        ? trackerSystemPatternPredictionCenter()
+        : trackerSystemPredictionCenter();
 }
 
 function trackerPredictionMetricFamilies(mode = trackerConfig.prediction) {
@@ -652,7 +662,7 @@ function trackerPredictionMetricCandidates(mode = trackerConfig.prediction) {
         Number.isInteger(metric.number) && metric.number >= 0 && metric.number <= 36);
 }
 
-function trackerSystemAxisChoice(travels, kind, fallbackValue) {
+function trackerSystemAxisChoice(travels, kind, fallbackValue, requireClearPattern = false) {
     const symbolValues = kind === 'dir'
         ? { R: 'CW', L: 'CCW' }
         : kind === 'zone'
@@ -664,16 +674,16 @@ function trackerSystemAxisChoice(travels, kind, fallbackValue) {
         'FOLLOW_STREAK', 'SWITCH', 'ALTERNATE', 'EXPECT_PAIR', 'EXPECT_2', 'EXPECT_1', 'ALTERNATE_BLOCKS'
     ]);
     const patternConfidence = Number(pattern?.confidence) || 0;
-    if (recentTravels.length >= 8 && pattern?.next_state &&
-        actionablePatternActions.has(pattern.action) && patternConfidence >= 68 &&
-        Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state)) {
+    const hasNextState = pattern?.next_state && Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state);
+    const isClearPattern = recentTravels.length >= 8 && actionablePatternActions.has(pattern?.action) && patternConfidence >= 68;
+    if (hasNextState && (!requireClearPattern || isClearPattern)) {
         return {
             value: symbolValues[pattern.next_state],
             basis: 'pattern',
             pattern: pattern.name,
             pattern_type: pattern.type || null,
-            pattern_action: pattern.action,
-            confidence: patternConfidence
+            pattern_action: pattern.action || null,
+            confidence: patternConfidence || 65
         };
     }
 
@@ -696,7 +706,7 @@ function trackerSystemAxisChoice(travels, kind, fallbackValue) {
     return { value: fallbackValue, basis: 'prediction', pattern: null, confidence: 50 };
 }
 
-function trackerSystemAxisGuidance() {
+function trackerSystemAxisGuidance(requireClearPattern = false) {
     const travels = [];
     for (let i = 1; i < trackerHistory.length; i++) {
         travels.push(calcDist(trackerHistory[i - 1], trackerHistory[i]));
@@ -710,9 +720,9 @@ function trackerSystemAxisGuidance() {
     const fallbackLevel = ((fallbackDirection === 'CW' && fallbackZone === 'BIG') ||
         (fallbackDirection === 'CCW' && fallbackZone === 'SMALL')) ? 'OVER' : 'UNDER';
     return {
-        direction: trackerSystemAxisChoice(travels, 'dir', fallbackDirection),
-        zone: trackerSystemAxisChoice(travels, 'zone', fallbackZone),
-        level: trackerSystemAxisChoice(travels, 'nivel', fallbackLevel)
+        direction: trackerSystemAxisChoice(travels, 'dir', fallbackDirection, requireClearPattern),
+        zone: trackerSystemAxisChoice(travels, 'zone', fallbackZone, requireClearPattern),
+        level: trackerSystemAxisChoice(travels, 'nivel', fallbackLevel, requireClearPattern)
     };
 }
 
@@ -744,7 +754,7 @@ function trackerSystemDeriveDirectionFromZoneLevel(zone, level) {
 }
 
 function trackerSystemResolvedAxisGuidance() {
-    const guidance = trackerSystemAxisGuidance();
+    const guidance = trackerSystemAxisGuidance(true);
     const directionIsClear = trackerSystemAxisHasClearSignal(guidance.direction);
     const zoneIsClear = trackerSystemAxisHasClearSignal(guidance.zone);
     const levelIsClear = trackerSystemAxisHasClearSignal(guidance.level);
@@ -762,16 +772,16 @@ function trackerSystemResolvedAxisGuidance() {
     return { guidance, directionIsClear, zoneIsClear, levelIsClear };
 }
 
-function trackerSystemPredictionMetric() {
+function trackerSystemPatternPredictionMetric() {
     if (!trackerLastSignal) return null;
     const { guidance, directionIsClear, zoneIsClear, levelIsClear } = trackerSystemResolvedAxisGuidance();
     const direction = guidance.direction.value;
     const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
     let selected;
     if (trackerConfig.prediction === 'n4') {
-        // Una señal N4 necesita coincidencia clara en dos ejes; el tercero se
-        // deriva por la relación fija entre dirección, zona y nivel.
-        if ([directionIsClear, zoneIsClear, levelIsClear].filter(Boolean).length < 2) return null;
+        // El modo de patrón puede actuar si al menos uno de los ejes aporta
+        // una señal accionable; los otros valores completan la métrica N4.
+        if (!directionIsClear && !zoneIsClear && !levelIsClear) return null;
         const label = `${direction}_N4${trackerSystemN4MetricZone(guidance)}`;
         selected = metrics.find(metric => metric.label === label);
     } else {
@@ -787,11 +797,30 @@ function trackerSystemPredictionCenter() {
     return metric ? metric.number : null;
 }
 
-function trackerSystemReasoningSnapshot() {
+function trackerSystemPatternPredictionCenter() {
+    const metric = trackerSystemPatternPredictionMetric();
+    return metric ? metric.number : null;
+}
+
+function trackerSystemPredictionMetric() {
     if (!trackerLastSignal) return null;
-    const axisGuidance = trackerSystemResolvedAxisGuidance().guidance;
+    const guidance = trackerSystemAxisGuidance();
+    const direction = guidance.direction.value;
+    const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
+    const label = trackerConfig.prediction === 'n4'
+        ? `${direction}_N4${trackerSystemN4MetricZone(guidance)}`
+        : `${direction}_N9`;
+    return metrics.find(metric => metric.label === label) || null;
+}
+
+function trackerSystemReasoningSnapshot(patternOnly = false) {
+    if (!trackerLastSignal) return null;
+    const axisGuidance = patternOnly
+        ? trackerSystemResolvedAxisGuidance().guidance
+        : trackerSystemAxisGuidance();
     const direction = axisGuidance.direction.value;
-    const center = trackerSystemPredictionCenter();
+    const center = patternOnly ? trackerSystemPatternPredictionCenter() : trackerSystemPredictionCenter();
+    const metric = patternOnly ? trackerSystemPatternPredictionMetric() : trackerSystemPredictionMetric();
     const recentHistory = trackerHistory.slice(-21);
     const recentDistances = [];
     for (let i = 1; i < recentHistory.length; i++) recentDistances.push(calcDist(recentHistory[i - 1], recentHistory[i]));
@@ -808,7 +837,8 @@ function trackerSystemReasoningSnapshot() {
         level_basis: axisGuidance.level.basis,
         level_pattern: axisGuidance.level.pattern || null,
         selected_target: center,
-        metric_label: trackerSystemPredictionMetric()?.label || 'N9',
+        metric_label: metric?.label || (trackerConfig.prediction === 'n4' ? 'N4' : 'N9'),
+        policy: patternOnly ? 'wait_for_clear_pattern' : 'predict_every_round',
         target_cw: Number(trackerLastSignal.targetCW),
         target_ccw: Number(trackerLastSignal.targetCCW),
         confidence_cw: Number(trackerLastSignal.confidenceCW),
@@ -824,6 +854,7 @@ function trackerSystemReasoningSnapshot() {
 
 function trackerPredictionAuditSnapshot(targetSpinId = null, forecastAvailable = true) {
     const systemMetric = forecastAvailable ? trackerSystemPredictionMetric() : null;
+    const systemPatternMetric = forecastAvailable ? trackerSystemPatternPredictionMetric() : null;
     const aiReady = forecastAvailable && Number.isInteger(trackerAiN4Center) && trackerAiPredictionHistoryLength === trackerHistory.length;
     const reasoningText = String(trackerAiPredictionReasoning || '');
     const correctedMetricLabel = reasoningText.match(/se auditó como\s+([A-Z0-9_]+)/i)?.[1]?.toUpperCase() || null;
@@ -845,6 +876,10 @@ function trackerPredictionAuditSnapshot(targetSpinId = null, forecastAvailable =
         system_metric_label: systemMetric?.label || null,
         system_status: systemMetric ? 'ready' : forecastAvailable ? 'no_signal' : 'late',
         system_reasoning: forecastAvailable ? trackerSystemReasoningSnapshot() : null,
+        system_pattern_center: systemPatternMetric?.number ?? null,
+        system_pattern_metric_label: systemPatternMetric?.label || null,
+        system_pattern_status: systemPatternMetric ? 'ready' : forecastAvailable ? 'no_signal' : 'late',
+        system_pattern_reasoning: forecastAvailable ? trackerSystemReasoningSnapshot(true) : null,
         ai_center: aiReady ? trackerAiN4Center : null,
         ai_metric_label: aiMetric?.label || null,
         ai_model: aiReady ? trackerAiPredictionModel : null,
@@ -876,7 +911,7 @@ async function loadTrackerBankSessions() {
             trackerBankLoadedTableId = tableId;
         }
         const url = new URL(`/api/tracker/bankroll/${encodeURIComponent(tableId)}`, location.origin);
-        url.searchParams.set('predictor', trackerBankView === 'ai' ? 'ai' : 'system');
+        url.searchParams.set('predictor', trackerBankView === 'compare' ? 'system' : trackerBankView);
         const response = await fetch(url, { cache: 'no-store' });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
@@ -961,14 +996,16 @@ function renderTrackerBankroll() {
     set('tracker-bank-cycle', active ? trackerBankMoney(roundTotal) : '--');
     set('tracker-bank-gross-return', active ? trackerBankMoney(grossReturn) : '--');
     set('tracker-bank-win-profit', active ? trackerBankMoney(possibleProfit) : '--');
-    set('tracker-bank-prediction', active && trackerSource === 'live' && pred.length ? `N4: ${pred.join(', ')}` : '--');
+    set('tracker-bank-prediction', active && trackerSource === 'live'
+        ? pred.length ? `N4: ${pred.join(', ')}` : trackerBankView === 'system_pattern' ? 'ANALIZANDO ?' : '--'
+        : '--');
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / --');
     set('tracker-bank-started', session ? trackerBankDate(session.starts_at || session.created_at) : '--');
     set('tracker-bank-ended', session?.closed_at ? trackerBankDate(session.closed_at) : session ? (session.status === 'draft' ? 'Sin iniciar' : 'En curso') : '--');
     const start = document.getElementById('tracker-bank-start');
     if (start) {
         start.style.display = canStart ? 'block' : 'none';
-        start.textContent = `Iniciar sesión ${trackerBankView === 'ai' ? 'IA' : 'SISTEMA'}`;
+        start.textContent = `Iniciar sesión ${trackerBankPredictorLabel(trackerBankView)}`;
     }
     ['tracker-bank-capital', 'tracker-bank-chip'].forEach(id => {
         const input = document.getElementById(id);
@@ -1004,13 +1041,13 @@ function renderTrackerBankroll() {
         const grouped = ['n4', 'n9', 'both'].map(mode => {
             const audits = trackerBankAudits.filter(audit => audit.prediction_mode === mode);
             if (!audits.length) return '';
-            const evaluated = audits.some(audit => typeof audit.system_won === 'boolean' || typeof audit.ai_won === 'boolean');
+            const evaluated = audits.some(audit => typeof audit.system_won === 'boolean' || typeof audit.system_pattern_won === 'boolean' || typeof audit.ai_won === 'boolean');
             return evaluated
-                ? `${mode.toUpperCase()} · SISTEMA ${score(audits, 'system')} · IA ${score(audits, 'ai')}`
+                ? `${mode.toUpperCase()} · SISTEMA TODAS ${score(audits, 'system')} · SISTEMA PATRÓN ${score(audits, 'system_pattern')} · IA ${score(audits, 'ai')}`
                 : `${mode.toUpperCase()} · pronósticos guardados, esperando giros reales`;
         }).filter(Boolean);
         const unknownMode = trackerBankAudits.filter(audit => !['n4', 'n9', 'both'].includes(audit.prediction_mode));
-        if (unknownMode.length) grouped.push(`SIN FILTRO ANTIGUO · SISTEMA ${score(unknownMode, 'system')} · IA ${score(unknownMode, 'ai')}`);
+        if (unknownMode.length) grouped.push(`SIN FILTRO ANTIGUO · SISTEMA TODAS ${score(unknownMode, 'system')} · SISTEMA PATRÓN ${score(unknownMode, 'system_pattern')} · IA ${score(unknownMode, 'ai')}`);
         auditSummary.textContent = grouped.length ? grouped.join(' | ') : 'La comparación se completa cuando llegue el primer giro real.';
     }
     if (auditLedger) auditLedger.innerHTML = trackerBankAudits.length
@@ -1039,10 +1076,11 @@ function renderTrackerBankroll() {
             } catch { report = String(audit.analyst_summary || ''); }
             if (!report) report = audit.analyst_status === 'pending' ? 'Analizando' : audit.analyst_status === 'failed' ? (audit.analyst_error || 'Informe no disponible') : 'Sin hallazgo';
             const systemReasoning = audit.system_reasoning ? JSON.stringify(audit.system_reasoning).slice(0, 1000) : 'Sin razonamiento guardado.';
+            const systemPatternReasoning = audit.system_pattern_reasoning ? JSON.stringify(audit.system_pattern_reasoning).slice(0, 1000) : 'Sin razonamiento guardado.';
             const aiReasoning = audit.ai_reasoning || 'Sin razonamiento IA guardado.';
-            return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}${reviewLesson ? `<br><b>Revisión del resultado:</b> ${trackerEscapeHtml(reviewLesson)}` : ''}${reviewAxes ? `<br>${trackerEscapeHtml(reviewAxes)}` : ''}${audit.analyst_error ? `<br><b>Error Qwen:</b> ${trackerEscapeHtml(audit.analyst_error)}` : ''}</div></details></td></tr>`;
+            return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.system_pattern_center, audit.system_pattern_metric_label, audit.system_pattern_won, audit.system_pattern_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA TODAS:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Razonamiento SISTEMA PATRÓN:</b> ${trackerEscapeHtml(systemPatternReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}${reviewLesson ? `<br><b>Revisión del resultado:</b> ${trackerEscapeHtml(reviewLesson)}` : ''}${reviewAxes ? `<br>${trackerEscapeHtml(reviewAxes)}` : ''}${audit.analyst_error ? `<br><b>Error Qwen:</b> ${trackerEscapeHtml(audit.analyst_error)}` : ''}</div></details></td></tr>`;
         }).join('')
-        : '<tr><td colspan="6" style="text-align:center">Las auditorías de ambos predictores aparecerán al iniciar la sesión y al llegar el resultado.</td></tr>';
+        : '<tr><td colspan="7" style="text-align:center">Las auditorías de los dos modos SISTEMA e IA aparecerán al iniciar la sesión y al llegar el resultado.</td></tr>';
 }
 
 async function loadTrackerBankReport(page = 1) {
@@ -1073,14 +1111,14 @@ async function loadTrackerBankReport(page = 1) {
             `IA ${trackerEscapeHtml(model.model)} ${model.wins}/${model.evaluated} (${formatAccuracy(model)}), ${model.pending} pendientes`
         ).join(' · ');
         const modeScores = Object.entries(scores.by_mode || {}).map(([mode, group]) =>
-            `${mode.toUpperCase()}: SISTEMA ${group.system.wins}/${group.system.evaluated} (${formatAccuracy(group.system)}), IA ${group.ai.wins}/${group.ai.evaluated} (${formatAccuracy(group.ai)})`
+            `${mode.toUpperCase()}: SISTEMA TODAS ${group.system.wins}/${group.system.evaluated} (${formatAccuracy(group.system)}), SISTEMA PATRÓN ${group.system_pattern.wins}/${group.system_pattern.evaluated} (${formatAccuracy(group.system_pattern)}), IA ${group.ai.wins}/${group.ai.evaluated} (${formatAccuracy(group.ai)})`
         ).join(' · ');
-        if (summary) summary.innerHTML = `<b>${report.window === 'all' ? 'Todas las sesiones' : `Últimas ${trackerEscapeHtml(report.window)} sesiones`}:</b> ${sessions.total || 0} · cerradas ${sessions.closed || 0} (ganadas ${sessions.won || 0}, perdidas ${sessions.lost || 0}, empate ${sessions.break_even || 0}) · activas ${sessions.active || 0} · neto banca ${trackerBankMoney(sessions.net_profit)}.<br><b>Pronósticos guardados:</b> ${report.pagination?.total || 0} en este filtro. ${trackerEscapeHtml(predictorText('SISTEMA', scores.system || {}))} ${trackerEscapeHtml(predictorText('IA', scores.ai || {}))}<br>${modelScores}<br><b>Qwen:</b> completos ${report.analyst_summary?.complete || 0}, pendientes ${report.analyst_summary?.pending || 0}, fallidos ${report.analyst_summary?.failed || 0}, no disponibles ${report.analyst_summary?.unavailable || 0}. ${modeScores ? `<br><b>Por filtro:</b> ${modeScores}` : ''}`;
+        if (summary) summary.innerHTML = `<b>${report.window === 'all' ? 'Todas las sesiones' : `Últimas ${trackerEscapeHtml(report.window)} sesiones`}:</b> ${sessions.total || 0} · cerradas ${sessions.closed || 0} (ganadas ${sessions.won || 0}, perdidas ${sessions.lost || 0}, empate ${sessions.break_even || 0}) · activas ${sessions.active || 0} · neto banca ${trackerBankMoney(sessions.net_profit)}.<br><b>Pronósticos guardados:</b> ${report.pagination?.total || 0} en este filtro. ${trackerEscapeHtml(predictorText('SISTEMA TODAS', scores.system || {}))} ${trackerEscapeHtml(predictorText('SISTEMA PATRÓN', scores.system_pattern || {}))} ${trackerEscapeHtml(predictorText('IA', scores.ai || {}))}<br>${modelScores}<br><b>Qwen:</b> completos ${report.analyst_summary?.complete || 0}, pendientes ${report.analyst_summary?.pending || 0}, fallidos ${report.analyst_summary?.failed || 0}, no disponibles ${report.analyst_summary?.unavailable || 0}. ${modeScores ? `<br><b>Por filtro:</b> ${modeScores}` : ''}`;
         const outcomeLabel = session => session.status === 'closed'
             ? ({ won: 'GANADA', lost: 'PERDIDA', break_even: 'EMPATE' }[session.final_outcome] || 'CERRADA')
             : ({ active: 'EN CURSO', paused: 'PAUSADA', draft: 'BORRADOR' }[session.status] || session.status);
         if (sessionsBody) sessionsBody.innerHTML = (report.sessions || []).length
-            ? report.sessions.map(session => `<tr><td>#${Number(session.session_no)}</td><td>${session.predictor === 'ai' ? 'IA' : 'SISTEMA'}</td><td>${trackerEscapeHtml(outcomeLabel(session))}</td><td>${Number(session.total_spins || 0)} (${Number(session.wins || 0)}✓/${Number(session.losses || 0)}×)</td><td>${Number(session.wins || 0)} / ${Number(session.losses || 0)}</td><td>${trackerBankMoney(session.net_profit)}</td></tr>`).join('')
+            ? report.sessions.map(session => `<tr><td>#${Number(session.session_no)}</td><td>${trackerEscapeHtml(trackerBankPredictorLabel(session.predictor))}</td><td>${trackerEscapeHtml(outcomeLabel(session))}</td><td>${Number(session.total_spins || 0)} (${Number(session.wins || 0)}✓/${Number(session.losses || 0)}×)</td><td>${Number(session.wins || 0)} / ${Number(session.losses || 0)}</td><td>${trackerBankMoney(session.net_profit)}</td></tr>`).join('')
             : '<tr><td colspan="6" style="text-align:center">No hay sesiones guardadas para esta mesa.</td></tr>';
         const predictionCell = predictor => {
             const center = Number.isInteger(Number(predictor?.center)) && predictor.center !== null ? Number(predictor.center) : '--';
@@ -1099,9 +1137,9 @@ async function loadTrackerBankReport(page = 1) {
             ? report.predictions.map(record => {
                 const qwenSummary = String(record.analyst?.summary || record.analyst?.error || (record.analyst?.status === 'pending' ? 'Analizando' : 'Sin informe'));
                 const status = record.analyst?.status || 'no disponible';
-                return `<tr><td>#${Number(record.session_no)} · ${Number(record.result_spin_id || record.forecast_spin_id || '--')}</td><td>${trackerEscapeHtml(String(record.mode || 'sin filtro').toUpperCase())}</td><td>${record.result_number == null ? '--' : Number(record.result_number)}</td><td>${predictionCell(record.system)}</td><td>${predictionCell(record.ai)}<br><small>${trackerEscapeHtml(record.ai?.model || '')}</small></td><td><details><summary>${trackerEscapeHtml(record.analyst?.model || 'Qwen')} · ${trackerEscapeHtml(status)}</summary><div>${trackerEscapeHtml(qwenSummary)}${record.analyst?.error ? `<br>Error: ${trackerEscapeHtml(record.analyst.error)}` : ''}</div></details></td><td>${reviewCell(record.prediction_review)}</td></tr>`;
+                return `<tr><td>#${Number(record.session_no)} · ${Number(record.result_spin_id || record.forecast_spin_id || '--')}</td><td>${trackerEscapeHtml(String(record.mode || 'sin filtro').toUpperCase())}</td><td>${record.result_number == null ? '--' : Number(record.result_number)}</td><td>${predictionCell(record.system)}</td><td>${predictionCell(record.system_pattern)}</td><td>${predictionCell(record.ai)}<br><small>${trackerEscapeHtml(record.ai?.model || '')}</small></td><td><details><summary>${trackerEscapeHtml(record.analyst?.model || 'Qwen')} · ${trackerEscapeHtml(status)}</summary><div>${trackerEscapeHtml(qwenSummary)}${record.analyst?.error ? `<br>Error: ${trackerEscapeHtml(record.analyst.error)}` : ''}</div></details></td><td>${reviewCell(record.prediction_review)}</td></tr>`;
             }).join('')
-            : '<tr><td colspan="7" style="text-align:center">No hay pronósticos guardados en este filtro.</td></tr>';
+            : '<tr><td colspan="8" style="text-align:center">No hay pronósticos guardados en este filtro.</td></tr>';
         trackerBankReportPage = Number(report.pagination?.page || 1);
         const pageLabel = document.getElementById('tracker-bank-history-page');
         const previous = document.getElementById('tracker-bank-history-prev');
@@ -1112,7 +1150,7 @@ async function loadTrackerBankReport(page = 1) {
     } catch (error) {
         if (summary) summary.textContent = `No se pudo cargar el historial: ${error.message}`;
         if (sessionsBody) sessionsBody.innerHTML = '<tr><td colspan="5" style="text-align:center">Historial no disponible.</td></tr>';
-        if (predictionsBody) predictionsBody.innerHTML = '<tr><td colspan="7" style="text-align:center">Historial no disponible.</td></tr>';
+        if (predictionsBody) predictionsBody.innerHTML = '<tr><td colspan="8" style="text-align:center">Historial no disponible.</td></tr>';
     } finally {
         trackerBankReportLoading = false;
     }
@@ -1126,9 +1164,9 @@ function toggleTrackerBankPanel(open) {
 }
 
 function setTrackerBankView(view) {
-    if (!['system', 'ai', 'compare'].includes(view)) return;
+    if (!['system', 'system_pattern', 'ai', 'compare'].includes(view)) return;
     trackerBankView = view;
-    ['system', 'ai', 'compare'].forEach(name => {
+    ['system', 'system_pattern', 'ai', 'compare'].forEach(name => {
         document.getElementById(`tracker-bank-tab-${name}`)?.classList.toggle('active', name === view);
     });
     const main = document.getElementById('tracker-bank-main');
@@ -1145,13 +1183,13 @@ async function loadTrackerBankComparison() {
     const renderPredictor = async predictor => {
         const session = trackerBankSessions.find(item => item.status === 'active' && trackerBankSessionPredictor(item) === predictor) ||
             trackerBankSessions.find(item => trackerBankSessionPredictor(item) === predictor) || null;
-        if (!session) return { predictor, session: null, forecasts: 0, wins: 0, losses: 0, pending: 0 };
+        if (!session) return { predictor, session: null, forecasts: 0, wins: 0, losses: 0, pending: 0, skipped: 0 };
         const url = new URL(`/api/tracker/bankroll/${encodeURIComponent(trackerBankTableId())}`, location.origin);
         url.searchParams.set('session_id', String(session._id));
         const response = await fetch(url, { cache: 'no-store' });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
-        const key = predictor === 'ai' ? 'ai' : 'system';
+        const key = predictor === 'ai' ? 'ai' : predictor === 'system_pattern' ? 'system_pattern' : 'system';
         const audits = Array.isArray(data.audits) ? data.audits : [];
         const forecasts = audits.filter(audit => audit[`${key}_center`] !== null && audit[`${key}_center`] !== undefined &&
             Number.isInteger(Number(audit[`${key}_center`])));
@@ -1162,34 +1200,35 @@ async function loadTrackerBankComparison() {
             evaluated: evaluated.length,
             wins: evaluated.filter(audit => audit[`${key}_won`]).length,
             losses: evaluated.filter(audit => !audit[`${key}_won`]).length,
-            pending: forecasts.length - evaluated.length
+            pending: forecasts.length - evaluated.length,
+            skipped: audits.filter(audit => audit[`${key}_status`] === 'no_signal').length
         };
     };
     container.innerHTML = '<div class="tracker-bank-message">Cargando comparación…</div>';
     try {
-        const results = await Promise.all([renderPredictor('system'), renderPredictor('ai')]);
+        const results = await Promise.all([renderPredictor('system'), renderPredictor('system_pattern')]);
         container.innerHTML = results.map(result => {
-            const name = result.predictor === 'ai' ? 'IA' : 'SISTEMA';
+            const name = trackerBankPredictorLabel(result.predictor);
             const session = result.session;
             if (!session) return `<section class="tracker-bank-compare-card"><h3>${name}</h3><p>Sin sesión iniciada</p><button class="tracker-bank-create" type="button" onclick="setTrackerBankView('${result.predictor}')">Abrir banca ${name}</button></section>`;
             const net = Number(session.balance || 0) - Number(session.initial_capital || 0);
             const status = session.status === 'active' ? 'EN CURSO' : session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : 'BORRADOR';
             const accuracy = result.evaluated ? `${(result.wins / result.evaluated * 100).toFixed(1)}%` : 'sin muestra';
-            return `<section class="tracker-bank-compare-card"><h3>${name} · Sesión #${Number(session.session_no)}</h3><b>${status}</b><p>Capital: ${trackerBankMoney(session.initial_capital)} · Saldo: ${trackerBankMoney(session.balance)}</p><p>Neto: ${net >= 0 ? '+' : ''}${trackerBankMoney(net)}</p><p>Banca: ${Number(session.wins || 0)} aciertos / ${Number(session.losses || 0)} fallos · ${Number(session.total_spins || 0)} apuestas</p><p>Pronósticos: ${result.wins}/${result.evaluated} aciertos (${accuracy}) · ${result.pending} pendientes · ${result.forecasts} emitidos</p><button class="tracker-bank-create" type="button" onclick="setTrackerBankView('${result.predictor}')">Abrir banca ${name}</button></section>`;
+            return `<section class="tracker-bank-compare-card"><h3>${name} · Sesión #${Number(session.session_no)}</h3><b>${status}</b><p>Capital: ${trackerBankMoney(session.initial_capital)} · Saldo: ${trackerBankMoney(session.balance)}</p><p>Neto: ${net >= 0 ? '+' : ''}${trackerBankMoney(net)}</p><p>Banca: ${Number(session.wins || 0)} aciertos / ${Number(session.losses || 0)} fallos · ${Number(session.total_spins || 0)} apuestas</p><p>Pronósticos: ${result.wins}/${result.evaluated} aciertos (${accuracy}) · ${result.pending} pendientes · ${result.forecasts} emitidos · ${result.skipped} rondas omitidas</p><button class="tracker-bank-create" type="button" onclick="setTrackerBankView('${result.predictor}')">Abrir banca ${name}</button></section>`;
         }).join('');
     } catch (error) {
         container.innerHTML = `<div class="tracker-bank-message">No se pudo cargar la comparación: ${trackerEscapeHtml(error.message)}</div>`;
     }
 }
 
-async function startTrackerBankSession(predictor = trackerBankView === 'ai' ? 'ai' : 'system') {
-    if (!['system', 'ai'].includes(predictor)) return;
+async function startTrackerBankSession(predictor = ['system', 'system_pattern', 'ai'].includes(trackerBankView) ? trackerBankView : 'system') {
+    if (!['system', 'system_pattern', 'ai'].includes(predictor)) return;
     const capital = Number(document.getElementById('tracker-bank-capital')?.value);
     const chip = Number(document.getElementById('tracker-bank-chip')?.value);
     const startButton = document.getElementById('tracker-bank-start');
     if (startButton?.disabled) return;
     if (trackerSource !== 'live') {
-        trackerBankSetMessage('Cambia el Tracker a LIVE antes de iniciar una sesión con IA.');
+        trackerBankSetMessage('Cambia el Tracker a LIVE antes de iniciar una sesión de banca.');
         return;
     }
     if (!trackerMemoryAvailable) {
@@ -1216,7 +1255,7 @@ async function startTrackerBankSession(predictor = trackerBankView === 'ai' ? 'a
         if (authoritativeActive) {
             trackerBankSelectedSessionId = authoritativeActive._id;
             renderTrackerBankroll();
-            trackerBankSetMessage(`La sesión ${authoritativeActive.session_no} de ${predictor === 'ai' ? 'IA' : 'SISTEMA'} ya está activa.`);
+            trackerBankSetMessage(`La sesión ${authoritativeActive.session_no} de ${trackerBankPredictorLabel(predictor)} ya está activa.`);
             return;
         }
         renderTracker();
@@ -1927,9 +1966,9 @@ function submitTrackerNumber(n, batch = false, source = trackerSource, spinId = 
 }
 
 async function askTrackerAIForAnalysisSilent(isRetry = false, backgroundPrediction = false) {
-    if (!trackerBankHasActiveSessions() || trackerHistory.length < 3) return;
+    if (!trackerBankActiveSession('ai') || trackerHistory.length < 3) return;
     if (trackerPredictionSource !== 'ai' && !backgroundPrediction) return;
-    if (isRetry && (trackerSource !== 'live' || !trackerBankHasActiveSessions() || trackerAiRetryRevision !== trackerLiveEventRevision)) return;
+    if (isRetry && (trackerSource !== 'live' || !trackerBankActiveSession('ai') || trackerAiRetryRevision !== trackerLiveEventRevision)) return;
     if (trackerSource === 'live') {
         if (!isRetry && trackerAiLastRequestedRevision === trackerLiveEventRevision) return;
         if (!isRetry) {
@@ -1948,7 +1987,7 @@ async function askTrackerAIForAnalysisSilent(isRetry = false, backgroundPredicti
 }
 
 function scheduleTrackerAiRetry(revision) {
-    if (trackerSource !== 'live' || !trackerBankHasActiveSessions() || revision !== trackerLiveEventRevision) return;
+    if (trackerSource !== 'live' || !trackerBankActiveSession('ai') || revision !== trackerLiveEventRevision) return;
     trackerAiDisplayStatus = 'ANALIZANDO IA ?';
     const predEl = document.getElementById('tracker-prediction');
     const status = document.getElementById('tracker-ai-status');
@@ -1959,13 +1998,13 @@ function scheduleTrackerAiRetry(revision) {
     trackerAiRetryCount++;
     trackerAiRetryTimer = setTimeout(() => {
         trackerAiRetryTimer = null;
-        if (revision !== trackerLiveEventRevision || !trackerBankHasActiveSessions()) return;
+        if (revision !== trackerLiveEventRevision || !trackerBankActiveSession('ai')) return;
         askTrackerAIForAnalysisSilent(true, trackerPredictionSource === 'system');
     }, trackerAiRetryCount * 700);
 }
 
 async function callTrackerAISilent(promptObj, backgroundPrediction = false) {
-    if (!trackerBankHasActiveSessions() || trackerHistory.length < 3) return;
+    if (!trackerBankActiveSession('ai') || trackerHistory.length < 3) return;
     if (trackerPredictionSource !== 'ai' && !backgroundPrediction) return;
     const status = document.getElementById('tracker-ai-status');
     const predEl = document.getElementById('tracker-prediction');

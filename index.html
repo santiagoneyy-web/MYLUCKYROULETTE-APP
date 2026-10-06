@@ -439,7 +439,7 @@
     .tracker-bank-heading { display:flex;align-items:center;gap:8px;margin-bottom:10px; }
     .tracker-bank-heading strong { flex:1;color:#fff;font-size:.85rem; }
     .tracker-bank-close { width:30px;height:30px;background:#151d29;color:#c7d4e3;border:1px solid var(--border);border-radius:5px;cursor:pointer; }
-    .tracker-bank-tabs { display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:10px; }
+    .tracker-bank-tabs { display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:10px; }
     .tracker-bank-tab { padding:8px 4px;background:#101824;border:1px solid #263345;border-radius:5px;color:#9fb3c8;font-size:.62rem;font-weight:800;cursor:pointer; }
     .tracker-bank-tab.active { background:rgba(101,221,184,.12);border-color:#65ddb8;color:#65ddb8; }
     .tracker-bank-compare { display:grid;gap:8px; }
@@ -1168,7 +1168,8 @@
                             <button class="tracker-bank-close" onclick="toggleTrackerBankPanel(false)" title="Cerrar" aria-label="Cerrar gestor">&#x2715;</button>
                         </div>
                         <div class="tracker-bank-tabs" role="tablist" aria-label="Bancas de predictores">
-                            <button class="tracker-bank-tab active" id="tracker-bank-tab-system" type="button" onclick="setTrackerBankView('system')">SISTEMA</button>
+                            <button class="tracker-bank-tab active" id="tracker-bank-tab-system" type="button" onclick="setTrackerBankView('system')">SISTEMA · TODAS</button>
+                            <button class="tracker-bank-tab" id="tracker-bank-tab-system_pattern" type="button" onclick="setTrackerBankView('system_pattern')">SISTEMA · PATRÓN</button>
                             <button class="tracker-bank-tab" id="tracker-bank-tab-ai" type="button" onclick="setTrackerBankView('ai')">IA</button>
                             <button class="tracker-bank-tab" id="tracker-bank-tab-compare" type="button" onclick="setTrackerBankView('compare')">COMPARAR</button>
                         </div>
@@ -1208,11 +1209,11 @@
                             </table>
                         </div>
                         <details class="tracker-bank-audit">
-                            <summary>Auditoría SISTEMA + IA + informe Qwen</summary>
-                            <div id="tracker-bank-audit-summary" style="padding:0 8px 6px;color:#adc0d4;font:.58rem var(--mono)">Sesión actual · SISTEMA -- · IA --</div>
+                            <summary>Auditoría de los dos SISTEMA + IA y Qwen</summary>
+                            <div id="tracker-bank-audit-summary" style="padding:0 8px 6px;color:#adc0d4;font:.58rem var(--mono)">SISTEMA TODAS -- · SISTEMA PATRÓN -- · IA --</div>
                             <div class="tracker-bank-table-wrap">
-                                <table class="tracker-bank-table"><thead><tr><th>Giro</th><th>Filtro</th><th>Real</th><th>SISTEMA</th><th>IA</th><th>Informe y razonamientos</th></tr></thead>
-                                    <tbody id="tracker-bank-audit-ledger"><tr><td colspan="6" style="text-align:center">Sin auditorías guardadas</td></tr></tbody>
+                                <table class="tracker-bank-table"><thead><tr><th>Giro</th><th>Filtro</th><th>Real</th><th>SISTEMA TODAS</th><th>SISTEMA PATRÓN</th><th>IA</th><th>Informe y razonamientos</th></tr></thead>
+                                    <tbody id="tracker-bank-audit-ledger"><tr><td colspan="7" style="text-align:center">Sin auditorías guardadas</td></tr></tbody>
                                 </table>
                             </div>
                         </details>
@@ -1231,15 +1232,15 @@
                                 </label>
                                 <button class="tracker-btn tracker-btn-secondary" type="button" onclick="loadTrackerBankReport(1)">Consultar</button>
                             </div>
-                            <div id="tracker-bank-history-summary" style="padding:0 8px 8px;color:#adc0d4;font:.58rem var(--mono)">Carga todas las sesiones ganadas y perdidas y compara los pronósticos auditados de SISTEMA e IA.</div>
+                            <div id="tracker-bank-history-summary" style="padding:0 8px 8px;color:#adc0d4;font:.58rem var(--mono)">Compara SISTEMA TODAS, SISTEMA PATRÓN e IA, además del historial de sesiones ganadas y perdidas.</div>
                             <div class="tracker-bank-table-wrap">
                                 <table class="tracker-bank-table"><thead><tr><th>Sesión</th><th>Predictor</th><th>Estado</th><th>Apuestas</th><th>Aciertos / fallos</th><th>Neto</th></tr></thead>
                                     <tbody id="tracker-bank-history-sessions"><tr><td colspan="6" style="text-align:center">Pulsa Consultar para cargar el historial</td></tr></tbody>
                                 </table>
                             </div>
                             <div class="tracker-bank-table-wrap">
-                                <table class="tracker-bank-table"><thead><tr><th>Sesión · giro</th><th>Filtro</th><th>Real</th><th>SISTEMA</th><th>IA / modelo</th><th>Qwen</th><th>Revisión del resultado</th></tr></thead>
-                                    <tbody id="tracker-bank-history-predictions"><tr><td colspan="7" style="text-align:center">Sin pronósticos cargados</td></tr></tbody>
+                                <table class="tracker-bank-table"><thead><tr><th>Sesión · giro</th><th>Filtro</th><th>Real</th><th>SISTEMA TODAS</th><th>SISTEMA PATRÓN</th><th>IA / modelo</th><th>Qwen</th><th>Revisión del resultado</th></tr></thead>
+                                    <tbody id="tracker-bank-history-predictions"><tr><td colspan="8" style="text-align:center">Sin pronósticos cargados</td></tr></tbody>
                                 </table>
                             </div>
                             <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;color:#adc0d4;font:.58rem var(--mono)">
@@ -1251,7 +1252,7 @@
                         <div class="tracker-bank-foot">La sesión y cada resultado Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
                         </div>
                         <div id="tracker-bank-comparison" style="display:none">
-                            <div class="tracker-bank-strategy">Cada predictor lleva una sesión y una progresión independientes sobre los mismos giros Live. Una ronda sin pronóstico válido se omite sin apostar ni contarla como fallo.</div>
+                            <div class="tracker-bank-strategy">Compara dos SISTEMA con banca independiente: TODAS apuesta en cada ronda; PATRÓN solo apuesta cuando detecta un patrón claro y omite las demás sin contarlas como fallos.</div>
                             <div class="tracker-bank-compare" id="tracker-bank-comparison-cards"><div class="tracker-bank-message">Cargando comparación…</div></div>
                             <button class="tracker-bank-create" type="button" onclick="loadTrackerBankComparison()">Actualizar comparación</button>
                         </div>

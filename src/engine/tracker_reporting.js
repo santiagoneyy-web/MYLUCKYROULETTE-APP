@@ -67,6 +67,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         base_number: null,
         result_number: null,
         system: { center: null, metric: '', won: null, status: '', reasoning: null },
+        system_pattern: { center: null, metric: '', won: null, status: '', reasoning: null },
         ai: { center: null, metric: '', model: '', won: null, status: '', reasoning: '' },
         analyst: { model: '', status: '', summary: '', error: '' },
         prediction_review: null,
@@ -90,6 +91,11 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
             center: validCenter(audit.system_center), metric: String(audit.system_metric_label || ''),
             won: typeof audit.system_won === 'boolean' ? audit.system_won : null,
             status: String(audit.system_status || ''), reasoning: audit.system_reasoning || null
+        };
+        record.system_pattern = {
+            center: validCenter(audit.system_pattern_center), metric: String(audit.system_pattern_metric_label || ''),
+            won: typeof audit.system_pattern_won === 'boolean' ? audit.system_pattern_won : null,
+            status: String(audit.system_pattern_status || ''), reasoning: audit.system_pattern_reasoning || null
         };
         record.ai = {
             center: validCenter(audit.ai_center), metric: String(audit.ai_metric_label || ''),
@@ -130,6 +136,14 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
             status: record.system.status || String(context.system_status || ''),
             reasoning: record.system.reasoning || context.system_reasoning || null
         };
+        record.system_pattern = {
+            ...record.system_pattern,
+            center: record.system_pattern.center ?? validCenter(context.system_pattern_center),
+            metric: record.system_pattern.metric || String(context.system_pattern_metric_label || ''),
+            won: typeof record.system_pattern.won === 'boolean' ? record.system_pattern.won : typeof context.system_pattern_won === 'boolean' ? context.system_pattern_won : null,
+            status: record.system_pattern.status || String(context.system_pattern_status || ''),
+            reasoning: record.system_pattern.reasoning || context.system_pattern_reasoning || null
+        };
         record.ai = {
             ...record.ai,
             center: record.ai.center ?? validCenter(context.ai_center),
@@ -152,7 +166,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
     let records = Array.from(recordsByKey.values()).filter(record => selectedMode === 'all' || record.mode === selectedMode);
     for (const record of records) {
         if (record.result_number == null || typeof wheelNeighbors !== 'function') continue;
-        for (const predictor of ['system', 'ai']) {
+        for (const predictor of ['system', 'system_pattern', 'ai']) {
             if (validCenter(record[predictor].center) === null || typeof record[predictor].won === 'boolean') continue;
             record[predictor].won = wheelNeighbors(record[predictor].center, 4).includes(record.result_number);
         }
@@ -190,8 +204,10 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         net_profit: Number(selectedSessions.reduce((sum, session) => sum + Number(session.balance || 0) - Number(session.initial_capital || 0), 0).toFixed(2))
     };
     const system = summarizePredictor(records, 'system', wheelNeighbors);
+    const system_pattern = summarizePredictor(records, 'system_pattern', wheelNeighbors);
     const ai = summarizePredictor(records, 'ai', wheelNeighbors);
     const agreement = records.filter(record => validCenter(record.system.center) !== null && validCenter(record.ai.center) !== null);
+    const systemVariantsCompared = records.filter(record => validCenter(record.system.center) !== null && validCenter(record.system_pattern.center) !== null);
     const analyst = {
         complete: records.filter(record => record.analyst.status === 'complete').length,
         pending: records.filter(record => record.analyst.status === 'pending').length,
@@ -204,6 +220,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         if (group.length) modeBreakdown[key] = {
             stored: group.length,
             system: summarizePredictor(group, 'system', wheelNeighbors),
+            system_pattern: summarizePredictor(group, 'system_pattern', wheelNeighbors),
             ai: summarizePredictor(group, 'ai', wheelNeighbors)
         };
     }
@@ -221,7 +238,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
         mode: selectedMode,
         sessions: selectedSessions.map(session => ({
             id: String(session._id), session_no: Number(session.session_no), status: String(session.status),
-            predictor: session.predictor === 'ai' ? 'ai' : 'system',
+            predictor: ['ai', 'system_pattern'].includes(session.predictor) ? session.predictor : 'system',
             final_outcome: String(session.final_outcome || 'pending'),
             initial_capital: Number(session.initial_capital || 0), balance: Number(session.balance || 0),
             net_profit: Number((Number(session.balance || 0) - Number(session.initial_capital || 0)).toFixed(2)),
@@ -229,7 +246,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
             starts_at: session.starts_at || session.created_at || null, closed_at: session.closed_at || null
         })),
         session_summary: sessionSummary,
-        prediction_summary: { system, ai, compared: agreement.length, by_mode: modeBreakdown },
+        prediction_summary: { system, system_pattern, ai, compared: agreement.length, system_variants_compared: systemVariantsCompared.length, by_mode: modeBreakdown },
         analyst_summary: analyst,
         pagination,
         predictions: records.slice(offset, offset + pagination.page_size)

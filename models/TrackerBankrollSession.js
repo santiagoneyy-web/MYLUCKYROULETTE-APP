@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const TrackerBankrollSessionSchema = new mongoose.Schema({
     table_id: { type: Number, required: true, index: true },
     session_no: { type: Number, required: true, min: 1 },
-    predictor: { type: String, enum: ['system', 'ai'], default: 'system', index: true },
+    predictor: { type: String, enum: ['system', 'system_pattern', 'ai'], default: 'system', index: true },
     initial_capital: { type: Number, required: true, min: 0.01 },
     balance: { type: Number, required: true, min: 0 },
     chip_value: { type: Number, required: true, min: 0.01 },
