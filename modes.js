@@ -984,6 +984,7 @@ function renderTrackerBankroll() {
     const grossReturn = Number((stake * 4).toFixed(2));
     const possibleProfit = Number((stake * 4 - cycle - stake).toFixed(2));
     const pred = trackerBankPredictionNumbers();
+    const waitingForPattern = active && trackerBankSessionPredictor(session) === 'system_pattern' && pred.length !== 9;
     const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     set('tracker-bank-capital-value', session ? trackerBankMoney(capital) : '--');
     set('tracker-bank-balance', session ? trackerBankMoney(balance) : '--');
@@ -991,11 +992,11 @@ function renderTrackerBankroll() {
     set('tracker-bank-wins', String(session?.wins || 0));
     set('tracker-bank-losses', String(session?.losses || 0));
     set('tracker-bank-outcome', session ? (session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : `${trackerBankOutcomeLabel(profit > 0 ? 'won' : profit < 0 ? 'lost' : 'break_even')} · provisional`) : '--');
-    set('tracker-bank-round', active ? String(round) : '--');
-    set('tracker-bank-stake', active ? trackerBankMoney(stake) : '--');
-    set('tracker-bank-cycle', active ? trackerBankMoney(roundTotal) : '--');
-    set('tracker-bank-gross-return', active ? trackerBankMoney(grossReturn) : '--');
-    set('tracker-bank-win-profit', active ? trackerBankMoney(possibleProfit) : '--');
+    set('tracker-bank-round', active ? (waitingForPattern ? 'Esperando señal' : String(round)) : '--');
+    set('tracker-bank-stake', active && !waitingForPattern ? trackerBankMoney(stake) : '--');
+    set('tracker-bank-cycle', active && !waitingForPattern ? trackerBankMoney(roundTotal) : '--');
+    set('tracker-bank-gross-return', active && !waitingForPattern ? trackerBankMoney(grossReturn) : '--');
+    set('tracker-bank-win-profit', active && !waitingForPattern ? trackerBankMoney(possibleProfit) : '--');
     set('tracker-bank-prediction', active && trackerSource === 'live'
         ? pred.length ? `N4: ${pred.join(', ')}` : trackerBankView === 'system_pattern' ? 'ANALIZANDO ?' : '--'
         : '--');
@@ -1533,9 +1534,14 @@ function flushTrackerBankQueue() {
                     trackerBankEntriesSessionId = data.session._id;
                 }
                 if (!data.duplicate) trackerBankEntries = trackerBankMergeEntries(trackerBankEntries, [data.entry]);
+                const predictor = trackerBankSessionPredictor(data.session);
+                const label = predictor === 'ai' ? 'IA' : predictor === 'system_pattern' ? 'SISTEMA · PATRÓN' : 'SISTEMA';
+                const waitingForPattern = predictor === 'system_pattern' && trackerBankPredictionCenter(predictor) === null;
                 trackerBankSetMessage(data.entry.won
-                    ? `${trackerBankSessionPredictor(data.session) === 'ai' ? 'IA' : 'SISTEMA'} · Acierto en ronda ${data.entry.round}. Ciclo: ${trackerBankMoney(data.entry.cycle_profit)} netos.`
-                    : `${trackerBankSessionPredictor(data.session) === 'ai' ? 'IA' : 'SISTEMA'} · Falló ronda ${data.entry.round}. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankStake(data.session.chip_value, data.session.current_round))}.`);
+                    ? `${label} · Acierto en ronda ${data.entry.round}. Ciclo: ${trackerBankMoney(data.entry.cycle_profit)} netos.`
+                    : waitingForPattern
+                        ? `${label} · Falló ronda ${data.entry.round}. Esperando una señal clara; no se apostará ni avanzará mientras no aparezca.`
+                        : `${label} · Falló ronda ${data.entry.round}. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankStake(data.session.chip_value, data.session.current_round))}.`);
             }
             renderTrackerBankroll();
         }
