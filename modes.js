@@ -663,7 +663,17 @@ function trackerLastDirectionZoneMetric() {
     const direction = lastDistance > 0 ? 'CW' : 'CCW';
     const zone = Math.abs(lastDistance) >= 10 ? 'B' : 'S';
     const label = `${direction}_N4${zone}`;
-    return trackerPredictionMetricCandidates('n4').find(metric => metric.label === label) || null;
+    const metric = trackerPredictionMetricCandidates('n4').find(candidate => candidate.label === label);
+    if (!metric) return null;
+
+    // Esta estrategia sigue el tamaño del último salto: CCW SMALL es -4
+    // casillas y CCW BIG es -14. El mapeo general de métricas conserva su
+    // comportamiento; aquí fijamos el centro de esta estrategia explícitamente.
+    const target = direction === 'CCW'
+        ? (zone === 'S' ? trackerLastSignal.targetUnderCCW : trackerLastSignal.targetOverCCW)
+        : (zone === 'S' ? trackerLastSignal.targetUnderCW : trackerLastSignal.targetOverCW);
+    const number = Number(target);
+    return Number.isInteger(number) ? { ...metric, number } : null;
 }
 
 function trackerLastDirectionZoneReasoning(metric) {
