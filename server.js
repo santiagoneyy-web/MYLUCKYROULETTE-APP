@@ -1792,6 +1792,8 @@ app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
                     initial_capital: capital,
                     balance: capital,
                     chip_value: chipValue,
+                    strategy_next_stake: predictor === 'last_direction_zone'
+                        ? trackerBankroll.getDirectionZoneBaseStake(chipValue, 1) : null,
                     status: 'draft'
                 }], { session: mongoSession });
             });
@@ -2300,8 +2302,38 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { session, stopped: true, round_limit_reached: true };
                     return;
                 }
+                let strategyNextStake = session.strategy_next_stake;
+                if (sessionPredictor === 'last_direction_zone' && !(Number(strategyNextStake) > 0)) {
+                    // Migrate an older active session once: recover its compounding
+                    // from the last win and rebuild exposure since the latest loss/CHECK.
+                    const priorEntries = await TrackerBankrollEntry.find({ session_id: session._id })
+                        .sort({ created_at: 1 }).select('stake payout won strategy_cycle_completed')
+                        .session(mongoSession).lean().exec();
+                    let activeCycleStart = 0;
+                    for (let index = 0; index < priorEntries.length; index++) {
+                        if (!priorEntries[index].won || priorEntries[index].strategy_cycle_completed) {
+                            activeCycleStart = index + 1;
+                        }
+                    }
+                    const activeCycleEntries = priorEntries.slice(activeCycleStart);
+                    session.cycle_wagered = Number(activeCycleEntries
+                        .reduce((sum, entry) => sum + Number(entry.stake || 0), 0).toFixed(2));
+                    session.cycle_payout = Number(activeCycleEntries
+                        .reduce((sum, entry) => sum + Number(entry.payout || 0), 0).toFixed(2));
+                    const lastEntry = priorEntries[priorEntries.length - 1];
+                    strategyNextStake = Number(session.strategy_streak_hits || 0) > 0 && lastEntry?.won && Number(lastEntry.stake) > 0
+                        ? Number((Number(lastEntry.stake) * 4).toFixed(2))
+                        : trackerBankroll.getDirectionZoneBaseStake(
+                            session.chip_value, trackerBankroll.getDirectionZoneRound(session)
+                        );
+                }
                 const stake = sessionPredictor === 'last_direction_zone'
-                    ? trackerBankroll.getDirectionZoneStake(session.chip_value, trackerBankroll.getDirectionZoneRound(session))
+                    ? trackerBankroll.getDirectionZoneStake(
+                        session.chip_value,
+                        trackerBankroll.getDirectionZoneRound(session),
+                        strategyNextStake,
+                        session.strategy_streak_hits
+                    )
                     : trackerBankroll.getStake(session.chip_value, session.current_round);
                 if (session.balance + 1e-9 < stake) {
                     // No wager was possible for this spin. Close and persist the
@@ -2317,7 +2349,9 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     return;
                 }
                 const settlement = sessionPredictor === 'last_direction_zone'
-                    ? trackerBankroll.calculateDirectionZoneSettlement(session, number, predictionNumbers, validLastDirectionZoneMetricLabel)
+                    ? trackerBankroll.calculateDirectionZoneSettlement(
+                        session, number, predictionNumbers, validLastDirectionZoneMetricLabel, stake
+                    )
                     : trackerBankroll.calculateSettlement(session, number, predictionNumbers);
                 const [entry] = await TrackerBankrollEntry.create([{
                     session_id: session._id,
@@ -2347,6 +2381,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 session.cycle_wagered = settlement.nextCycleWagered;
                 if (sessionPredictor === 'last_direction_zone') {
                     session.cycle_payout = settlement.nextCyclePayout;
+                    session.strategy_next_stake = settlement.nextStrategyStake;
                     session.strategy_streak_hits = settlement.nextStrategyStreakHits;
                     session.strategy_streak_metric = settlement.nextStrategyStreakMetric;
                 }

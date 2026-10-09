@@ -10,6 +10,7 @@ const TrackerBankrollSessionSchema = new mongoose.Schema({
     current_round: { type: Number, default: 1, min: 1 },
     cycle_wagered: { type: Number, default: 0, min: 0 },
     cycle_payout: { type: Number, default: 0, min: 0 },
+    strategy_next_stake: { type: Number, default: null, min: 0 },
     strategy_streak_hits: { type: Number, default: 0, min: 0, max: 2 },
     strategy_streak_metric: { type: String, default: '' },
     wins: { type: Number, default: 0, min: 0 },

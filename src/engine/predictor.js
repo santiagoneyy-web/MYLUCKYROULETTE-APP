@@ -317,6 +317,23 @@ function calcDist(from, to) {
     return d;
 }
 
+function getDirectionZoneTarget(signal, direction, zone) {
+    if (!signal || !['CW', 'CCW'].includes(direction) || !['S', 'B'].includes(zone)) return null;
+    const key = direction === 'CW'
+        ? (zone === 'S' ? 'targetUnderCW' : 'targetOverCW')
+        : (zone === 'S' ? 'targetUnderCCW' : 'targetOverCCW');
+    const target = Number(signal[key]);
+    return Number.isInteger(target) && target >= 0 && target <= 36 ? target : null;
+}
+
+function getDirectionZoneMetricLabel(distance) {
+    const value = Number(distance);
+    if (!Number.isFinite(value) || value === 0) return null;
+    const direction = value > 0 ? 'CW' : 'CCW';
+    const zone = Math.abs(value) >= 10 ? 'B' : 'S';
+    return `${direction}_N4${zone}`;
+}
+
 // Helper for browser/node hybrid
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // TRAVEL ANALYST AGENT â€” Technical Analysis (Trading Style)
@@ -484,6 +501,8 @@ if (typeof window !== 'undefined') {
     window.analyzeMasterConfluence = analyzeMasterConfluence; // New
     window.wheelNeighbors = getWheelNeighbors;
     window.calcDist = calcDist;
+    window.getDirectionZoneTarget = getDirectionZoneTarget;
+    window.getDirectionZoneMetricLabel = getDirectionZoneMetricLabel;
     window.WHEEL_ORDER = WHEEL_ORDER;
     window.WHEEL_INDEX = WHEEL_INDEX;
 }
@@ -493,7 +512,7 @@ if (typeof module !== 'undefined' && module.exports) {
         WHEEL_ORDER, WHEEL_INDEX, TERMINALS_MAP,
         analyzeSpin, projectNextRound, computeDealerSignature, getIAMasterSignals, 
         predictZonePattern, analyzeTravelWave, analyzeMasterConfluence,
-        getDistance
+        getDistance, getDirectionZoneTarget, getDirectionZoneMetricLabel
     };
 }
 

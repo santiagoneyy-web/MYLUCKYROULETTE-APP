@@ -621,13 +621,34 @@ function trackerBankStake(chip, round) {
 }
 
 function trackerBankDirectionZoneStake(baseStake, round) {
-    const step = Math.max(1, Math.min(3, Math.floor(Number(round) || 1)));
-    return Number((baseStake * 4 ** (step - 1)).toFixed(2));
+    const range = trackerBankDirectionZoneRange(round);
+    return Number((baseStake * range.multiplier).toFixed(2));
 }
 
 function trackerBankDirectionZoneRound(session) {
-    const hits = Math.floor(Number(session?.strategy_streak_hits || 0));
-    return Math.max(1, Math.min(3, hits + 1));
+    const completed = Math.max(0, Math.floor(Number(session?.total_spins) || 0));
+    return Math.min(80, completed + 1);
+}
+
+function trackerBankDirectionZoneRange(round) {
+    const safeRound = Math.max(1, Math.min(80, Math.floor(Number(round) || 1)));
+    if (safeRound <= 35) return { first: 1, last: 35, multiplier: 1 };
+    if (safeRound <= 55) return { first: 36, last: 55, multiplier: 2 };
+    if (safeRound <= 70) return { first: 56, last: 70, multiplier: 4 };
+    return { first: 71, last: 80, multiplier: 8 };
+}
+
+function trackerBankDirectionZoneNextStake(baseStake, round, session) {
+    const saved = Number(session?.strategy_next_stake);
+    if (Number.isFinite(saved) && saved > 0) return Number(saved.toFixed(2));
+    const hits = Math.max(0, Math.min(2, Math.floor(Number(session?.strategy_streak_hits) || 0)));
+    const latestEntry = String(trackerBankEntriesSessionId || '') === String(session?._id || '')
+        ? trackerBankEntries[trackerBankEntries.length - 1]
+        : null;
+    if (hits > 0 && latestEntry?.won && Number(latestEntry.stake) > 0) {
+        return Number((Number(latestEntry.stake) * 4).toFixed(2));
+    }
+    return Number((trackerBankDirectionZoneStake(baseStake, round) * 4 ** hits).toFixed(2));
 }
 
 function trackerBankPredictionNumbers() {
@@ -660,19 +681,21 @@ function trackerLastDirectionZoneMetric() {
         }
     }
     if (lastDistance === null) return null;
-    const direction = lastDistance > 0 ? 'CW' : 'CCW';
-    const zone = Math.abs(lastDistance) >= 10 ? 'B' : 'S';
-    const label = `${direction}_N4${zone}`;
+    const label = typeof getDirectionZoneMetricLabel === 'function'
+        ? getDirectionZoneMetricLabel(lastDistance)
+        : null;
+    if (!label) return null;
+    const direction = label.startsWith('CW_') ? 'CW' : 'CCW';
+    const zone = label.endsWith('S') ? 'S' : 'B';
     const metric = trackerPredictionMetricCandidates('n4').find(candidate => candidate.label === label);
     if (!metric) return null;
 
     // Esta estrategia sigue el tamaño del último salto: CCW SMALL es -4
     // casillas y CCW BIG es -14. El mapeo general de métricas conserva su
     // comportamiento; aquí fijamos el centro de esta estrategia explícitamente.
-    const target = direction === 'CCW'
-        ? (zone === 'S' ? trackerLastSignal.targetUnderCCW : trackerLastSignal.targetOverCCW)
-        : (zone === 'S' ? trackerLastSignal.targetUnderCW : trackerLastSignal.targetOverCW);
-    const number = Number(target);
+    const number = typeof getDirectionZoneTarget === 'function'
+        ? getDirectionZoneTarget(trackerLastSignal, direction, zone)
+        : null;
     return Number.isInteger(number) ? { ...metric, number } : null;
 }
 
@@ -1049,7 +1072,7 @@ function renderTrackerBankroll() {
     const chipInput = Number(document.getElementById(isDirectionZone ? 'tracker-bank-strategy-base' : 'tracker-bank-chip')?.value);
     const chip = Number(active ? session.chip_value : session?.chip_value || chipInput || 0.5);
     const round = active ? (isDirectionZone ? trackerBankDirectionZoneRound(session) : Number(session.current_round || 1)) : 1;
-    const stake = isDirectionZone ? trackerBankDirectionZoneStake(chip, round) : trackerBankStake(chip, round);
+    const stake = isDirectionZone ? trackerBankDirectionZoneNextStake(chip, round, session) : trackerBankStake(chip, round);
     const cycle = active ? Number(session.cycle_wagered || 0) : 0;
     const cyclePayout = active ? Number(session.cycle_payout || 0) : 0;
     const roundTotal = Number((cycle + stake).toFixed(2));
@@ -1071,7 +1094,18 @@ function renderTrackerBankroll() {
     const winsLabel = document.querySelector('#tracker-bank-wins')?.previousElementSibling;
     if (winsLabel) winsLabel.textContent = isDirectionZone ? 'CHECK completados' : 'Aciertos';
     set('tracker-bank-outcome', session ? (session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : `${trackerBankOutcomeLabel(profit > 0 ? 'won' : profit < 0 ? 'lost' : 'break_even')} · provisional`) : '--');
-    set('tracker-bank-round', active ? (waitingForPattern ? 'Esperando señal' : String(round)) : '--');
+    const settledDirectionRounds = Math.min(80, Math.max(0, Math.floor(Number(session?.total_spins) || 0)));
+    const displayedDirectionRound = active ? round : settledDirectionRounds;
+    const directionRange = isDirectionZone && session
+        ? trackerBankDirectionZoneRange(Math.max(1, displayedDirectionRound || 1))
+        : null;
+    const directionRoundLabel = document.querySelector('#tracker-bank-round')?.previousElementSibling;
+    if (directionRoundLabel && isDirectionZone && session) {
+        directionRoundLabel.textContent = active ? 'Ronda de apuesta / 80' : 'Apuestas registradas / 80';
+    }
+    set('tracker-bank-round', isDirectionZone && session
+        ? `${displayedDirectionRound}/80 · base ${trackerBankMoney(chip * directionRange.multiplier)}`
+        : active ? (waitingForPattern ? 'Esperando señal' : String(round)) : '--');
     set('tracker-bank-stake', active && !waitingForPattern ? trackerBankMoney(stake) : '--');
     set('tracker-bank-cycle', active && !waitingForPattern ? trackerBankMoney(roundTotal) : '--');
     set('tracker-bank-gross-return', active && !waitingForPattern ? trackerBankMoney(grossReturn) : '--');
@@ -1277,7 +1311,7 @@ function setTrackerBankView(view) {
     if (comparison) comparison.style.display = view === 'compare' ? 'block' : 'none';
     const description = document.getElementById('tracker-bank-strategy-description');
     if (description) description.textContent = view === 'last_direction_zone'
-        ? 'Apuesta base S/ 9. Cada acierto reinvierte el retorno 4×: S/ 9 → S/ 36 → S/ 144. Tres aciertos seguidos en la misma métrica completan un CHECK; si falla, la cadena vuelve a S/ 9. La sesión se cierra tras 80 apuestas.'
+        ? '80 apuestas: rondas 1–35 base S/ 9, 36–55 S/ 18, 56–70 S/ 36 y 71–80 S/ 72 (escalado desde la apuesta base). Cada acierto reapuesta su retorno 4× hasta fallar; el CHECK exige 3 aciertos seguidos en la misma dirección y zona. Al fallar o completar CHECK, vuelve a la base del tramo vigente. Se cierra en 80.'
         : 'Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. Un acierto reinicia el ciclo.';
     if (view === 'compare') loadTrackerBankComparison();
     else loadTrackerBankSessions();
@@ -1653,12 +1687,19 @@ function flushTrackerBankQueue() {
                 const predictor = trackerBankSessionPredictor(data.session);
                 const label = predictor === 'ai' ? 'IA' : predictor === 'system_pattern' ? 'SISTEMA · PATRÓN' : predictor === 'last_direction_zone' ? 'ÚLTIMA DIRECCIÓN + ZONA' : 'SISTEMA';
                 const waitingForPattern = predictor === 'system_pattern' && trackerBankPredictionCenter(predictor) === null;
+                const strategyNextRound = predictor === 'last_direction_zone' ? trackerBankDirectionZoneRound(data.session) : null;
+                const strategyNextStake = predictor === 'last_direction_zone'
+                    ? trackerBankDirectionZoneNextStake(data.session.chip_value, strategyNextRound, data.session)
+                    : null;
+                const strategyNextBase = predictor === 'last_direction_zone'
+                    ? trackerBankDirectionZoneStake(data.session.chip_value, strategyNextRound)
+                    : null;
                 const strategyMessage = predictor === 'last_direction_zone'
                     ? data.entry.strategy_cycle_completed
-                        ? `${label} · CHECK: 3 aciertos seguidos en ${data.entry.strategy_metric_label}. Conteo reiniciado a ronda 1; la base sigue en S/ 9.`
+                        ? `${label} · CHECK: 3 aciertos seguidos en ${data.entry.strategy_metric_label}. Reinicia en ronda ${strategyNextRound}/80 con base ${trackerBankMoney(strategyNextBase)}.`
                         : data.entry.won
-                            ? `${label} · Avance CHECK ${data.entry.strategy_streak_hits}/3 en ronda ${data.entry.round}, ${data.entry.strategy_metric_label}; pago 4× aplicado.`
-                            : `${label} · Falló ronda ${data.entry.round}; racha reiniciada. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankDirectionZoneStake(data.session.chip_value, data.session.current_round))}.`
+                            ? `${label} · Avance CHECK ${data.entry.strategy_streak_hits}/3 en apuesta ${data.entry.round}/80, ${data.entry.strategy_metric_label}; retorno 4× reapostado.`
+                            : `${label} · Falló apuesta ${data.entry.round}/80; racha reiniciada. Próxima ${strategyNextRound}/80: ${trackerBankMoney(strategyNextStake)}.`
                     : null;
                 trackerBankSetMessage(predictor === 'last_direction_zone' && data.session.status === 'closed'
                     ? `${label} · ${data.entry.strategy_cycle_completed ? `CHECK: 3 aciertos seguidos en ${data.entry.strategy_metric_label}. ` : ''}Se completaron las 80 rondas. Sesión cerrada y resultado guardado.`
