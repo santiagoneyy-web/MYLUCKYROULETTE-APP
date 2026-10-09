@@ -427,6 +427,9 @@
     .tracker-bank-tabs { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-bottom:10px; }
     .tracker-bank-tab { padding:8px 4px;background:#101824;border:1px solid #263345;border-radius:5px;color:#9fb3c8;font-size:.62rem;font-weight:800;cursor:pointer; }
     .tracker-bank-tab.active { background:rgba(101,221,184,.12);border-color:#65ddb8;color:#65ddb8; }
+    .tracker-bank-variants { display:none;gap:5px;margin:-4px 0 9px;justify-content:flex-start; }
+    .tracker-bank-variant { padding:5px 10px;background:#101824;border:1px solid #263345;border-radius:999px;color:#9fb3c8;font-size:.56rem;font-weight:800;letter-spacing:.04em;cursor:pointer; }
+    .tracker-bank-variant.active { background:rgba(101,221,184,.12);border-color:#65ddb8;color:#65ddb8; }
     .tracker-bank-compare { display:grid;gap:8px; }
     .tracker-bank-compare-card { background:#101824;border:1px solid #263345;border-radius:6px;padding:10px;font-size:.65rem;color:#adc0d4; }
     .tracker-bank-compare-card h3 { margin:0 0 7px;color:#fff;font-size:.76rem; }
@@ -1159,12 +1162,17 @@
                             <button class="tracker-bank-tab" id="tracker-bank-tab-ai" type="button" onclick="setTrackerBankView('ai')">IA</button>
                             <button class="tracker-bank-tab" id="tracker-bank-tab-compare" type="button" onclick="setTrackerBankView('compare')">COMPARAR</button>
                         </div>
+                        <div class="tracker-bank-variants" id="tracker-bank-variant-buttons" role="tablist" aria-label="Método de progresión">
+                            <button class="tracker-bank-variant" id="tracker-bank-variant-soft" type="button" onclick="setTrackerBankView('last_direction_zone_soft')">SOFT · x16 · 40 RONDAS</button>
+                            <button class="tracker-bank-variant active" id="tracker-bank-variant-high" type="button" onclick="setTrackerBankView('last_direction_zone')">HIGH · x64 · 80 RONDAS</button>
+                        </div>
                         <div id="tracker-bank-main">
                         <div class="tracker-bank-strategy" id="tracker-bank-strategy-description">Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. Un acierto reinicia el ciclo.</div>
                         <div class="tracker-bank-form">
                             <label class="tracker-bank-field">Capital inicial<input id="tracker-bank-capital" type="number" min="0.01" step="0.01" placeholder="Ingresa capital" autocomplete="off" inputmode="decimal"></label>
                             <label class="tracker-bank-field" id="tracker-bank-chip-field">Valor ficha<input id="tracker-bank-chip" type="number" min="0.01" step="0.01" value="0.50" inputmode="decimal"></label>
-                            <label class="tracker-bank-field" id="tracker-bank-strategy-base-field" style="display:none">Apuesta base (total)<input id="tracker-bank-strategy-base" type="number" min="0.01" step="0.01" value="9.00" inputmode="decimal"></label>
+                            <label class="tracker-bank-field" id="tracker-bank-strategy-base-field" style="display:none">Apuesta base HIGH<input id="tracker-bank-strategy-base" type="number" min="0.01" step="0.01" value="9.00" inputmode="decimal"></label>
+                            <div class="tracker-bank-field" id="tracker-bank-soft-base-field" style="display:none"><small>Apuesta base SOFT · Excel</small><strong>S/ 4.50</strong></div>
                         </div>
                         <button class="tracker-bank-create" id="tracker-bank-start" onclick="startTrackerBankSession()" style="display:none">Iniciar sesión</button>
                         <div class="tracker-bank-next">
@@ -1240,7 +1248,7 @@
                         <div class="tracker-bank-foot">La sesión y cada resultado Live se guardan en MongoDB. Manual no se liquida ni se persiste. La progresión aumenta la exposición y no garantiza ganancias.</div>
                         </div>
                         <div id="tracker-bank-comparison" style="display:none">
-                            <div class="tracker-bank-strategy">Compara SISTEMA · TODAS, SISTEMA · PATRÓN y la estrategia de última dirección + zona, cada una con banca y sesiones independientes.</div>
+                            <div class="tracker-bank-strategy">Compara SISTEMA · TODAS, SISTEMA · PATRÓN y las bancas HIGH x64 y SOFT x16 de última dirección + zona, con sesiones independientes.</div>
                             <div class="tracker-bank-compare" id="tracker-bank-comparison-cards"><div class="tracker-bank-message">Cargando comparación…</div></div>
                             <button class="tracker-bank-create" type="button" onclick="loadTrackerBankComparison()">Actualizar comparación</button>
                         </div>
@@ -1367,7 +1375,7 @@
 
 <script src="src/engine/predictor.js?v=1000"></script>
 <script src="ai_chat.js?v=5"></script>
-<script src="modes.js?v=26"></script>
+<script src="modes.js?v=27"></script>
 <script src="app.js?v=1044"></script>
 </body>
 </html>

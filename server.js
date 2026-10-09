@@ -18,7 +18,7 @@ const { buildTrackerReport } = require('./src/engine/tracker_reporting');
 const { buildTrackerPredictionReview } = require('./src/engine/tracker_postmortem');
 const predictor = require('./src/engine/predictor'); // Agents 1-4
 const { WHEEL_ORDER, WHEEL_INDEX } = predictor;
-const TRACKER_BANK_PREDICTORS = new Set(['system', 'system_pattern', 'last_direction_zone', 'ai']);
+const TRACKER_BANK_PREDICTORS = new Set(['system', 'system_pattern', 'last_direction_zone', 'last_direction_zone_soft', 'ai']);
 const trackerBankPredictor = value => TRACKER_BANK_PREDICTORS.has(value) ? value : 'system';
 const agent5  = require('./src/engine/agent5');      // Autonomous AI & Physics
 const axios   = require('axios');
@@ -2255,14 +2255,16 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     return;
                 }
                 const sessionPredictor = trackerBankPredictor(session.predictor);
+                const isDirectionZone = sessionPredictor === 'last_direction_zone' || sessionPredictor === 'last_direction_zone_soft';
+                const isSoftStrategy = sessionPredictor === 'last_direction_zone_soft';
                 const expectedCenter = sessionPredictor === 'ai' ? validAiCenter
                     : sessionPredictor === 'system_pattern' ? validSystemPatternCenter
-                        : sessionPredictor === 'last_direction_zone' ? validLastDirectionZoneCenter : validSystemCenter;
+                        : isDirectionZone ? validLastDirectionZoneCenter : validSystemCenter;
                 if (expectedCenter === null || predictionCenter !== expectedCenter ||
-                    (sessionPredictor === 'last_direction_zone' && !validLastDirectionZoneMetricLabel)) {
+                    (isDirectionZone && !validLastDirectionZoneMetricLabel)) {
                     const predictorName = sessionPredictor === 'ai' ? 'IA'
                         : sessionPredictor === 'system_pattern' ? 'SISTEMA PATRÓN'
-                            : sessionPredictor === 'last_direction_zone' ? 'ÚLTIMA DIRECCIÓN + ZONA' : 'SISTEMA TODAS';
+                            : isSoftStrategy ? 'ÚLTIMA DIRECCIÓN + ZONA SOFT' : sessionPredictor === 'last_direction_zone' ? 'ÚLTIMA DIRECCIÓN + ZONA HIGH' : 'SISTEMA TODAS';
                     result = { error: `La predicción no corresponde a la sesión ${predictorName}.`, status: 409 };
                     return;
                 }
@@ -2292,7 +2294,8 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { error: 'La tirada ya quedó atrás de la última apuesta liquidada.', status: 409 };
                     return;
                 }
-                if (sessionPredictor === 'last_direction_zone' && Number(session.total_spins || 0) >= trackerBankroll.DIRECTION_ZONE_MAX_ROUND) {
+                const strategyRoundLimit = isSoftStrategy ? trackerBankroll.SOFT_BLOCK7_MAX_ROUND : trackerBankroll.DIRECTION_ZONE_MAX_ROUND;
+                if (isDirectionZone && Number(session.total_spins || 0) >= strategyRoundLimit) {
                     const stoppedAt = new Date();
                     session.status = 'closed';
                     session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
@@ -2327,7 +2330,9 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                             session.chip_value, trackerBankroll.getDirectionZoneRound(session)
                         );
                 }
-                const stake = sessionPredictor === 'last_direction_zone'
+                const stake = isSoftStrategy
+                    ? trackerBankroll.getSoftBlock7Stake(session.chip_value, trackerBankroll.getSoftBlock7Round(session))
+                    : sessionPredictor === 'last_direction_zone'
                     ? trackerBankroll.getDirectionZoneStake(
                         session.chip_value,
                         trackerBankroll.getDirectionZoneRound(session),
@@ -2348,7 +2353,11 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { session, stopped: true, insufficient_capital: true };
                     return;
                 }
-                const settlement = sessionPredictor === 'last_direction_zone'
+                const settlement = isSoftStrategy
+                    ? trackerBankroll.calculateSoftBlock7Settlement(
+                        session, number, predictionNumbers, validLastDirectionZoneMetricLabel
+                    )
+                    : sessionPredictor === 'last_direction_zone'
                     ? trackerBankroll.calculateDirectionZoneSettlement(
                         session, number, predictionNumbers, validLastDirectionZoneMetricLabel, stake
                     )
@@ -2369,7 +2378,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     cycle_payout: settlement.cyclePayout ?? 0,
                     payout: settlement.payout,
                     cycle_profit: settlement.cycleProfit,
-                    strategy_metric_label: sessionPredictor === 'last_direction_zone' ? validLastDirectionZoneMetricLabel : '',
+                    strategy_metric_label: isDirectionZone ? validLastDirectionZoneMetricLabel : '',
                     strategy_streak_hits: sessionPredictor === 'last_direction_zone' ? settlement.strategyStreakHitsForEntry : null,
                     strategy_cycle_completed: sessionPredictor === 'last_direction_zone' ? settlement.strategyCycleCompleted : false,
                     balance_after: settlement.balanceAfter,
@@ -2379,8 +2388,10 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 session.balance = settlement.balanceAfter;
                 session.current_round = settlement.nextRound;
                 session.cycle_wagered = settlement.nextCycleWagered;
-                if (sessionPredictor === 'last_direction_zone') {
+                if (isDirectionZone) {
                     session.cycle_payout = settlement.nextCyclePayout;
+                }
+                if (sessionPredictor === 'last_direction_zone') {
                     session.strategy_next_stake = settlement.nextStrategyStake;
                     session.strategy_streak_hits = settlement.nextStrategyStreakHits;
                     session.strategy_streak_metric = settlement.nextStrategyStreakMetric;
@@ -2395,10 +2406,10 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     session.wins = Number(session.completed_cycles || 0);
                 } else if (settlement.won) {
                     session.wins += 1;
-                    session.completed_cycles += 1;
+                    if (!isSoftStrategy) session.completed_cycles += 1;
                 }
                 if (!settlement.won) session.losses += 1;
-                if (sessionPredictor === 'last_direction_zone' && settlement.roundLimitReached) {
+                if (isDirectionZone && settlement.roundLimitReached) {
                     session.status = 'closed';
                     session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
                     session.closed_at = new Date();
