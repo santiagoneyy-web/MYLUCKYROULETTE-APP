@@ -259,7 +259,7 @@ function buildTrackerReport({ sessions, audits, entries, window = 'all', mode = 
             initial_capital: Number(session.initial_capital || 0), balance: Number(session.balance || 0),
             net_profit: Number((Number(session.balance || 0) - Number(session.initial_capital || 0)).toFixed(2)),
             total_spins: Number(session.total_spins || 0),
-            wins: Number(session.predictor === 'last_direction_zone' ? (session.completed_cycles ?? session.wins ?? 0) : (session.wins || 0)),
+            wins: Number(['last_direction_zone', 'last_direction_zone_soft'].includes(session.predictor) ? (session.completed_cycles ?? session.wins ?? 0) : (session.wins || 0)),
             completed_cycles: Number(session.completed_cycles || 0), losses: Number(session.losses || 0),
             starts_at: session.starts_at || session.created_at || null, closed_at: session.closed_at || null
         })),

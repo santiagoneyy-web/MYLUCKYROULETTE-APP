@@ -1727,16 +1727,75 @@ app.get('/api/tracker/bankroll/:tableId/report', async (req, res) => {
     }
 });
 
+async function recalibrateActiveSoftSession(sessionId) {
+    const mongoSession = await mongoose.startSession();
+    try {
+        await mongoSession.withTransaction(async () => {
+            const activeSession = await TrackerBankrollSession.findOne({
+                _id: sessionId,
+                status: 'active',
+                predictor: 'last_direction_zone_soft',
+                $or: [
+                    { soft_settlement_version: { $lt: 2 } },
+                    { soft_settlement_version: { $exists: false } }
+                ]
+            }).session(mongoSession);
+            if (!activeSession) return;
+            const entries = await TrackerBankrollEntry.find({ session_id: activeSession._id })
+                .sort({ round: 1, created_at: 1 }).session(mongoSession).exec();
+            const recalculated = trackerBankroll.recalculateSoftBlock7History(activeSession.toObject(), entries);
+            if (!recalculated) {
+                console.warn(`[Tracker bankroll] SOFT recalibration skipped for ${activeSession._id}: entry count mismatch.`);
+                return;
+            }
+            if (recalculated.entries.length) {
+                await TrackerBankrollEntry.bulkWrite(recalculated.entries.map(entry => ({
+                    updateOne: {
+                        filter: { _id: entry._id, session_id: activeSession._id },
+                        update: { $set: {
+                            cycle_no: entry.cycle_no,
+                            round: entry.round,
+                            stake: entry.stake,
+                            cycle_wagered: entry.cycle_wagered,
+                            cycle_payout: entry.cycle_payout,
+                            payout: entry.payout,
+                            cycle_profit: entry.cycle_profit,
+                            strategy_streak_hits: entry.strategy_streak_hits,
+                            strategy_cycle_completed: entry.strategy_cycle_completed,
+                            balance_after: entry.balance_after,
+                            net_profit: entry.net_profit,
+                            won: entry.won
+                        } }
+                    }
+                })), { session: mongoSession });
+            }
+            Object.assign(activeSession, recalculated.session);
+            activeSession.soft_settlement_version = 2;
+            activeSession.updated_at = new Date();
+            await activeSession.save({ session: mongoSession });
+        });
+    } finally {
+        await mongoSession.endSession();
+    }
+}
+
 app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
     const tableId = Number(req.params.tableId);
     if (!Number.isInteger(tableId)) return res.status(400).json({ error: 'Mesa inválida.' });
     try {
-        const sessions = await TrackerBankrollSession.find({ table_id: tableId })
+        let sessions = await TrackerBankrollSession.find({ table_id: tableId })
             .sort({ session_no: -1 }).limit(100).lean().exec();
-        const selected = (req.query.session_id
+        let selected = (req.query.session_id
             ? sessions.find(item => String(item._id) === String(req.query.session_id))
             : null) || sessions.find(item => item.status === 'active' &&
                 trackerBankPredictor(item.predictor) === trackerBankPredictor(req.query.predictor));
+        if (selected?.predictor === 'last_direction_zone_soft' && selected.status === 'active' &&
+            Number(selected.soft_settlement_version || 1) < 2) {
+            await recalibrateActiveSoftSession(selected._id);
+            sessions = await TrackerBankrollSession.find({ table_id: tableId })
+                .sort({ session_no: -1 }).limit(100).lean().exec();
+            selected = sessions.find(item => String(item._id) === String(selected._id)) || selected;
+        }
         const [entries, sessionAudits, legacyAudits] = selected ? await Promise.all([
             TrackerBankrollEntry.find({ session_id: selected._id }).sort({ created_at: -1 }).limit(30).lean().exec(),
             TrackerPredictionAudit.find({ bankroll_session_id: String(selected._id) })
@@ -1793,7 +1852,11 @@ app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
                     balance: capital,
                     chip_value: chipValue,
                     strategy_next_stake: predictor === 'last_direction_zone'
-                        ? trackerBankroll.getDirectionZoneBaseStake(chipValue, 1) : null,
+                        ? trackerBankroll.getDirectionZoneBaseStake(chipValue, 1)
+                        : predictor === 'last_direction_zone_soft'
+                            ? trackerBankroll.getSoftBlock7Stake(chipValue, 1)
+                            : null,
+                    soft_settlement_version: predictor === 'last_direction_zone_soft' ? 2 : 1,
                     status: 'draft'
                 }], { session: mongoSession });
             });
@@ -2241,6 +2304,18 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
             wheelNeighbors
         });
 
+        const needsSoftRecalibration = await TrackerBankrollSession.exists({
+            _id: req.params.sessionId,
+            table_id: tableId,
+            status: 'active',
+            predictor: 'last_direction_zone_soft',
+            $or: [
+                { soft_settlement_version: { $lt: 2 } },
+                { soft_settlement_version: { $exists: false } }
+            ]
+        }).exec();
+        if (needsSoftRecalibration) await recalibrateActiveSoftSession(req.params.sessionId);
+
         const mongoSession = await mongoose.startSession();
         let result;
         try {
@@ -2331,7 +2406,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                         );
                 }
                 const stake = isSoftStrategy
-                    ? trackerBankroll.getSoftBlock7Stake(session.chip_value, trackerBankroll.getSoftBlock7Round(session))
+                    ? trackerBankroll.getSoftBlock7Stake(
+                        session.chip_value,
+                        trackerBankroll.getSoftBlock7Round(session),
+                        strategyNextStake,
+                        session.strategy_streak_hits
+                    )
                     : sessionPredictor === 'last_direction_zone'
                     ? trackerBankroll.getDirectionZoneStake(
                         session.chip_value,
@@ -2379,8 +2459,8 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     payout: settlement.payout,
                     cycle_profit: settlement.cycleProfit,
                     strategy_metric_label: isDirectionZone ? validLastDirectionZoneMetricLabel : '',
-                    strategy_streak_hits: sessionPredictor === 'last_direction_zone' ? settlement.strategyStreakHitsForEntry : null,
-                    strategy_cycle_completed: sessionPredictor === 'last_direction_zone' ? settlement.strategyCycleCompleted : false,
+                    strategy_streak_hits: isDirectionZone ? settlement.strategyStreakHitsForEntry : null,
+                    strategy_cycle_completed: isDirectionZone ? settlement.strategyCycleCompleted : false,
                     balance_after: settlement.balanceAfter,
                     net_profit: settlement.netProfit,
                     won: settlement.won
@@ -2390,8 +2470,6 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 session.cycle_wagered = settlement.nextCycleWagered;
                 if (isDirectionZone) {
                     session.cycle_payout = settlement.nextCyclePayout;
-                }
-                if (sessionPredictor === 'last_direction_zone') {
                     session.strategy_next_stake = settlement.nextStrategyStake;
                     session.strategy_streak_hits = settlement.nextStrategyStreakHits;
                     session.strategy_streak_metric = settlement.nextStrategyStreakMetric;
@@ -2399,10 +2477,9 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 session.total_spins += 1;
                 session.total_wagered = Number((session.total_wagered + settlement.stake).toFixed(2));
                 session.total_payout = Number((session.total_payout + settlement.payout).toFixed(2));
-                if (sessionPredictor === 'last_direction_zone') {
+                if (isDirectionZone) {
                     if (settlement.strategyCycleCompleted) session.completed_cycles += 1;
-                    // For this strategy, an official win is one completed CHECK cycle,
-                    // not each individual N4 hit that contributes to the streak.
+                    // HIGH and SOFT count a win only after their full CHECK streak.
                     session.wins = Number(session.completed_cycles || 0);
                 } else if (settlement.won) {
                     session.wins += 1;

@@ -13,6 +13,7 @@ const TrackerBankrollSessionSchema = new mongoose.Schema({
     strategy_next_stake: { type: Number, default: null, min: 0 },
     strategy_streak_hits: { type: Number, default: 0, min: 0, max: 2 },
     strategy_streak_metric: { type: String, default: '' },
+    soft_settlement_version: { type: Number, default: 1, min: 1 },
     wins: { type: Number, default: 0, min: 0 },
     losses: { type: Number, default: 0, min: 0 },
     total_spins: { type: Number, default: 0, min: 0 },
