@@ -248,33 +248,17 @@
         background: rgba(0,0,0,0.22);
         border: 1px solid rgba(255,255,255,0.06);
         border-radius: 10px;
-        padding: 10px 12px;
+        padding: 8px 12px;
         font-family: var(--mono);
     }
-    .tracker-control-header {
+    .tracker-control-row {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        font-size: 0.62rem;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.8px;
-        margin-bottom: 8px;
-    }
-    .tracker-version { color: var(--text2); font-weight: 500; }
-    .tracker-status-badge {
-        font-size: 0.55rem;
-        padding: 2px 6px;
-        border-radius: 4px;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        font-weight: 700;
-    }
-    .tracker-control-row {
+        gap: 8px;
         font-size: 0.72rem;
-        color: var(--text2);
-        margin-bottom: 4px;
-        line-height: 1.3;
+        color: var(--muted);
+        line-height: 1.4;
     }
     .tracker-control-label {
         color: var(--muted);
@@ -283,8 +267,9 @@
     .tracker-control-value {
         color: #fff;
         font-weight: 600;
+        text-align: right;
     }
-    .tracker-bank-inline { color: #65ddb8; font-size: .62rem; margin-left: 6px; white-space: normal; }
+    .tracker-bank-inline { color: #65ddb8; font-size: .72rem; margin-left: 0; white-space: normal; }
     .tracker-status-active { color: var(--green); }
     .tracker-control-hint {
         color: var(--muted);
@@ -1327,13 +1312,8 @@
 
                 <!-- Tracker Control Panel -->
                 <div class="tracker-control-panel" id="tracker-control-panel">
-                    <div class="tracker-control-header">
-                        <div>Tracker Control Panel <span class="tracker-version">v1.5.0</span></div>
-                        <div class="tracker-status-badge status-placed" id="tracker-placed-badge">Placed</div>
-                    </div>
-                    <div class="tracker-control-row"><span class="tracker-control-label">Status:</span> <span class="tracker-control-value tracker-status-active" id="tracker-status-text">Active</span></div>
-                    <div class="tracker-control-row"><span class="tracker-control-label">Prediction:</span> <span class="tracker-control-value" id="tracker-prediction">--</span><span class="tracker-bank-inline" id="tracker-bank-inline"></span></div>
-                    <div class="tracker-control-row"><span class="tracker-control-label">Última salida:</span> <span class="tracker-control-value" id="tracker-last-observation">--</span></div>
+                    <div class="tracker-control-row"><span class="tracker-control-label">Predicción</span><span class="tracker-control-value" id="tracker-prediction">--</span></div>
+                    <div class="tracker-control-row"><span class="tracker-control-label">Monto</span><span class="tracker-control-value tracker-bank-inline" id="tracker-bank-inline">--</span></div>
                 </div>
 
                 <!-- Travel Chart (same style as Live) -->

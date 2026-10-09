@@ -2290,8 +2290,18 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { error: 'La tirada ya quedó atrás de la última apuesta liquidada.', status: 409 };
                     return;
                 }
+                if (sessionPredictor === 'last_direction_zone' && Number(session.total_spins || 0) >= trackerBankroll.DIRECTION_ZONE_MAX_ROUND) {
+                    const stoppedAt = new Date();
+                    session.status = 'closed';
+                    session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
+                    session.closed_at = stoppedAt;
+                    session.updated_at = stoppedAt;
+                    await session.save({ session: mongoSession });
+                    result = { session, stopped: true, round_limit_reached: true };
+                    return;
+                }
                 const stake = sessionPredictor === 'last_direction_zone'
-                    ? trackerBankroll.getDirectionZoneStake(session.chip_value, session.current_round)
+                    ? trackerBankroll.getDirectionZoneStake(session.chip_value, trackerBankroll.getDirectionZoneRound(session))
                     : trackerBankroll.getStake(session.chip_value, session.current_round);
                 if (session.balance + 1e-9 < stake) {
                     // No wager was possible for this spin. Close and persist the

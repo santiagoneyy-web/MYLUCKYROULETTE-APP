@@ -2,12 +2,7 @@ const POCKETS_PER_BET = 9;
 const HIT_RETURN_MULTIPLIER = 4;
 const DOUBLING_EVERY_ROUNDS = 2;
 const DIRECTION_ZONE_MAX_ROUND = 80;
-const DIRECTION_ZONE_STAKE_TIERS = [
-    { through: 35, multiplier: 1 },
-    { through: 55, multiplier: 2 },
-    { through: 70, multiplier: 4 },
-    { through: 80, multiplier: 8 }
-];
+const DIRECTION_ZONE_MAX_STREAK = 3;
 
 function money(value) {
     return Number(Number(value).toFixed(2));
@@ -21,26 +16,30 @@ function getStake(chipValue, round) {
 }
 
 function getDirectionZoneStake(baseStake, round) {
-    if (!Number.isFinite(baseStake) || baseStake <= 0 || !Number.isInteger(round) || round < 1 || round > DIRECTION_ZONE_MAX_ROUND) {
+    if (!Number.isFinite(baseStake) || baseStake <= 0 || !Number.isInteger(round) || round < 1 || round > DIRECTION_ZONE_MAX_STREAK) {
         throw new RangeError('Monto base y ronda de estrategia inválidos.');
     }
-    const tier = DIRECTION_ZONE_STAKE_TIERS.find(item => round <= item.through);
-    return money(baseStake * tier.multiplier);
+    return money(baseStake * HIT_RETURN_MULTIPLIER ** (round - 1));
+}
+
+function getDirectionZoneRound(session) {
+    const hits = Number(session?.strategy_streak_hits || 0);
+    return Math.min(DIRECTION_ZONE_MAX_STREAK, Math.max(1, Math.floor(hits) + 1));
 }
 
 function calculateDirectionZoneSettlement(session, number, predictionNumbers, metricLabel) {
-    const round = Number(session.current_round);
+    const round = getDirectionZoneRound(session);
     const stake = getDirectionZoneStake(Number(session.chip_value), round);
     const won = predictionNumbers.includes(number);
+    const sameMetricAsStreak = String(session.strategy_streak_metric || '') === String(metricLabel || '');
     const cycleWagered = money(Number(session.cycle_wagered || 0) + stake);
     const cyclePayout = money(Number(session.cycle_payout || 0) + (won ? stake * HIT_RETURN_MULTIPLIER : 0));
     const balanceAfter = money(Number(session.balance) - stake + (won ? stake * HIT_RETURN_MULTIPLIER : 0));
-    const sameMetricAsStreak = String(session.strategy_streak_metric || '') === String(metricLabel || '');
     const streakBeforeReset = won
         ? (sameMetricAsStreak ? Number(session.strategy_streak_hits || 0) + 1 : 1)
         : 0;
     const strategyCycleCompleted = won && streakBeforeReset >= 3;
-    const roundLimitReached = round >= DIRECTION_ZONE_MAX_ROUND;
+    const roundLimitReached = Number(session.total_spins || 0) + 1 >= DIRECTION_ZONE_MAX_ROUND;
 
     return {
         won,
@@ -52,7 +51,7 @@ function calculateDirectionZoneSettlement(session, number, predictionNumbers, me
         cycleProfit: strategyCycleCompleted ? money(cyclePayout - cycleWagered) : null,
         balanceAfter,
         netProfit: money(balanceAfter - Number(session.initial_capital)),
-        nextRound: roundLimitReached ? round : strategyCycleCompleted ? 1 : round + 1,
+        nextRound: roundLimitReached ? round : strategyCycleCompleted || !won ? 1 : Math.min(DIRECTION_ZONE_MAX_STREAK, streakBeforeReset + 1),
         nextCycleWagered: strategyCycleCompleted ? 0 : cycleWagered,
         nextCyclePayout: strategyCycleCompleted ? 0 : cyclePayout,
         nextStrategyStreakHits: strategyCycleCompleted ? 0 : streakBeforeReset,
@@ -97,6 +96,7 @@ module.exports = {
     DIRECTION_ZONE_MAX_ROUND,
     getStake,
     getDirectionZoneStake,
+    getDirectionZoneRound,
     calculateDirectionZoneSettlement,
     calculateSettlement,
     getSessionOutcome
