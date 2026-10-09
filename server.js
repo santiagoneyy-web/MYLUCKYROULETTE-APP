@@ -18,6 +18,8 @@ const { buildTrackerReport } = require('./src/engine/tracker_reporting');
 const { buildTrackerPredictionReview } = require('./src/engine/tracker_postmortem');
 const predictor = require('./src/engine/predictor'); // Agents 1-4
 const { WHEEL_ORDER, WHEEL_INDEX } = predictor;
+const TRACKER_BANK_PREDICTORS = new Set(['system', 'system_pattern', 'last_direction_zone', 'ai']);
+const trackerBankPredictor = value => TRACKER_BANK_PREDICTORS.has(value) ? value : 'system';
 const agent5  = require('./src/engine/agent5');      // Autonomous AI & Physics
 const axios   = require('axios');
 const strategyStore = require('./src/engine/strategy_store');
@@ -1698,7 +1700,7 @@ async function loadTrackerReport(tableId, options = {}) {
     }
     const [audits, entries] = await Promise.all([
         TrackerPredictionAudit.find({ bankroll_session_id: { $in: sessionIds } })
-            .select('bankroll_session_id bankroll_session_no spin_id latest_number prediction_mode system_center system_status system_metric_label system_reasoning system_won system_pattern_center system_pattern_status system_pattern_metric_label system_pattern_reasoning system_pattern_won ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won analyst_model analyst_status analyst_summary analyst_error prediction_review result_spin_id result_number audited_at created_at')
+            .select('bankroll_session_id bankroll_session_no spin_id latest_number prediction_mode system_center system_status system_metric_label system_reasoning system_won system_pattern_center system_pattern_status system_pattern_metric_label system_pattern_reasoning system_pattern_won last_direction_zone_center last_direction_zone_status last_direction_zone_metric_label last_direction_zone_reasoning last_direction_zone_won ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won analyst_model analyst_status analyst_summary analyst_error prediction_review result_spin_id result_number audited_at created_at')
             .lean().exec(),
         TrackerBankrollEntry.find({ session_id: { $in: selectedSessions.map(session => session._id) } })
             .select('session_id session_no spin_key number context_snapshot created_at')
@@ -1734,8 +1736,7 @@ app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
         const selected = (req.query.session_id
             ? sessions.find(item => String(item._id) === String(req.query.session_id))
             : null) || sessions.find(item => item.status === 'active' &&
-                (['ai', 'system_pattern'].includes(item.predictor) ? item.predictor : 'system') ===
-                (['ai', 'system_pattern'].includes(req.query.predictor) ? req.query.predictor : 'system'));
+                trackerBankPredictor(item.predictor) === trackerBankPredictor(req.query.predictor));
         const [entries, sessionAudits, legacyAudits] = selected ? await Promise.all([
             TrackerBankrollEntry.find({ session_id: selected._id }).sort({ created_at: -1 }).limit(30).lean().exec(),
             TrackerPredictionAudit.find({ bankroll_session_id: String(selected._id) })
@@ -1743,7 +1744,7 @@ app.get('/api/tracker/bankroll/:tableId', async (req, res) => {
                 .lean().exec(),
             TrackerAnalystSnapshot.find({ bankroll_session_id: String(selected._id) })
                 .sort({ updated_at: -1 }).limit(500)
-                .select('spin_id latest_number analyst_model analyst_status analyst_summary analyst_error bankroll_session_id bankroll_session_no prediction_mode prediction_source forecast_history_length system_center system_status system_metric_label system_reasoning system_won system_reward system_pattern_center system_pattern_status system_pattern_metric_label system_pattern_reasoning system_pattern_won system_pattern_reward ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won ai_reward result_spin_id result_number audited_at updated_at')
+                .select('spin_id latest_number analyst_model analyst_status analyst_summary analyst_error bankroll_session_id bankroll_session_no prediction_mode prediction_source forecast_history_length system_center system_status system_metric_label system_reasoning system_won system_reward system_pattern_center system_pattern_status system_pattern_metric_label system_pattern_reasoning system_pattern_won system_pattern_reward last_direction_zone_center last_direction_zone_status last_direction_zone_metric_label last_direction_zone_reasoning last_direction_zone_won last_direction_zone_reward ai_center ai_metric_label ai_model ai_reasoning ai_status ai_won ai_reward result_spin_id result_number audited_at updated_at')
                 .lean().exec()
         ]) : [[], [], []];
         const auditByForecast = new Map();
@@ -1764,7 +1765,7 @@ app.post('/api/tracker/bankroll/:tableId', async (req, res) => {
     let sessionNo = req.body.session_no === undefined ? null : Number(req.body.session_no);
     const capital = Number(req.body.initial_capital);
     const chipValue = Number(req.body.chip_value);
-    const predictor = ['ai', 'system_pattern'].includes(req.body.predictor) ? req.body.predictor : 'system';
+    const predictor = trackerBankPredictor(req.body.predictor);
     if (!Number.isInteger(tableId) || (sessionNo !== null && (!Number.isInteger(sessionNo) || sessionNo < 1)) ||
         !Number.isFinite(capital) || capital <= 0 || !Number.isFinite(chipValue) || chipValue <= 0) {
         return res.status(400).json({ error: 'Ingresa un capital y valor de ficha válidos.' });
@@ -1820,7 +1821,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/activate', async (req, res) 
                     selected.start_spin_id = Number(latestSpin?.id || 0);
                     selected.last_settled_spin_id = selected.start_spin_id;
                 }
-                const predictor = ['ai', 'system_pattern'].includes(selected.predictor) ? selected.predictor : 'system';
+                const predictor = trackerBankPredictor(selected.predictor);
                 await TrackerBankrollSession.updateMany(
                     {
                         table_id: tableId, status: 'active',
@@ -1873,6 +1874,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/forecast', async (req, res) 
         const labels = new Set(['CW_N9', 'CCW_N9', 'CW_N4S', 'CW_N4B', 'CCW_N4S', 'CCW_N4B']);
         const systemCenter = center(raw.system_center);
         const systemPatternCenter = center(raw.system_pattern_center);
+        const lastDirectionZoneCenter = center(raw.last_direction_zone_center);
         const aiCenter = center(raw.ai_center);
         const previous = await TrackerPredictionAudit.findOne({ table_id: tableId, bankroll_session_id: String(session._id), spin_id: baseSpinId })
             .select('result_number').lean().exec();
@@ -1882,6 +1884,7 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/forecast', async (req, res) 
             ? null : wheelNeighbors(candidate, 4).includes(resultNumber);
         const systemWon = hit(systemCenter);
         const systemPatternWon = hit(systemPatternCenter);
+        const lastDirectionZoneWon = hit(lastDirectionZoneCenter);
         const aiWon = hit(aiCenter);
         const forecast = await TrackerPredictionAudit.findOneAndUpdate(
             { table_id: tableId, bankroll_session_id: String(session._id), spin_id: baseSpinId },
@@ -1911,6 +1914,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/forecast', async (req, res) 
                     system_pattern_reasoning: systemPatternCenter === null ? null : (raw.system_pattern_reasoning || null),
                     system_pattern_won: systemPatternWon,
                     system_pattern_reward: systemPatternWon === null ? null : systemPatternWon ? 1 : -1,
+                    last_direction_zone_center: lastDirectionZoneCenter,
+                    last_direction_zone_status: lastDirectionZoneCenter === null ? (['late', 'no_signal'].includes(raw.last_direction_zone_status) ? raw.last_direction_zone_status : 'unavailable') : 'ready',
+                    last_direction_zone_metric_label: labels.has(raw.last_direction_zone_metric_label) ? raw.last_direction_zone_metric_label : '',
+                    last_direction_zone_reasoning: lastDirectionZoneCenter === null ? null : (raw.last_direction_zone_reasoning || null),
+                    last_direction_zone_won: lastDirectionZoneWon,
+                    last_direction_zone_reward: lastDirectionZoneWon === null ? null : lastDirectionZoneWon ? 1 : -1,
                     ai_center: aiCenter,
                     ai_metric_label: labels.has(raw.ai_metric_label) ? raw.ai_metric_label : '',
                     ai_model: aiCenter === null ? '' : String(raw.ai_model || '').slice(0, 120),
@@ -1964,6 +1973,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/forecast', async (req, res) 
                 system_pattern_reasoning: savedForecast.system_pattern_reasoning,
                 system_pattern_won: savedForecast.system_pattern_won,
                 system_pattern_reward: savedForecast.system_pattern_reward,
+                last_direction_zone_center: savedForecast.last_direction_zone_center,
+                last_direction_zone_status: savedForecast.last_direction_zone_status,
+                last_direction_zone_metric_label: savedForecast.last_direction_zone_metric_label,
+                last_direction_zone_reasoning: savedForecast.last_direction_zone_reasoning,
+                last_direction_zone_won: savedForecast.last_direction_zone_won,
+                last_direction_zone_reward: savedForecast.last_direction_zone_reward,
                 ai_center: savedForecast.ai_center,
                 ai_metric_label: savedForecast.ai_metric_label,
                 ai_model: savedForecast.ai_model,
@@ -2084,19 +2099,24 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
     const rawContext = req.body.context_snapshot && typeof req.body.context_snapshot === 'object' ? req.body.context_snapshot : {};
     const systemCenter = rawContext.system_center == null ? null : Number(rawContext.system_center);
     const systemPatternCenter = rawContext.system_pattern_center == null ? null : Number(rawContext.system_pattern_center);
+    const lastDirectionZoneCenter = rawContext.last_direction_zone_center == null ? null : Number(rawContext.last_direction_zone_center);
     const aiCenter = rawContext.ai_center == null ? null : Number(rawContext.ai_center);
     const validSystemCenter = Number.isInteger(systemCenter) && systemCenter >= 0 && systemCenter <= 36 ? systemCenter : null;
     const validSystemPatternCenter = Number.isInteger(systemPatternCenter) && systemPatternCenter >= 0 && systemPatternCenter <= 36 ? systemPatternCenter : null;
+    const validLastDirectionZoneCenter = Number.isInteger(lastDirectionZoneCenter) && lastDirectionZoneCenter >= 0 && lastDirectionZoneCenter <= 36 ? lastDirectionZoneCenter : null;
     const validAiCenter = Number.isInteger(aiCenter) && aiCenter >= 0 && aiCenter <= 36 ? aiCenter : null;
     const validMetricLabels = new Set(['CW_N9', 'CCW_N9', 'CW_N4S', 'CW_N4B', 'CCW_N4S', 'CCW_N4B']);
     const validPredictionMode = ['n4', 'n9', 'both'].includes(rawContext.prediction_mode) ? rawContext.prediction_mode : null;
     const validSystemMetricLabel = validMetricLabels.has(rawContext.system_metric_label) ? rawContext.system_metric_label : null;
     const validSystemPatternMetricLabel = validMetricLabels.has(rawContext.system_pattern_metric_label) ? rawContext.system_pattern_metric_label : null;
+    const validLastDirectionZoneMetricLabel = ['CW_N4S', 'CW_N4B', 'CCW_N4S', 'CCW_N4B'].includes(rawContext.last_direction_zone_metric_label)
+        ? rawContext.last_direction_zone_metric_label : null;
     const validAiMetricLabel = validMetricLabels.has(rawContext.ai_metric_label) ? rawContext.ai_metric_label : null;
     const forecastBaseSpinId = Number.isInteger(Number(rawContext.forecast_base_spin_id)) && Number(rawContext.forecast_base_spin_id) > 0
         ? Number(rawContext.forecast_base_spin_id) : null;
     const systemWon = validSystemCenter !== null ? wheelNeighbors(validSystemCenter, 4).includes(number) : null;
     const systemPatternWon = validSystemPatternCenter !== null ? wheelNeighbors(validSystemPatternCenter, 4).includes(number) : null;
+    const lastDirectionZoneWon = validLastDirectionZoneCenter !== null ? wheelNeighbors(validLastDirectionZoneCenter, 4).includes(number) : null;
     const aiWon = validAiCenter !== null ? wheelNeighbors(validAiCenter, 4).includes(number) : null;
     const rawSystemReasoning = rawContext.system_reasoning && typeof rawContext.system_reasoning === 'object'
         ? rawContext.system_reasoning : {};
@@ -2154,6 +2174,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
         system_pattern_reasoning: rawSystemPatternReasoning,
         system_pattern_won: systemPatternWon,
         system_pattern_reward: systemPatternWon === null ? null : systemPatternWon ? 1 : -1,
+        last_direction_zone_center: validLastDirectionZoneCenter,
+        last_direction_zone_metric_label: validLastDirectionZoneMetricLabel,
+        last_direction_zone_status: validLastDirectionZoneCenter === null ? (['late', 'no_signal'].includes(rawContext.last_direction_zone_status) ? rawContext.last_direction_zone_status : 'unavailable') : 'ready',
+        last_direction_zone_reasoning: validLastDirectionZoneCenter === null ? null : (rawContext.last_direction_zone_reasoning || null),
+        last_direction_zone_won: lastDirectionZoneWon,
+        last_direction_zone_reward: lastDirectionZoneWon === null ? null : lastDirectionZoneWon ? 1 : -1,
         ai_center: validAiCenter,
         ai_metric_label: validAiMetricLabel,
         ai_model: validAiCenter === null ? null : String(rawContext.ai_model || '').slice(0, 120),
@@ -2226,12 +2252,15 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { error: 'No hay una sesión activa para esta mesa.', status: 409 };
                     return;
                 }
-                const sessionPredictor = ['ai', 'system_pattern'].includes(session.predictor) ? session.predictor : 'system';
+                const sessionPredictor = trackerBankPredictor(session.predictor);
                 const expectedCenter = sessionPredictor === 'ai' ? validAiCenter
-                    : sessionPredictor === 'system_pattern' ? validSystemPatternCenter : validSystemCenter;
-                if (expectedCenter === null || predictionCenter !== expectedCenter) {
+                    : sessionPredictor === 'system_pattern' ? validSystemPatternCenter
+                        : sessionPredictor === 'last_direction_zone' ? validLastDirectionZoneCenter : validSystemCenter;
+                if (expectedCenter === null || predictionCenter !== expectedCenter ||
+                    (sessionPredictor === 'last_direction_zone' && !validLastDirectionZoneMetricLabel)) {
                     const predictorName = sessionPredictor === 'ai' ? 'IA'
-                        : sessionPredictor === 'system_pattern' ? 'SISTEMA PATRÓN' : 'SISTEMA TODAS';
+                        : sessionPredictor === 'system_pattern' ? 'SISTEMA PATRÓN'
+                            : sessionPredictor === 'last_direction_zone' ? 'ÚLTIMA DIRECCIÓN + ZONA' : 'SISTEMA TODAS';
                     result = { error: `La predicción no corresponde a la sesión ${predictorName}.`, status: 409 };
                     return;
                 }
@@ -2261,7 +2290,9 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { error: 'La tirada ya quedó atrás de la última apuesta liquidada.', status: 409 };
                     return;
                 }
-                const stake = trackerBankroll.getStake(session.chip_value, session.current_round);
+                const stake = sessionPredictor === 'last_direction_zone'
+                    ? trackerBankroll.getDirectionZoneStake(session.chip_value, session.current_round)
+                    : trackerBankroll.getStake(session.chip_value, session.current_round);
                 if (session.balance + 1e-9 < stake) {
                     // No wager was possible for this spin. Close and persist the
                     // bankroll session, but do not count the spin as a bet/loss.
@@ -2275,7 +2306,9 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     result = { session, stopped: true, insufficient_capital: true };
                     return;
                 }
-                const settlement = trackerBankroll.calculateSettlement(session, number, predictionNumbers);
+                const settlement = sessionPredictor === 'last_direction_zone'
+                    ? trackerBankroll.calculateDirectionZoneSettlement(session, number, predictionNumbers, validLastDirectionZoneMetricLabel)
+                    : trackerBankroll.calculateSettlement(session, number, predictionNumbers);
                 const [entry] = await TrackerBankrollEntry.create([{
                     session_id: session._id,
                     session_no: session.session_no,
@@ -2289,8 +2322,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                     round: settlement.round,
                     stake: settlement.stake,
                     cycle_wagered: settlement.cycleWagered,
+                    cycle_payout: settlement.cyclePayout ?? 0,
                     payout: settlement.payout,
                     cycle_profit: settlement.cycleProfit,
+                    strategy_metric_label: sessionPredictor === 'last_direction_zone' ? validLastDirectionZoneMetricLabel : '',
+                    strategy_streak_hits: sessionPredictor === 'last_direction_zone' ? settlement.strategyStreakHitsForEntry : null,
+                    strategy_cycle_completed: sessionPredictor === 'last_direction_zone' ? settlement.strategyCycleCompleted : false,
                     balance_after: settlement.balanceAfter,
                     net_profit: settlement.netProfit,
                     won: settlement.won
@@ -2298,14 +2335,26 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 session.balance = settlement.balanceAfter;
                 session.current_round = settlement.nextRound;
                 session.cycle_wagered = settlement.nextCycleWagered;
+                if (sessionPredictor === 'last_direction_zone') {
+                    session.cycle_payout = settlement.nextCyclePayout;
+                    session.strategy_streak_hits = settlement.nextStrategyStreakHits;
+                    session.strategy_streak_metric = settlement.nextStrategyStreakMetric;
+                }
                 session.total_spins += 1;
                 session.total_wagered = Number((session.total_wagered + settlement.stake).toFixed(2));
                 session.total_payout = Number((session.total_payout + settlement.payout).toFixed(2));
                 if (settlement.won) {
                     session.wins += 1;
-                    session.completed_cycles += 1;
+                    if (sessionPredictor !== 'last_direction_zone' || settlement.strategyCycleCompleted) {
+                        session.completed_cycles += 1;
+                    }
                 } else {
                     session.losses += 1;
+                }
+                if (sessionPredictor === 'last_direction_zone' && settlement.roundLimitReached) {
+                    session.status = 'closed';
+                    session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
+                    session.closed_at = new Date();
                 }
                 session.updated_at = new Date();
                 session.last_settled_spin_id = spinId;
@@ -2360,12 +2409,15 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
         const previous = await TrackerPredictionAudit.findOne(key).lean().exec();
         const systemCenter = center(raw.system_center) ?? center(previous?.system_center);
         const systemPatternCenter = center(raw.system_pattern_center) ?? center(previous?.system_pattern_center);
+        const lastDirectionZoneCenter = center(raw.last_direction_zone_center) ?? center(previous?.last_direction_zone_center);
         const aiCenter = center(raw.ai_center) ?? center(previous?.ai_center);
         const systemWon = systemCenter === null ? null : wheelNeighbors(systemCenter, 4).includes(resultNumber);
         const systemPatternWon = systemPatternCenter === null ? null : wheelNeighbors(systemPatternCenter, 4).includes(resultNumber);
+        const lastDirectionZoneWon = lastDirectionZoneCenter === null ? null : wheelNeighbors(lastDirectionZoneCenter, 4).includes(resultNumber);
         const aiWon = aiCenter === null ? null : wheelNeighbors(aiCenter, 4).includes(resultNumber);
         const systemReasoning = raw.system_reasoning || previous?.system_reasoning || null;
         const systemPatternReasoning = raw.system_pattern_reasoning || previous?.system_pattern_reasoning || null;
+        const lastDirectionZoneReasoning = raw.last_direction_zone_reasoning || previous?.last_direction_zone_reasoning || null;
         const aiReasoning = String(raw.ai_reasoning || previous?.ai_reasoning || '').slice(0, 1800);
         const predictionReview = buildTrackerPredictionReview({
             previousNumber: Number(baseSpin.number),
@@ -2410,6 +2462,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
                     system_pattern_reasoning: systemPatternCenter === null ? previous?.system_pattern_reasoning || null : systemPatternReasoning,
                     system_pattern_won: systemPatternWon,
                     system_pattern_reward: systemPatternWon === null ? null : systemPatternWon ? 1 : -1,
+                    last_direction_zone_center: lastDirectionZoneCenter,
+                    last_direction_zone_status: lastDirectionZoneCenter === null ? (['late', 'no_signal'].includes(raw.last_direction_zone_status) ? raw.last_direction_zone_status : previous?.last_direction_zone_status || 'unavailable') : 'ready',
+                    last_direction_zone_metric_label: ['CW_N4S', 'CW_N4B', 'CCW_N4S', 'CCW_N4B'].includes(raw.last_direction_zone_metric_label) ? raw.last_direction_zone_metric_label : previous?.last_direction_zone_metric_label || '',
+                    last_direction_zone_reasoning: lastDirectionZoneCenter === null ? previous?.last_direction_zone_reasoning || null : lastDirectionZoneReasoning,
+                    last_direction_zone_won: lastDirectionZoneWon,
+                    last_direction_zone_reward: lastDirectionZoneWon === null ? null : lastDirectionZoneWon ? 1 : -1,
                     ai_center: aiCenter,
                     ai_metric_label: labels.has(raw.ai_metric_label) ? raw.ai_metric_label : previous?.ai_metric_label || '',
                     ai_model: aiCenter === null ? previous?.ai_model || '' : String(raw.ai_model || previous?.ai_model || '').slice(0, 120),
@@ -2473,6 +2531,12 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/audit', async (req, res) => 
                 system_pattern_reasoning: savedAudit.system_pattern_reasoning,
                 system_pattern_won: savedAudit.system_pattern_won,
                 system_pattern_reward: savedAudit.system_pattern_reward,
+                last_direction_zone_center: savedAudit.last_direction_zone_center,
+                last_direction_zone_status: savedAudit.last_direction_zone_status,
+                last_direction_zone_metric_label: savedAudit.last_direction_zone_metric_label,
+                last_direction_zone_reasoning: savedAudit.last_direction_zone_reasoning,
+                last_direction_zone_won: savedAudit.last_direction_zone_won,
+                last_direction_zone_reward: savedAudit.last_direction_zone_reward,
                 ai_center: savedAudit.ai_center,
                 ai_metric_label: savedAudit.ai_metric_label,
                 ai_model: savedAudit.ai_model,

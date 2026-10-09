@@ -486,13 +486,14 @@ function trackerBankHasActiveSessions() {
 }
 
 function trackerBankSessionPredictor(session) {
-    return ['ai', 'system_pattern'].includes(session?.predictor) ? session.predictor : 'system';
+    return ['ai', 'system_pattern', 'last_direction_zone'].includes(session?.predictor) ? session.predictor : 'system';
 }
 
 function trackerBankPredictorLabel(predictor) {
     return ({
         system: 'SISTEMA · TODAS',
         system_pattern: 'SISTEMA · PATRÓN',
+        last_direction_zone: 'ÚLTIMA DIRECCIÓN + ZONA',
         ai: 'IA'
     })[predictor] || 'SISTEMA · TODAS';
 }
@@ -619,6 +620,11 @@ function trackerBankStake(chip, round) {
     return Number((chip * 9 * 2 ** Math.floor((round - 1) / 2)).toFixed(2));
 }
 
+function trackerBankDirectionZoneStake(baseStake, round) {
+    const multiplier = round <= 35 ? 1 : round <= 55 ? 2 : round <= 70 ? 4 : 8;
+    return Number((baseStake * multiplier).toFixed(2));
+}
+
 function trackerBankPredictionNumbers() {
     const center = trackerBankPredictionCenter(trackerBankView);
     if (center === null || typeof wheelNeighbors !== 'function') return [];
@@ -628,6 +634,7 @@ function trackerBankPredictionNumbers() {
 
 function trackerBankPredictionCenter(predictor = trackerPredictionSource) {
     if (!trackerBankActiveSession(predictor)) return null;
+    if (predictor === 'last_direction_zone') return trackerLastDirectionZoneMetric()?.number ?? null;
     if (predictor === 'ai') {
         return trackerAiN4Center !== null && Number.isInteger(trackerAiN4Center) &&
             trackerAiPredictionHistoryLength === trackerHistory.length ? trackerAiN4Center : null;
@@ -635,6 +642,48 @@ function trackerBankPredictionCenter(predictor = trackerPredictionSource) {
     return predictor === 'system_pattern'
         ? trackerSystemPatternPredictionCenter()
         : trackerSystemPredictionCenter();
+}
+
+function trackerLastDirectionZoneMetric() {
+    if (!trackerLastSignal || trackerHistory.length < 2) return null;
+    let lastDistance = null;
+    for (let index = trackerHistory.length - 1; index > 0; index--) {
+        const distance = calcDist(trackerHistory[index - 1], trackerHistory[index]);
+        if (Number.isFinite(distance) && distance !== 0) {
+            lastDistance = distance;
+            break;
+        }
+    }
+    if (lastDistance === null) return null;
+    const direction = lastDistance > 0 ? 'CW' : 'CCW';
+    const zone = Math.abs(lastDistance) >= 10 ? 'B' : 'S';
+    const label = `${direction}_N4${zone}`;
+    return trackerPredictionMetricCandidates('n4').find(metric => metric.label === label) || null;
+}
+
+function trackerLastDirectionZoneReasoning(metric) {
+    if (!metric) return null;
+    let distance = null;
+    for (let index = trackerHistory.length - 1; index > 0; index--) {
+        const candidate = calcDist(trackerHistory[index - 1], trackerHistory[index]);
+        if (Number.isFinite(candidate) && candidate !== 0) {
+            distance = candidate;
+            break;
+        }
+    }
+    if (distance === null) return null;
+    const direction = distance > 0 ? 'CW' : 'CCW';
+    const zone = Math.abs(distance) >= 10 ? 'BIG' : 'SMALL';
+    return {
+        policy: 'repeat_last_direction_and_zone_until_three_consecutive_hits',
+        metric_label: metric.label,
+        selected_target: metric.number,
+        direction,
+        zone,
+        last_signed_distance: distance,
+        previous_number: Number(trackerHistory[trackerHistory.length - 2]),
+        latest_number: Number(trackerHistory[trackerHistory.length - 1])
+    };
 }
 
 function trackerPredictionMetricFamilies(mode = trackerConfig.prediction) {
@@ -855,6 +904,7 @@ function trackerSystemReasoningSnapshot(patternOnly = false) {
 function trackerPredictionAuditSnapshot(targetSpinId = null, forecastAvailable = true) {
     const systemMetric = forecastAvailable ? trackerSystemPredictionMetric() : null;
     const systemPatternMetric = forecastAvailable ? trackerSystemPatternPredictionMetric() : null;
+    const lastDirectionZoneMetric = forecastAvailable ? trackerLastDirectionZoneMetric() : null;
     const aiReady = forecastAvailable && Number.isInteger(trackerAiN4Center) && trackerAiPredictionHistoryLength === trackerHistory.length;
     const reasoningText = String(trackerAiPredictionReasoning || '');
     const correctedMetricLabel = reasoningText.match(/se auditó como\s+([A-Z0-9_]+)/i)?.[1]?.toUpperCase() || null;
@@ -880,6 +930,10 @@ function trackerPredictionAuditSnapshot(targetSpinId = null, forecastAvailable =
         system_pattern_metric_label: systemPatternMetric?.label || null,
         system_pattern_status: systemPatternMetric ? 'ready' : forecastAvailable ? 'no_signal' : 'late',
         system_pattern_reasoning: forecastAvailable ? trackerSystemReasoningSnapshot(true) : null,
+        last_direction_zone_center: lastDirectionZoneMetric?.number ?? null,
+        last_direction_zone_metric_label: lastDirectionZoneMetric?.label || null,
+        last_direction_zone_status: lastDirectionZoneMetric ? 'ready' : forecastAvailable ? 'no_signal' : 'late',
+        last_direction_zone_reasoning: forecastAvailable ? trackerLastDirectionZoneReasoning(lastDirectionZoneMetric) : null,
         ai_center: aiReady ? trackerAiN4Center : null,
         ai_metric_label: aiMetric?.label || null,
         ai_model: aiReady ? trackerAiPredictionModel : null,
@@ -975,16 +1029,23 @@ function renderTrackerBankroll() {
     const capital = Number(session?.initial_capital || 0);
     const balance = Number(session?.balance || 0);
     const profit = Number((balance - capital).toFixed(2));
-    const chipInput = Number(document.getElementById('tracker-bank-chip')?.value);
+    const isDirectionZone = trackerBankView === 'last_direction_zone';
+    const chipInput = Number(document.getElementById(isDirectionZone ? 'tracker-bank-strategy-base' : 'tracker-bank-chip')?.value);
     const chip = Number(active ? session.chip_value : session?.chip_value || chipInput || 0.5);
     const round = active ? Number(session.current_round || 1) : 1;
-    const stake = trackerBankStake(chip, round);
+    const stake = isDirectionZone ? trackerBankDirectionZoneStake(chip, round) : trackerBankStake(chip, round);
     const cycle = active ? Number(session.cycle_wagered || 0) : 0;
+    const cyclePayout = active ? Number(session.cycle_payout || 0) : 0;
     const roundTotal = Number((cycle + stake).toFixed(2));
     const grossReturn = Number((stake * 4).toFixed(2));
-    const possibleProfit = Number((stake * 4 - cycle - stake).toFixed(2));
+    const possibleProfit = Number(((isDirectionZone ? cyclePayout : 0) + stake * 4 - cycle - stake).toFixed(2));
     const pred = trackerBankPredictionNumbers();
-    const waitingForPattern = active && trackerBankSessionPredictor(session) === 'system_pattern' && pred.length !== 9;
+    const predictor = active ? trackerBankSessionPredictor(session) : trackerBankView;
+    const waitingForPattern = active && predictor === 'system_pattern' && pred.length !== 9;
+    const strategyMetric = isDirectionZone ? trackerLastDirectionZoneMetric() : null;
+    const strategyStreak = active && predictor === 'last_direction_zone'
+        ? `${Number(session.strategy_streak_hits || 0)} / 3${session.strategy_streak_metric ? ` · ${session.strategy_streak_metric}` : ''}`
+        : '--';
     const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     set('tracker-bank-capital-value', session ? trackerBankMoney(capital) : '--');
     set('tracker-bank-balance', session ? trackerBankMoney(balance) : '--');
@@ -998,8 +1059,9 @@ function renderTrackerBankroll() {
     set('tracker-bank-gross-return', active && !waitingForPattern ? trackerBankMoney(grossReturn) : '--');
     set('tracker-bank-win-profit', active && !waitingForPattern ? trackerBankMoney(possibleProfit) : '--');
     set('tracker-bank-prediction', active && trackerSource === 'live'
-        ? pred.length ? `N4: ${pred.join(', ')}` : trackerBankView === 'system_pattern' ? 'ANALIZANDO ?' : '--'
+        ? pred.length ? `${predictor === 'last_direction_zone' ? `${strategyMetric?.label || 'N4'} · ` : ''}N4: ${pred.join(', ')}` : predictor === 'system_pattern' ? 'ANALIZANDO ?' : predictor === 'last_direction_zone' ? 'Esperando giro anterior' : '--'
         : '--');
+    set('tracker-bank-strategy-streak', strategyStreak);
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / --');
     set('tracker-bank-started', session ? trackerBankDate(session.starts_at || session.created_at) : '--');
     set('tracker-bank-ended', session?.closed_at ? trackerBankDate(session.closed_at) : session ? (session.status === 'draft' ? 'Sin iniciar' : 'En curso') : '--');
@@ -1008,10 +1070,14 @@ function renderTrackerBankroll() {
         start.style.display = canStart ? 'block' : 'none';
         start.textContent = `Iniciar sesión ${trackerBankPredictorLabel(trackerBankView)}`;
     }
-    ['tracker-bank-capital', 'tracker-bank-chip'].forEach(id => {
+    ['tracker-bank-capital', 'tracker-bank-chip', 'tracker-bank-strategy-base'].forEach(id => {
         const input = document.getElementById(id);
         if (input) input.disabled = active;
     });
+    const regularChipField = document.getElementById('tracker-bank-chip-field');
+    const strategyBaseField = document.getElementById('tracker-bank-strategy-base-field');
+    if (regularChipField) regularChipField.style.display = isDirectionZone ? 'none' : 'grid';
+    if (strategyBaseField) strategyBaseField.style.display = isDirectionZone ? 'grid' : 'none';
     const finish = document.getElementById('tracker-bank-finish');
     if (finish) finish.style.display = active ? 'block' : 'none';
     const inline = document.getElementById('tracker-bank-inline');
@@ -1028,7 +1094,10 @@ function renderTrackerBankroll() {
         ? trackerBankEntries.slice(-30).reverse().map(entry => {
             const prediction = Array.isArray(entry.prediction_numbers) ? entry.prediction_numbers.join(', ') : '';
             const center = Number.isInteger(Number(entry.prediction_center)) ? Number(entry.prediction_center) : '--';
-            return `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td title="N4 ${center}: ${prediction}">${center} → ${entry.number} ${entry.won ? '✓' : '×'}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`;
+            const metric = entry.strategy_metric_label ? ` · ${entry.strategy_metric_label}` : '';
+            const streak = entry.strategy_metric_label ? ` · racha ${entry.strategy_streak_hits || 0}/3` : '';
+            const check = entry.strategy_cycle_completed ? ' · CHECK' : '';
+            return `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td title="N4 ${center}: ${prediction}${metric}${streak}${check}">${center} → ${entry.number} ${entry.won ? '✓' : '×'}${entry.strategy_cycle_completed ? ' CHECK' : ''}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`;
         }).join('')
         : '<tr><td colspan="6" style="text-align:center">Sin resultados guardados</td></tr>';
     const auditLedger = document.getElementById('tracker-bank-audit-ledger');
@@ -1042,13 +1111,13 @@ function renderTrackerBankroll() {
         const grouped = ['n4', 'n9', 'both'].map(mode => {
             const audits = trackerBankAudits.filter(audit => audit.prediction_mode === mode);
             if (!audits.length) return '';
-            const evaluated = audits.some(audit => typeof audit.system_won === 'boolean' || typeof audit.system_pattern_won === 'boolean' || typeof audit.ai_won === 'boolean');
+            const evaluated = audits.some(audit => typeof audit.system_won === 'boolean' || typeof audit.system_pattern_won === 'boolean' || typeof audit.last_direction_zone_won === 'boolean' || typeof audit.ai_won === 'boolean');
             return evaluated
-                ? `${mode.toUpperCase()} · SISTEMA TODAS ${score(audits, 'system')} · SISTEMA PATRÓN ${score(audits, 'system_pattern')} · IA ${score(audits, 'ai')}`
+                ? `${mode.toUpperCase()} · SISTEMA TODAS ${score(audits, 'system')} · SISTEMA PATRÓN ${score(audits, 'system_pattern')} · ÚLTIMA DIR + ZONA ${score(audits, 'last_direction_zone')} · IA ${score(audits, 'ai')}`
                 : `${mode.toUpperCase()} · pronósticos guardados, esperando giros reales`;
         }).filter(Boolean);
         const unknownMode = trackerBankAudits.filter(audit => !['n4', 'n9', 'both'].includes(audit.prediction_mode));
-        if (unknownMode.length) grouped.push(`SIN FILTRO ANTIGUO · SISTEMA TODAS ${score(unknownMode, 'system')} · SISTEMA PATRÓN ${score(unknownMode, 'system_pattern')} · IA ${score(unknownMode, 'ai')}`);
+        if (unknownMode.length) grouped.push(`SIN FILTRO ANTIGUO · SISTEMA TODAS ${score(unknownMode, 'system')} · SISTEMA PATRÓN ${score(unknownMode, 'system_pattern')} · ÚLTIMA DIR + ZONA ${score(unknownMode, 'last_direction_zone')} · IA ${score(unknownMode, 'ai')}`);
         auditSummary.textContent = grouped.length ? grouped.join(' | ') : 'La comparación se completa cuando llegue el primer giro real.';
     }
     if (auditLedger) auditLedger.innerHTML = trackerBankAudits.length
@@ -1078,10 +1147,11 @@ function renderTrackerBankroll() {
             if (!report) report = audit.analyst_status === 'pending' ? 'Analizando' : audit.analyst_status === 'failed' ? (audit.analyst_error || 'Informe no disponible') : 'Sin hallazgo';
             const systemReasoning = audit.system_reasoning ? JSON.stringify(audit.system_reasoning).slice(0, 1000) : 'Sin razonamiento guardado.';
             const systemPatternReasoning = audit.system_pattern_reasoning ? JSON.stringify(audit.system_pattern_reasoning).slice(0, 1000) : 'Sin razonamiento guardado.';
+            const lastDirectionZoneReasoning = audit.last_direction_zone_reasoning ? JSON.stringify(audit.last_direction_zone_reasoning).slice(0, 1000) : 'Sin razonamiento guardado.';
             const aiReasoning = audit.ai_reasoning || 'Sin razonamiento IA guardado.';
-            return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.system_pattern_center, audit.system_pattern_metric_label, audit.system_pattern_won, audit.system_pattern_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA TODAS:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Razonamiento SISTEMA PATRÓN:</b> ${trackerEscapeHtml(systemPatternReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}${reviewLesson ? `<br><b>Revisión del resultado:</b> ${trackerEscapeHtml(reviewLesson)}` : ''}${reviewAxes ? `<br>${trackerEscapeHtml(reviewAxes)}` : ''}${audit.analyst_error ? `<br><b>Error Qwen:</b> ${trackerEscapeHtml(audit.analyst_error)}` : ''}</div></details></td></tr>`;
+            return `<tr><td>${Number(audit.result_spin_id || audit.spin_id || '--')}</td><td>${trackerEscapeHtml(String(audit.prediction_mode || '--').toUpperCase())}</td><td>${audit.result_number == null ? '--' : Number(audit.result_number)}</td><td>${centerCell(audit.system_center, audit.system_metric_label, audit.system_won, audit.system_status)}</td><td>${centerCell(audit.system_pattern_center, audit.system_pattern_metric_label, audit.system_pattern_won, audit.system_pattern_status)}</td><td>${centerCell(audit.last_direction_zone_center, audit.last_direction_zone_metric_label, audit.last_direction_zone_won, audit.last_direction_zone_status)}</td><td>${centerCell(audit.ai_center, audit.ai_metric_label, audit.ai_won, audit.ai_status)}</td><td class="tracker-bank-audit-note"><details><summary>${trackerEscapeHtml(report)}</summary><div><b>Qwen ${trackerEscapeHtml(audit.analyst_model || '')} · confianza ${trackerEscapeHtml(confidence || 'baja')}:</b> ${trackerEscapeHtml(report)}<br><b>Razonamiento SISTEMA TODAS:</b> ${trackerEscapeHtml(systemReasoning)}<br><b>Razonamiento SISTEMA PATRÓN:</b> ${trackerEscapeHtml(systemPatternReasoning)}<br><b>Última dirección + zona:</b> ${trackerEscapeHtml(lastDirectionZoneReasoning)}<br><b>Respuesta/análisis IA (${trackerEscapeHtml(audit.ai_model || 'modelo no disponible')}):</b> ${trackerEscapeHtml(aiReasoning)}${reviewLesson ? `<br><b>Revisión del resultado:</b> ${trackerEscapeHtml(reviewLesson)}` : ''}${reviewAxes ? `<br>${trackerEscapeHtml(reviewAxes)}` : ''}${audit.analyst_error ? `<br><b>Error Qwen:</b> ${trackerEscapeHtml(audit.analyst_error)}` : ''}</div></details></td></tr>`;
         }).join('')
-        : '<tr><td colspan="7" style="text-align:center">Las auditorías de los dos modos SISTEMA e IA aparecerán al iniciar la sesión y al llegar el resultado.</td></tr>';
+        : '<tr><td colspan="8" style="text-align:center">Las auditorías de SISTEMA, estrategia última dirección + zona e IA aparecerán al iniciar la sesión y al llegar el resultado.</td></tr>';
 }
 
 async function loadTrackerBankReport(page = 1) {
@@ -1112,9 +1182,9 @@ async function loadTrackerBankReport(page = 1) {
             `IA ${trackerEscapeHtml(model.model)} ${model.wins}/${model.evaluated} (${formatAccuracy(model)}), ${model.pending} pendientes`
         ).join(' · ');
         const modeScores = Object.entries(scores.by_mode || {}).map(([mode, group]) =>
-            `${mode.toUpperCase()}: SISTEMA TODAS ${group.system.wins}/${group.system.evaluated} (${formatAccuracy(group.system)}), SISTEMA PATRÓN ${group.system_pattern.wins}/${group.system_pattern.evaluated} (${formatAccuracy(group.system_pattern)}), IA ${group.ai.wins}/${group.ai.evaluated} (${formatAccuracy(group.ai)})`
+            `${mode.toUpperCase()}: SISTEMA TODAS ${group.system.wins}/${group.system.evaluated} (${formatAccuracy(group.system)}), SISTEMA PATRÓN ${group.system_pattern.wins}/${group.system_pattern.evaluated} (${formatAccuracy(group.system_pattern)}), ÚLTIMA DIR + ZONA ${group.last_direction_zone.wins}/${group.last_direction_zone.evaluated} (${formatAccuracy(group.last_direction_zone)}), IA ${group.ai.wins}/${group.ai.evaluated} (${formatAccuracy(group.ai)})`
         ).join(' · ');
-        if (summary) summary.innerHTML = `<b>${report.window === 'all' ? 'Todas las sesiones' : `Últimas ${trackerEscapeHtml(report.window)} sesiones`}:</b> ${sessions.total || 0} · cerradas ${sessions.closed || 0} (ganadas ${sessions.won || 0}, perdidas ${sessions.lost || 0}, empate ${sessions.break_even || 0}) · activas ${sessions.active || 0} · neto banca ${trackerBankMoney(sessions.net_profit)}.<br><b>Pronósticos guardados:</b> ${report.pagination?.total || 0} en este filtro. ${trackerEscapeHtml(predictorText('SISTEMA TODAS', scores.system || {}))} ${trackerEscapeHtml(predictorText('SISTEMA PATRÓN', scores.system_pattern || {}))} ${trackerEscapeHtml(predictorText('IA', scores.ai || {}))}<br>${modelScores}<br><b>Qwen:</b> completos ${report.analyst_summary?.complete || 0}, pendientes ${report.analyst_summary?.pending || 0}, fallidos ${report.analyst_summary?.failed || 0}, no disponibles ${report.analyst_summary?.unavailable || 0}. ${modeScores ? `<br><b>Por filtro:</b> ${modeScores}` : ''}`;
+        if (summary) summary.innerHTML = `<b>${report.window === 'all' ? 'Todas las sesiones' : `Últimas ${trackerEscapeHtml(report.window)} sesiones`}:</b> ${sessions.total || 0} · cerradas ${sessions.closed || 0} (ganadas ${sessions.won || 0}, perdidas ${sessions.lost || 0}, empate ${sessions.break_even || 0}) · activas ${sessions.active || 0} · neto banca ${trackerBankMoney(sessions.net_profit)}.<br><b>Pronósticos guardados:</b> ${report.pagination?.total || 0} en este filtro. ${trackerEscapeHtml(predictorText('SISTEMA TODAS', scores.system || {}))} ${trackerEscapeHtml(predictorText('SISTEMA PATRÓN', scores.system_pattern || {}))} ${trackerEscapeHtml(predictorText('ÚLTIMA DIRECCIÓN + ZONA', scores.last_direction_zone || {}))} ${trackerEscapeHtml(predictorText('IA', scores.ai || {}))}<br>${modelScores}<br><b>Qwen:</b> completos ${report.analyst_summary?.complete || 0}, pendientes ${report.analyst_summary?.pending || 0}, fallidos ${report.analyst_summary?.failed || 0}, no disponibles ${report.analyst_summary?.unavailable || 0}. ${modeScores ? `<br><b>Por filtro:</b> ${modeScores}` : ''}`;
         const outcomeLabel = session => session.status === 'closed'
             ? ({ won: 'GANADA', lost: 'PERDIDA', break_even: 'EMPATE' }[session.final_outcome] || 'CERRADA')
             : ({ active: 'EN CURSO', paused: 'PAUSADA', draft: 'BORRADOR' }[session.status] || session.status);
@@ -1138,9 +1208,9 @@ async function loadTrackerBankReport(page = 1) {
             ? report.predictions.map(record => {
                 const qwenSummary = String(record.analyst?.summary || record.analyst?.error || (record.analyst?.status === 'pending' ? 'Analizando' : 'Sin informe'));
                 const status = record.analyst?.status || 'no disponible';
-                return `<tr><td>#${Number(record.session_no)} · ${Number(record.result_spin_id || record.forecast_spin_id || '--')}</td><td>${trackerEscapeHtml(String(record.mode || 'sin filtro').toUpperCase())}</td><td>${record.result_number == null ? '--' : Number(record.result_number)}</td><td>${predictionCell(record.system)}</td><td>${predictionCell(record.system_pattern)}</td><td>${predictionCell(record.ai)}<br><small>${trackerEscapeHtml(record.ai?.model || '')}</small></td><td><details><summary>${trackerEscapeHtml(record.analyst?.model || 'Qwen')} · ${trackerEscapeHtml(status)}</summary><div>${trackerEscapeHtml(qwenSummary)}${record.analyst?.error ? `<br>Error: ${trackerEscapeHtml(record.analyst.error)}` : ''}</div></details></td><td>${reviewCell(record.prediction_review)}</td></tr>`;
+                return `<tr><td>#${Number(record.session_no)} · ${Number(record.result_spin_id || record.forecast_spin_id || '--')}</td><td>${trackerEscapeHtml(String(record.mode || 'sin filtro').toUpperCase())}</td><td>${record.result_number == null ? '--' : Number(record.result_number)}</td><td>${predictionCell(record.system)}</td><td>${predictionCell(record.system_pattern)}</td><td>${predictionCell(record.last_direction_zone)}</td><td>${predictionCell(record.ai)}<br><small>${trackerEscapeHtml(record.ai?.model || '')}</small></td><td><details><summary>${trackerEscapeHtml(record.analyst?.model || 'Qwen')} · ${trackerEscapeHtml(status)}</summary><div>${trackerEscapeHtml(qwenSummary)}${record.analyst?.error ? `<br>Error: ${trackerEscapeHtml(record.analyst.error)}` : ''}</div></details></td><td>${reviewCell(record.prediction_review)}</td></tr>`;
             }).join('')
-            : '<tr><td colspan="8" style="text-align:center">No hay pronósticos guardados en este filtro.</td></tr>';
+            : '<tr><td colspan="9" style="text-align:center">No hay pronósticos guardados en este filtro.</td></tr>';
         trackerBankReportPage = Number(report.pagination?.page || 1);
         const pageLabel = document.getElementById('tracker-bank-history-page');
         const previous = document.getElementById('tracker-bank-history-prev');
@@ -1151,7 +1221,7 @@ async function loadTrackerBankReport(page = 1) {
     } catch (error) {
         if (summary) summary.textContent = `No se pudo cargar el historial: ${error.message}`;
         if (sessionsBody) sessionsBody.innerHTML = '<tr><td colspan="5" style="text-align:center">Historial no disponible.</td></tr>';
-        if (predictionsBody) predictionsBody.innerHTML = '<tr><td colspan="8" style="text-align:center">Historial no disponible.</td></tr>';
+        if (predictionsBody) predictionsBody.innerHTML = '<tr><td colspan="9" style="text-align:center">Historial no disponible.</td></tr>';
     } finally {
         trackerBankReportLoading = false;
     }
@@ -1165,15 +1235,19 @@ function toggleTrackerBankPanel(open) {
 }
 
 function setTrackerBankView(view) {
-    if (!['system', 'system_pattern', 'ai', 'compare'].includes(view)) return;
+    if (!['system', 'system_pattern', 'last_direction_zone', 'ai', 'compare'].includes(view)) return;
     trackerBankView = view;
-    ['system', 'system_pattern', 'ai', 'compare'].forEach(name => {
+    ['system', 'system_pattern', 'last_direction_zone', 'ai', 'compare'].forEach(name => {
         document.getElementById(`tracker-bank-tab-${name}`)?.classList.toggle('active', name === view);
     });
     const main = document.getElementById('tracker-bank-main');
     const comparison = document.getElementById('tracker-bank-comparison');
     if (main) main.style.display = view === 'compare' ? 'none' : 'block';
     if (comparison) comparison.style.display = view === 'compare' ? 'block' : 'none';
+    const description = document.getElementById('tracker-bank-strategy-description');
+    if (description) description.textContent = view === 'last_direction_zone'
+        ? 'Sigue la última dirección y zona observadas en N4. Cada acierto paga 4×; al lograr 3 aciertos seguidos con la misma métrica marca CHECK y vuelve a ronda 1 con base S/ 9. Base ×1 en rondas 1–35, ×2 en 36–55, ×4 en 56–70 y ×8 en 71–80. La sesión se cierra al liquidar la ronda 80.'
+        : 'Estrategia N4: 9 casillas · ficha × 9 · duplica cada 2 rondas · retorno 4× al acierto. Un acierto reinicia el ciclo.';
     if (view === 'compare') loadTrackerBankComparison();
     else loadTrackerBankSessions();
 }
@@ -1190,7 +1264,7 @@ async function loadTrackerBankComparison() {
         const response = await fetch(url, { cache: 'no-store' });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.storage !== 'mongodb') throw new Error(data.error || `HTTP ${response.status}`);
-        const key = predictor === 'ai' ? 'ai' : predictor === 'system_pattern' ? 'system_pattern' : 'system';
+        const key = predictor === 'ai' ? 'ai' : predictor === 'system_pattern' ? 'system_pattern' : predictor === 'last_direction_zone' ? 'last_direction_zone' : 'system';
         const audits = Array.isArray(data.audits) ? data.audits : [];
         const forecasts = audits.filter(audit => audit[`${key}_center`] !== null && audit[`${key}_center`] !== undefined &&
             Number.isInteger(Number(audit[`${key}_center`])));
@@ -1207,7 +1281,7 @@ async function loadTrackerBankComparison() {
     };
     container.innerHTML = '<div class="tracker-bank-message">Cargando comparación…</div>';
     try {
-        const results = await Promise.all([renderPredictor('system'), renderPredictor('system_pattern')]);
+        const results = await Promise.all([renderPredictor('system'), renderPredictor('system_pattern'), renderPredictor('last_direction_zone')]);
         container.innerHTML = results.map(result => {
             const name = trackerBankPredictorLabel(result.predictor);
             const session = result.session;
@@ -1222,10 +1296,10 @@ async function loadTrackerBankComparison() {
     }
 }
 
-async function startTrackerBankSession(predictor = ['system', 'system_pattern', 'ai'].includes(trackerBankView) ? trackerBankView : 'system') {
-    if (!['system', 'system_pattern', 'ai'].includes(predictor)) return;
+async function startTrackerBankSession(predictor = ['system', 'system_pattern', 'last_direction_zone', 'ai'].includes(trackerBankView) ? trackerBankView : 'system') {
+    if (!['system', 'system_pattern', 'last_direction_zone', 'ai'].includes(predictor)) return;
     const capital = Number(document.getElementById('tracker-bank-capital')?.value);
-    const chip = Number(document.getElementById('tracker-bank-chip')?.value);
+    const chip = Number(document.getElementById(predictor === 'last_direction_zone' ? 'tracker-bank-strategy-base' : 'tracker-bank-chip')?.value);
     const startButton = document.getElementById('tracker-bank-start');
     if (startButton?.disabled) return;
     if (trackerSource !== 'live') {
@@ -1237,7 +1311,7 @@ async function startTrackerBankSession(predictor = ['system', 'system_pattern', 
         return;
     }
     if (!Number.isFinite(capital) || capital <= 0 || !Number.isFinite(chip) || chip <= 0) {
-        trackerBankSetMessage('Ingresa un capital y un valor de ficha válidos.');
+        trackerBankSetMessage(predictor === 'last_direction_zone' ? 'Ingresa capital y una apuesta base válida.' : 'Ingresa un capital y un valor de ficha válidos.');
         return;
     }
     if (startButton) startButton.disabled = true;
@@ -1298,7 +1372,7 @@ async function startTrackerBankSession(predictor = ['system', 'system_pattern', 
         trackerAiLastRequestedRevision = -1;
         if (trackerHistory.length >= 3) {
             trackerBankActiveSessions().forEach(activeSession =>
-                enqueueTrackerPredictionForecast(activeSession._id, trackerPredictionAuditSnapshot()));
+                enqueueTrackerPredictionForecast(activeSession._id, trackerBankSnapshotForSession(activeSession)));
             askTrackerAIForAnalysisSilent(false, trackerPredictionSource === 'system');
         }
     } catch (error) {
@@ -1356,18 +1430,25 @@ function enqueueTrackerBankSpin(spin) {
 
 function trackerQueueSessionSpin(session, spinId, number, contextSnapshot) {
     const predictor = trackerBankSessionPredictor(session);
-    enqueueTrackerPredictionAudit(session._id, spinId, number, contextSnapshot);
+    const sessionSnapshot = trackerBankSnapshotForSession(session, contextSnapshot);
+    enqueueTrackerPredictionAudit(session._id, spinId, number, sessionSnapshot);
     const predictionCenter = trackerBankPredictionCenter(predictor);
     const predictionNumbers = Number.isInteger(predictionCenter) ? wheelNeighbors(predictionCenter, 4) : [];
     const base = {
         sessionId: session._id, spinId: Number(spinId), number: Number(number),
-        contextSnapshot, tableId: trackerBankTableId()
+        contextSnapshot: sessionSnapshot, tableId: trackerBankTableId()
     };
     if (predictionNumbers.length === 9 && new Set(predictionNumbers).size === 9) {
         enqueueTrackerBankSpin({ ...base, predictionCenter });
     } else {
         enqueueTrackerBankSkip({ ...base, predictor });
     }
+}
+
+function trackerBankSnapshotForSession(session, contextSnapshot = trackerPredictionAuditSnapshot()) {
+    return trackerBankSessionPredictor(session) === 'last_direction_zone'
+        ? { ...contextSnapshot, prediction_mode: 'n4' }
+        : contextSnapshot;
 }
 
 function enqueueTrackerBankSkip(spin) {
@@ -1520,7 +1601,9 @@ function flushTrackerBankQueue() {
                         trackerBankEntries = [];
                         trackerBankEntriesSessionId = data.session._id;
                     }
-                    trackerBankSetMessage(`Sesión ${trackerBankSessionPredictor(data.session) === 'ai' ? 'IA' : 'SISTEMA'} guardada; ${data.insufficient_capital ? `capital insuficiente (${trackerBankOutcomeLabel(data.session.final_outcome)})` : `ya estaba cerrada (${trackerBankOutcomeLabel(data.session.final_outcome)})`}. La tirada sin apuesta no se contó.`);
+                    const stoppedPredictor = trackerBankSessionPredictor(data.session);
+                    const stoppedLabel = stoppedPredictor === 'ai' ? 'IA' : stoppedPredictor === 'system_pattern' ? 'SISTEMA · PATRÓN' : stoppedPredictor === 'last_direction_zone' ? 'ÚLTIMA DIRECCIÓN + ZONA' : 'SISTEMA';
+                    trackerBankSetMessage(`Sesión ${stoppedLabel} guardada; ${data.insufficient_capital ? `capital insuficiente (${trackerBankOutcomeLabel(data.session.final_outcome)})` : `ya estaba cerrada (${trackerBankOutcomeLabel(data.session.final_outcome)})`}. La tirada sin apuesta no se contó.`);
                 }
                 renderTrackerBankroll();
                 continue;
@@ -1535,13 +1618,22 @@ function flushTrackerBankQueue() {
                 }
                 if (!data.duplicate) trackerBankEntries = trackerBankMergeEntries(trackerBankEntries, [data.entry]);
                 const predictor = trackerBankSessionPredictor(data.session);
-                const label = predictor === 'ai' ? 'IA' : predictor === 'system_pattern' ? 'SISTEMA · PATRÓN' : 'SISTEMA';
+                const label = predictor === 'ai' ? 'IA' : predictor === 'system_pattern' ? 'SISTEMA · PATRÓN' : predictor === 'last_direction_zone' ? 'ÚLTIMA DIRECCIÓN + ZONA' : 'SISTEMA';
                 const waitingForPattern = predictor === 'system_pattern' && trackerBankPredictionCenter(predictor) === null;
-                trackerBankSetMessage(data.entry.won
+                const strategyMessage = predictor === 'last_direction_zone'
+                    ? data.entry.strategy_cycle_completed
+                        ? `${label} · CHECK: 3 aciertos seguidos en ${data.entry.strategy_metric_label}. Conteo reiniciado a ronda 1; la base sigue en S/ 9.`
+                        : data.entry.won
+                            ? `${label} · Acierto en ronda ${data.entry.round}, ${data.entry.strategy_metric_label}; racha ${data.entry.strategy_streak_hits}/3.`
+                            : `${label} · Falló ronda ${data.entry.round}; racha reiniciada. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankDirectionZoneStake(data.session.chip_value, data.session.current_round))}.`
+                    : null;
+                trackerBankSetMessage(predictor === 'last_direction_zone' && data.session.status === 'closed'
+                    ? `${label} · ${data.entry.strategy_cycle_completed ? `CHECK: 3 aciertos seguidos en ${data.entry.strategy_metric_label}. ` : ''}Se completaron las 80 rondas. Sesión cerrada y resultado guardado.`
+                    : strategyMessage || (data.entry.won
                     ? `${label} · Acierto en ronda ${data.entry.round}. Ciclo: ${trackerBankMoney(data.entry.cycle_profit)} netos.`
                     : waitingForPattern
                         ? `${label} · Falló ronda ${data.entry.round}. Esperando una señal clara; no se apostará ni avanzará mientras no aparezca.`
-                        : `${label} · Falló ronda ${data.entry.round}. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankStake(data.session.chip_value, data.session.current_round))}.`);
+                        : `${label} · Falló ronda ${data.entry.round}. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankStake(data.session.chip_value, data.session.current_round))}.`));
             }
             renderTrackerBankroll();
         }
@@ -1596,10 +1688,10 @@ async function syncTrackerFromLive() {
                 const firstUnseen = eligibleSpins[0];
                 if (!firstUnseen) continue;
                 hasEligibleNewSpin = true;
-                const auditSnapshot = trackerPredictionAuditSnapshot(firstUnseen.id);
+                const auditSnapshot = trackerBankSnapshotForSession(activeSession, trackerPredictionAuditSnapshot(firstUnseen.id));
                 trackerQueueSessionSpin(activeSession, firstUnseen.id, firstUnseen.number, auditSnapshot);
                 for (const missedSpin of eligibleSpins.slice(1)) {
-                    const lateSnapshot = trackerPredictionAuditSnapshot(missedSpin.id, false);
+                    const lateSnapshot = trackerBankSnapshotForSession(activeSession, trackerPredictionAuditSnapshot(missedSpin.id, false));
                     enqueueTrackerPredictionAudit(activeSession._id, missedSpin.id, missedSpin.number, lateSnapshot);
                     enqueueTrackerBankSkip({
                         sessionId: activeSession._id, spinId: missedSpin.id,
@@ -1986,7 +2078,7 @@ async function askTrackerAIForAnalysisSilent(isRetry = false, backgroundPredicti
         }
     }
     trackerBankActiveSessions().forEach(session =>
-        enqueueTrackerPredictionForecast(session._id, trackerPredictionAuditSnapshot()));
+        enqueueTrackerPredictionForecast(session._id, trackerBankSnapshotForSession(session)));
     const ctx = buildTrackerAIContext();
     const prompt = buildTrackerPrompt(ctx, null, backgroundPrediction);
     await callTrackerAISilent(prompt, backgroundPrediction);
@@ -3564,7 +3656,7 @@ function syncPredictionFromAI(responseText, backgroundPrediction = false) {
     if (trackerAiN4Center === null) console.warn(`[Tracker AI] Response did not match the allowed ${trackerConfig.prediction} metric filter.`, responseText);
     if (trackerBankHasActiveSessions() && trackerSource === 'live') {
         trackerBankActiveSessions().forEach(session =>
-            enqueueTrackerPredictionForecast(session._id, trackerPredictionAuditSnapshot()));
+            enqueueTrackerPredictionForecast(session._id, trackerBankSnapshotForSession(session)));
     }
     renderTrackerBankroll();
 }
