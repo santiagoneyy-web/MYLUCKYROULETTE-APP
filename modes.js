@@ -661,6 +661,13 @@ function trackerLastDirectionZoneMetric() {
     return trackerPredictionMetricCandidates('n4').find(metric => metric.label === label) || null;
 }
 
+function trackerDirectionZoneText(metric) {
+    if (!metric?.label) return '';
+    const direction = metric.label.startsWith('CW_') ? 'DERECHA' : 'IZQUIERDA';
+    const zone = metric.label.endsWith('B') ? 'BIG' : 'SMALL';
+    return `${direction} · ${zone}`;
+}
+
 function trackerLastDirectionZoneReasoning(metric) {
     if (!metric) return null;
     let distance = null;
@@ -1023,6 +1030,7 @@ function trackerBankOutcomeLabel(outcome) {
 }
 
 function renderTrackerBankroll() {
+    renderTrackerPredictionDisplay();
     const session = trackerBankSelectedSession();
     const active = session?.status === 'active';
     const canStart = !active;
@@ -1050,8 +1058,10 @@ function renderTrackerBankroll() {
     set('tracker-bank-capital-value', session ? trackerBankMoney(capital) : '--');
     set('tracker-bank-balance', session ? trackerBankMoney(balance) : '--');
     set('tracker-bank-profit', session ? `${profit > 0 ? '+' : ''}${trackerBankMoney(profit)}` : '--');
-    set('tracker-bank-wins', String(session?.wins || 0));
+    set('tracker-bank-wins', String(isDirectionZone ? (session?.completed_cycles ?? session?.wins ?? 0) : (session?.wins || 0)));
     set('tracker-bank-losses', String(session?.losses || 0));
+    const winsLabel = document.querySelector('#tracker-bank-wins')?.previousElementSibling;
+    if (winsLabel) winsLabel.textContent = isDirectionZone ? 'CHECK completados' : 'Aciertos';
     set('tracker-bank-outcome', session ? (session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : `${trackerBankOutcomeLabel(profit > 0 ? 'won' : profit < 0 ? 'lost' : 'break_even')} · provisional`) : '--');
     set('tracker-bank-round', active ? (waitingForPattern ? 'Esperando señal' : String(round)) : '--');
     set('tracker-bank-stake', active && !waitingForPattern ? trackerBankMoney(stake) : '--');
@@ -1059,7 +1069,10 @@ function renderTrackerBankroll() {
     set('tracker-bank-gross-return', active && !waitingForPattern ? trackerBankMoney(grossReturn) : '--');
     set('tracker-bank-win-profit', active && !waitingForPattern ? trackerBankMoney(possibleProfit) : '--');
     set('tracker-bank-prediction', active && trackerSource === 'live'
-        ? pred.length ? `${predictor === 'last_direction_zone' ? `${strategyMetric?.label || 'N4'} · ` : ''}N4: ${pred.join(', ')}` : predictor === 'system_pattern' ? 'ANALIZANDO ?' : predictor === 'last_direction_zone' ? 'Esperando giro anterior' : '--'
+        ? pred.length ? predictor === 'last_direction_zone'
+            ? `${trackerDirectionZoneText(strategyMetric)} → ${strategyMetric?.number} · N4: ${pred.join(', ')}`
+            : `N4: ${pred.join(', ')}`
+            : predictor === 'system_pattern' ? 'ANALIZANDO ?' : predictor === 'last_direction_zone' ? 'Esperando giro anterior' : '--'
         : '--');
     set('tracker-bank-strategy-streak', strategyStreak);
     set('tracker-bank-totals', session ? `${session.total_spins || 0} / ${trackerBankMoney(session.total_wagered)}` : '0 / --');
@@ -1097,7 +1110,10 @@ function renderTrackerBankroll() {
             const metric = entry.strategy_metric_label ? ` · ${entry.strategy_metric_label}` : '';
             const streak = entry.strategy_metric_label ? ` · racha ${entry.strategy_streak_hits || 0}/3` : '';
             const check = entry.strategy_cycle_completed ? ' · CHECK' : '';
-            return `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td title="N4 ${center}: ${prediction}${metric}${streak}${check}">${center} → ${entry.number} ${entry.won ? '✓' : '×'}${entry.strategy_cycle_completed ? ' CHECK' : ''}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`;
+            const resultLabel = entry.strategy_metric_label
+                ? (entry.strategy_cycle_completed ? 'CHECK ✓ 3/3' : entry.won ? `racha ${entry.strategy_streak_hits || 0}/3` : 'fallo · racha 0/3')
+                : entry.won ? '✓' : '×';
+            return `<tr><td>${entry.cycle_no || 1}</td><td>${entry.round}</td><td title="N4 ${center}: ${prediction}${metric}${streak}${check}">${center} → ${entry.number} · ${resultLabel}</td><td>${trackerBankMoney(entry.stake)}</td><td>${trackerBankMoney(entry.payout)}</td><td>${trackerBankMoney(entry.balance_after)}</td></tr>`;
         }).join('')
         : '<tr><td colspan="6" style="text-align:center">Sin resultados guardados</td></tr>';
     const auditLedger = document.getElementById('tracker-bank-audit-ledger');
@@ -1189,7 +1205,13 @@ async function loadTrackerBankReport(page = 1) {
             ? ({ won: 'GANADA', lost: 'PERDIDA', break_even: 'EMPATE' }[session.final_outcome] || 'CERRADA')
             : ({ active: 'EN CURSO', paused: 'PAUSADA', draft: 'BORRADOR' }[session.status] || session.status);
         if (sessionsBody) sessionsBody.innerHTML = (report.sessions || []).length
-            ? report.sessions.map(session => `<tr><td>#${Number(session.session_no)}</td><td>${trackerEscapeHtml(trackerBankPredictorLabel(session.predictor))}</td><td>${trackerEscapeHtml(outcomeLabel(session))}</td><td>${Number(session.total_spins || 0)} (${Number(session.wins || 0)}✓/${Number(session.losses || 0)}×)</td><td>${Number(session.wins || 0)} / ${Number(session.losses || 0)}</td><td>${trackerBankMoney(session.net_profit)}</td></tr>`).join('')
+            ? report.sessions.map(session => {
+                const isDirectionZone = session.predictor === 'last_direction_zone';
+                const wins = Number(isDirectionZone ? (session.completed_cycles ?? session.wins ?? 0) : (session.wins || 0));
+                const resultText = isDirectionZone ? `${wins} CHECK / ${Number(session.losses || 0)} fallos` : `${wins} / ${Number(session.losses || 0)}`;
+                const countText = isDirectionZone ? `${Number(session.total_spins || 0)} apuestas (${wins} CHECK)` : `${Number(session.total_spins || 0)} (${wins}✓/${Number(session.losses || 0)}×)`;
+                return `<tr><td>#${Number(session.session_no)}</td><td>${trackerEscapeHtml(trackerBankPredictorLabel(session.predictor))}</td><td>${trackerEscapeHtml(outcomeLabel(session))}</td><td>${countText}</td><td>${resultText}</td><td>${trackerBankMoney(session.net_profit)}</td></tr>`;
+            }).join('')
             : '<tr><td colspan="6" style="text-align:center">No hay sesiones guardadas para esta mesa.</td></tr>';
         const predictionCell = predictor => {
             const center = Number.isInteger(Number(predictor?.center)) && predictor.center !== null ? Number(predictor.center) : '--';
@@ -1237,6 +1259,7 @@ function toggleTrackerBankPanel(open) {
 function setTrackerBankView(view) {
     if (!['system', 'system_pattern', 'last_direction_zone', 'ai', 'compare'].includes(view)) return;
     trackerBankView = view;
+    renderTrackerPredictionDisplay();
     ['system', 'system_pattern', 'last_direction_zone', 'ai', 'compare'].forEach(name => {
         document.getElementById(`tracker-bank-tab-${name}`)?.classList.toggle('active', name === view);
     });
@@ -1289,7 +1312,9 @@ async function loadTrackerBankComparison() {
             const net = Number(session.balance || 0) - Number(session.initial_capital || 0);
             const status = session.status === 'active' ? 'EN CURSO' : session.status === 'closed' ? trackerBankOutcomeLabel(session.final_outcome) : 'BORRADOR';
             const accuracy = result.evaluated ? `${(result.wins / result.evaluated * 100).toFixed(1)}%` : 'sin muestra';
-            return `<section class="tracker-bank-compare-card"><h3>${name} · Sesión #${Number(session.session_no)}</h3><b>${status}</b><p>Capital: ${trackerBankMoney(session.initial_capital)} · Saldo: ${trackerBankMoney(session.balance)}</p><p>Neto: ${net >= 0 ? '+' : ''}${trackerBankMoney(net)}</p><p>Banca: ${Number(session.wins || 0)} aciertos / ${Number(session.losses || 0)} fallos · ${Number(session.total_spins || 0)} apuestas</p><p>Pronósticos: ${result.wins}/${result.evaluated} aciertos (${accuracy}) · ${result.pending} pendientes · ${result.forecasts} emitidos · ${result.skipped} rondas omitidas</p><button class="tracker-bank-create" type="button" onclick="setTrackerBankView('${result.predictor}')">Abrir banca ${name}</button></section>`;
+            const bankWins = Number(result.predictor === 'last_direction_zone' ? (session.completed_cycles ?? session.wins ?? 0) : (session.wins || 0));
+            const bankWinsLabel = result.predictor === 'last_direction_zone' ? 'CHECK completados' : 'aciertos';
+            return `<section class="tracker-bank-compare-card"><h3>${name} · Sesión #${Number(session.session_no)}</h3><b>${status}</b><p>Capital: ${trackerBankMoney(session.initial_capital)} · Saldo: ${trackerBankMoney(session.balance)}</p><p>Neto: ${net >= 0 ? '+' : ''}${trackerBankMoney(net)}</p><p>Banca: ${bankWins} ${bankWinsLabel} / ${Number(session.losses || 0)} fallos · ${Number(session.total_spins || 0)} apuestas</p><p>Pronósticos: ${result.wins}/${result.evaluated} aciertos (${accuracy}) · ${result.pending} pendientes · ${result.forecasts} emitidos · ${result.skipped} rondas omitidas</p><button class="tracker-bank-create" type="button" onclick="setTrackerBankView('${result.predictor}')">Abrir banca ${name}</button></section>`;
         }).join('');
     } catch (error) {
         container.innerHTML = `<div class="tracker-bank-message">No se pudo cargar la comparación: ${trackerEscapeHtml(error.message)}</div>`;
@@ -1624,7 +1649,7 @@ function flushTrackerBankQueue() {
                     ? data.entry.strategy_cycle_completed
                         ? `${label} · CHECK: 3 aciertos seguidos en ${data.entry.strategy_metric_label}. Conteo reiniciado a ronda 1; la base sigue en S/ 9.`
                         : data.entry.won
-                            ? `${label} · Acierto en ronda ${data.entry.round}, ${data.entry.strategy_metric_label}; racha ${data.entry.strategy_streak_hits}/3.`
+                            ? `${label} · Avance CHECK ${data.entry.strategy_streak_hits}/3 en ronda ${data.entry.round}, ${data.entry.strategy_metric_label}; pago 4× aplicado.`
                             : `${label} · Falló ronda ${data.entry.round}; racha reiniciada. Próxima ronda ${data.session.current_round}: ${trackerBankMoney(trackerBankDirectionZoneStake(data.session.chip_value, data.session.current_round))}.`
                     : null;
                 trackerBankSetMessage(predictor === 'last_direction_zone' && data.session.status === 'closed'
@@ -2380,6 +2405,44 @@ function ordinalSuffix(n) {
     }
 }
 
+function renderTrackerPredictionDisplay() {
+    const lastObservationEl = document.getElementById('tracker-last-observation');
+    if (lastObservationEl) {
+        if (trackerHistory.length < 2) {
+            lastObservationEl.innerText = '--';
+            lastObservationEl.removeAttribute('title');
+        } else {
+            const previousNumber = Number(trackerHistory[trackerHistory.length - 2]);
+            const latestNumber = Number(trackerHistory[trackerHistory.length - 1]);
+            const lastDistance = calcDist(previousNumber, latestNumber);
+            const direction = lastDistance >= 0 ? 'DERECHA' : 'IZQUIERDA';
+            const zone = Math.abs(lastDistance) >= 10 ? 'BIG' : 'SMALL';
+            lastObservationEl.innerText = `${previousNumber} → ${latestNumber} · ${direction} · ${zone}`;
+            lastObservationEl.title = `Última transición: ${Math.abs(lastDistance)} posiciones; derecha/izquierda según el orden de la ruleta europea.`;
+        }
+    }
+
+    const predEl = document.getElementById('tracker-prediction');
+    if (!predEl) return;
+    const selectedDirectionZone = trackerBankView === 'last_direction_zone' && trackerBankActiveSession('last_direction_zone');
+    const predictor = selectedDirectionZone ? 'last_direction_zone' : trackerPredictionSource;
+    const center = trackerBankPredictionCenter(predictor);
+    if (selectedDirectionZone) {
+        const metric = trackerLastDirectionZoneMetric();
+        predEl.innerText = center !== null && metric
+            ? `ESTRATEGIA · ${trackerDirectionZoneText(metric)} → ${center}`
+            : 'ANALIZANDO ÚLTIMA DIR. + ZONA ?';
+        return;
+    }
+    const metricLabel = trackerPredictionSource === 'ai'
+        ? (trackerAiPredictionMetric || (trackerConfig.prediction === 'n9' ? 'N9' : 'N4'))
+        : (trackerSystemPredictionMetric()?.label?.split('_')[1] || 'N9');
+    if (center !== null) predEl.innerText = `${trackerPredictionSource === 'ai' ? 'IA' : 'SISTEMA'} · ${metricLabel}: ${center}`;
+    else if (trackerBankActiveSession(trackerPredictionSource) && trackerHistory.length >= 3) {
+        predEl.innerText = trackerPredictionSource === 'ai' ? 'ANALIZANDO IA ?' : 'ANALIZANDO ?';
+    } else predEl.innerText = '--';
+}
+
 function renderTracker() {
     const spinsEl = document.getElementById('tracker-last-spins');
     if (spinsEl) {
@@ -2443,32 +2506,7 @@ function renderTracker() {
             }
         } catch(e) {}
     }
-    const lastObservationEl = document.getElementById('tracker-last-observation');
-    if (lastObservationEl) {
-        if (trackerHistory.length < 2) {
-            lastObservationEl.innerText = '--';
-            lastObservationEl.removeAttribute('title');
-        } else {
-            const previousNumber = Number(trackerHistory[trackerHistory.length - 2]);
-            const latestNumber = Number(trackerHistory[trackerHistory.length - 1]);
-            const lastDistance = calcDist(previousNumber, latestNumber);
-            const direction = lastDistance >= 0 ? 'DERECHA' : 'IZQUIERDA';
-            const zone = Math.abs(lastDistance) >= 10 ? 'BIG' : 'SMALL';
-            lastObservationEl.innerText = `${previousNumber} → ${latestNumber} · ${direction} · ${zone}`;
-            lastObservationEl.title = `Última transición: ${Math.abs(lastDistance)} posiciones; derecha/izquierda según el orden de la ruleta europea.`;
-        }
-    }
-    const predEl = document.getElementById('tracker-prediction');
-    const center = trackerBankPredictionCenter();
-    if (predEl) {
-        const metricLabel = trackerPredictionSource === 'ai'
-            ? (trackerAiPredictionMetric || (trackerConfig.prediction === 'n9' ? 'N9' : 'N4'))
-            : (trackerSystemPredictionMetric()?.label?.split('_')[1] || 'N9');
-        if (center !== null) predEl.innerText = `${trackerPredictionSource === 'ai' ? 'IA' : 'SISTEMA'} · ${metricLabel}: ${center}`;
-        else if (trackerBankActiveSession(trackerPredictionSource) && trackerHistory.length >= 3) {
-            predEl.innerText = trackerPredictionSource === 'ai' ? 'ANALIZANDO IA ?' : 'ANALIZANDO ?';
-        } else predEl.innerText = '--';
-    }
+    renderTrackerPredictionDisplay();
     document.getElementById('tracker-source-system')?.classList.toggle('active', trackerPredictionSource === 'system');
     document.getElementById('tracker-source-ai')?.classList.toggle('active', trackerPredictionSource === 'ai');
     updateNeighborButton();

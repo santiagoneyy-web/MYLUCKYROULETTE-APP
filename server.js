@@ -2343,14 +2343,16 @@ app.post('/api/tracker/bankroll/:tableId/:sessionId/settle', async (req, res) =>
                 session.total_spins += 1;
                 session.total_wagered = Number((session.total_wagered + settlement.stake).toFixed(2));
                 session.total_payout = Number((session.total_payout + settlement.payout).toFixed(2));
-                if (settlement.won) {
+                if (sessionPredictor === 'last_direction_zone') {
+                    if (settlement.strategyCycleCompleted) session.completed_cycles += 1;
+                    // For this strategy, an official win is one completed CHECK cycle,
+                    // not each individual N4 hit that contributes to the streak.
+                    session.wins = Number(session.completed_cycles || 0);
+                } else if (settlement.won) {
                     session.wins += 1;
-                    if (sessionPredictor !== 'last_direction_zone' || settlement.strategyCycleCompleted) {
-                        session.completed_cycles += 1;
-                    }
-                } else {
-                    session.losses += 1;
+                    session.completed_cycles += 1;
                 }
+                if (!settlement.won) session.losses += 1;
                 if (sessionPredictor === 'last_direction_zone' && settlement.roundLimitReached) {
                     session.status = 'closed';
                     session.final_outcome = trackerBankroll.getSessionOutcome(session.balance, session.initial_capital);
