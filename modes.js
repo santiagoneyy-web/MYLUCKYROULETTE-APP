@@ -2443,6 +2443,21 @@ function renderTracker() {
             }
         } catch(e) {}
     }
+    const lastObservationEl = document.getElementById('tracker-last-observation');
+    if (lastObservationEl) {
+        if (trackerHistory.length < 2) {
+            lastObservationEl.innerText = '--';
+            lastObservationEl.removeAttribute('title');
+        } else {
+            const previousNumber = Number(trackerHistory[trackerHistory.length - 2]);
+            const latestNumber = Number(trackerHistory[trackerHistory.length - 1]);
+            const lastDistance = calcDist(previousNumber, latestNumber);
+            const direction = lastDistance >= 0 ? 'DERECHA' : 'IZQUIERDA';
+            const zone = Math.abs(lastDistance) >= 10 ? 'BIG' : 'SMALL';
+            lastObservationEl.innerText = `${previousNumber} → ${latestNumber} · ${direction} · ${zone}`;
+            lastObservationEl.title = `Última transición: ${Math.abs(lastDistance)} posiciones; derecha/izquierda según el orden de la ruleta europea.`;
+        }
+    }
     const predEl = document.getElementById('tracker-prediction');
     const center = trackerBankPredictionCenter();
     if (predEl) {
