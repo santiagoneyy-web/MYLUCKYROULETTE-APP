@@ -792,7 +792,20 @@ function trackerSystemAxisChoice(travels, kind, fallbackValue, requireClearPatte
     ]);
     const patternConfidence = Number(pattern?.confidence) || 0;
     const hasNextState = pattern?.next_state && Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state);
-    const isClearPattern = recentTravels.length >= 8 && actionablePatternActions.has(pattern?.action) && patternConfidence >= 68;
+    const hasEnoughPatternHistory = recentTravels.length >= 3;
+    const isClearPattern = hasEnoughPatternHistory && actionablePatternActions.has(pattern?.action) && patternConfidence >= 68;
+    if (requireClearPattern && pattern?.type === 'zigzag_pulse' && pattern.next_state &&
+        Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state)) {
+        return {
+            value: symbolValues[pattern.next_state],
+            basis: 'observation',
+            pattern: pattern.name,
+            pattern_type: pattern.type,
+            pattern_action: 'OBSERVE',
+            pulse_next_state: symbolValues[pattern.next_state],
+            confidence: patternConfidence
+        };
+    }
     if (hasNextState && (!requireClearPattern || isClearPattern)) {
         return {
             value: symbolValues[pattern.next_state],
@@ -953,6 +966,16 @@ function trackerSystemReasoningSnapshot(patternOnly = false) {
         level_projection: axisGuidance.level.value,
         level_basis: axisGuidance.level.basis,
         level_pattern: axisGuidance.level.pattern || null,
+        pulse_observations: patternOnly ? Object.fromEntries(
+            Object.entries(axisGuidance)
+                .filter(([, axis]) => axis.pulse_next_state)
+                .map(([key, axis]) => [key, {
+                    pattern: axis.pattern,
+                    next_state_to_track: axis.pulse_next_state,
+                    confidence: axis.confidence,
+                    action: 'observation_without_bet'
+                }])
+        ) : null,
         selected_target: center,
         metric_label: metric?.label || (trackerConfig.prediction === 'n4' ? 'N4' : 'N9'),
         policy: patternOnly ? 'wait_for_clear_pattern' : 'predict_every_round',
@@ -2974,12 +2997,32 @@ function trackerPatternExpectedSymbol(streaks, motif, currentSymbol, currentStre
 }
 
 function detectTrackerTurbulence(travels, kind = 'dir', allowActionablePatternOverStreakObservation = false) {
-    if (travels.length < 6) return null;
+    if (travels.length < 3) return null;
     const symbols = [];
     for (let i = Math.max(0, travels.length - 12); i < travels.length; i++) {
         if (kind === 'dir') symbols.push(travels[i] >= 0 ? 'R' : 'L');
         else if (kind === 'nivel') symbols.push(((travels[i] >= 0 && Math.abs(travels[i]) >= 10) || (travels[i] < 0 && Math.abs(travels[i]) < 10)) ? 'O' : 'U'); // OVER / UNDER
         else symbols.push(Math.abs(travels[i]) >= 10 ? 'B' : 'S'); // BIG / SMALL
+    }
+    const pulseWindow = symbols.slice(-3);
+    const isPulseZigzag = pulseWindow.length === 3 && pulseWindow.every((symbol, index) => index === 0 || symbol !== pulseWindow[index - 1]);
+    if (isPulseZigzag) {
+        const current = pulseWindow[pulseWindow.length - 1];
+        const nextState = current === 'R' ? 'L' : current === 'L' ? 'R'
+            : current === 'B' ? 'S' : current === 'S' ? 'B'
+                : current === 'O' ? 'U' : 'O';
+        const label = kind === 'dir' ? 'dir' : kind === 'nivel' ? 'nivel' : 'zona';
+        const extendedWindow = symbols.slice(-5);
+        const isExtendedZigzag = extendedWindow.length === 5 && extendedWindow.every((symbol, index) => index === 0 || symbol !== extendedWindow[index - 1]);
+        return {
+            name: `${isExtendedZigzag ? 'ZIGZAG SOSTENIDO' : 'PULSO ZIGZAG'} ${label.toUpperCase()}`,
+            type: isExtendedZigzag ? 'exact_zigzag' : 'zigzag_pulse',
+            desc: `${isExtendedZigzag ? 'cinco' : 'tres'} resultados alternados consecutivos; siguiente estado estimado: ${nextState}`,
+            action: isExtendedZigzag ? 'ALTERNATE' : 'OBSERVE',
+            next: isExtendedZigzag ? 'continuar alternancia mientras se mantenga' : 'registrar micro-predicción observacional; no apostar por el pulso',
+            next_state: nextState,
+            confidence: isExtendedZigzag ? 70 : 55
+        };
     }
     if (symbols.length < 6) return null;
 
@@ -3718,7 +3761,7 @@ Una racha de 3 tras turbulencia es observación, no ruptura confirmada; por sí 
 
 DOS LECTURAS:
 - FLUIR: si un patrón recurrente o una dominancia tiene casos comparables y resultados posteriores que respaldan su continuación, sigue ese eje mientras conserve apoyo. No exijas que dirección, zona y nivel compartan régimen.
-- PULSEAR: si dirección está turbulenta o el patrón no es claro, no fuerces una señal direccional. Busca micro-patrones independientes en ZONA y NIVEL (bloques, pares, zigzag y anomalías); compara proporciones recientes con el contexto de 15/60 minutos y con el historial inmediato para distinguir corrección corta de posible cambio persistente. Es una hipótesis observacional de confianza baja/media, no una ruptura confirmada.
+- PULSEAR: empieza a registrar un pulso desde 2–3 observaciones cuando aparezca un micro-patrón (por ejemplo A-B-A); no esperes 8 saltos para comenzar a analizar. Si dirección está turbulenta o el patrón no es claro, no fuerces una señal direccional. Busca micro-patrones independientes en ZONA y NIVEL (bloques, pares, zigzag y anomalías); compara proporciones recientes con el contexto de 15/60 minutos y con el historial inmediato para distinguir corrección corta de posible cambio persistente. El pulso es observación de confianza baja y no genera apuesta por sí solo.
 
 REGLAS DE EVIDENCIA:
 - Para “1 minoría”, comprueba los casos comparables: tras una racha previa de al menos 2, el primer resultado opuesto volvió a la mayoría o continuó como outlier. Si observas A×2+ → B×1 → A×2+ → B×1 → A×2+, registra el motivo repetido y sus bloques actuales; favorece el retorno solo si los conteos comparables lo respaldan, nunca por definición.
