@@ -2738,6 +2738,35 @@ function summarizeTrackerWindow(spins, minutes, now) {
     };
 }
 
+function buildTrackerParityEvidence(spins) {
+    const sequence = spins.map(spin => {
+        const number = Number(spin.number);
+        return number === 0 ? 'ZERO' : number % 2 === 0 ? 'EVEN' : 'ODD';
+    });
+    const runs = [];
+    sequence.forEach((state, index) => {
+        const last = runs[runs.length - 1];
+        if (last?.state === state) last.length++;
+        else runs.push({ state, length: 1 });
+    });
+    const windows = [20, 50].map(size => {
+        const values = sequence.slice(-size);
+        const counts = { EVEN: 0, ODD: 0, ZERO: 0 };
+        let switches = 0;
+        values.forEach((state, index) => {
+            counts[state]++;
+            if (index > 0 && state !== values[index - 1]) switches++;
+        });
+        return { spins: values.length, counts, switches };
+    });
+    return {
+        note: 'Contexto auxiliar; 0 separado, no se cuenta como par ni impar.',
+        currentRun: runs.length ? { state: runs[runs.length - 1].state, length: runs[runs.length - 1].length } : null,
+        recentRuns: runs.slice(-6).map(run => ({ state: run.state, length: run.length })),
+        windows
+    };
+}
+
 function buildTrackerAnalystEvidence(spins) {
     const valid = spins.filter(spin => Number.isInteger(Number(spin.number)) && Number(spin.number) >= 0 && Number(spin.number) <= 36);
     const steps = [];
@@ -2769,6 +2798,7 @@ function buildTrackerAnalystEvidence(spins) {
         latestNumber: Number(valid[valid.length - 1]?.number),
         currentSequence: valid.slice(-patternLength - 1).map(spin => Number(spin.number)),
         currentTransitionPattern: current.map(step => step.signature),
+        parity: buildTrackerParityEvidence(valid),
         similarity: {
             method: 'exact match of the last 5 signed wheel-transition classes (CW/CCW/STAY × BIG/SMALL)',
             occurrences: matches.length,
@@ -2821,8 +2851,10 @@ function compactTrackerAnalystEvidence(evidence) {
             zigzag: regime.zigzag,
             motifs: (regime.motifs || []).filter(item => item.n >= 2)
                 .sort((left, right) => right.n - left.n).slice(0, 3),
-            threeRunAfterTurbulence: regime.threeRunAfterTurbulence
+            threeRunAfterTurbulence: regime.threeRunAfterTurbulence,
+            isolatedMinority: regime.isolatedMinority
         })),
+        parity: evidence.parity,
         fluctuation: {
             last15Minutes: summarizeFluctuation(evidence.fluctuation?.last15Minutes || {}),
             last60Minutes: summarizeFluctuation(evidence.fluctuation?.last60Minutes || {})
@@ -2841,6 +2873,68 @@ function buildTrackerRegimeEvidence(steps) {
     ];
     const motifs = [[3, 3], [2, 1, 2, 1], [2, 1, 2, 1, 2, 1], [2, 2, 2, 2], [1, 3, 1, 3], [3, 3, 2, 3, 4]];
     const bucket = length => length >= 3 ? '3+' : String(length);
+    const priorRunBucket = length => length >= 4 ? '4+' : '2-3';
+
+    function isolatedMinorityEvidence(sequence, runs) {
+        const overall = { n: 0, returned_to_majority: 0, continued_minority: 0 };
+        const groups = new Map();
+        const recent = [];
+        for (let index = 1; index < runs.length; index++) {
+            const majority = runs[index - 1];
+            const minority = runs[index];
+            if (majority.length < 2) continue;
+            const response = sequence[minority.start + 1];
+            if (response == null) continue;
+            const returned = response === majority.symbol;
+            const key = `${majority.symbol}|${priorRunBucket(majority.length)}`;
+            const group = groups.get(key) || {
+                majority: majority.symbol, prior_run: priorRunBucket(majority.length),
+                n: 0, returned_to_majority: 0, continued_minority: 0
+            };
+            group.n++;
+            overall.n++;
+            if (returned) {
+                group.returned_to_majority++;
+                overall.returned_to_majority++;
+            } else {
+                group.continued_minority++;
+                overall.continued_minority++;
+            }
+            groups.set(key, group);
+            recent.push({ majority: majority.symbol, prior_run: majority.length,
+                minority: minority.symbol, next: response,
+                result: returned ? 'returned_to_majority' : 'continued_minority' });
+        }
+        const latest = runs[runs.length - 1];
+        const previous = runs[runs.length - 2];
+        const current = latest?.length === 1 && previous?.length >= 2
+            ? { majority: previous.symbol, prior_run: previous.length, minority: latest.symbol }
+            : null;
+        const comparable = current
+            ? groups.get(`${current.majority}|${priorRunBucket(current.prior_run)}`) || {
+                majority: current.majority, prior_run: priorRunBucket(current.prior_run),
+                n: 0, returned_to_majority: 0, continued_minority: 0
+            }
+            : null;
+        const tail = runs.slice(-5);
+        const repeatedPattern = tail.length === 5
+            && tail[0].symbol === tail[2].symbol && tail[0].symbol === tail[4].symbol
+            && tail[1].symbol === tail[3].symbol && tail[1].symbol !== tail[0].symbol
+            && tail[0].length >= 2 && tail[1].length === 1 && tail[2].length >= 2
+            && tail[3].length === 1 && tail[4].length >= 2
+            ? {
+                majority: tail[0].symbol,
+                minority: tail[1].symbol,
+                block_lengths: [tail[0].length, tail[2].length, tail[4].length],
+                outliers: 2,
+                comparable: groups.get(`${tail[0].symbol}|${priorRunBucket(tail[4].length)}`) || {
+                    majority: tail[0].symbol, prior_run: priorRunBucket(tail[4].length),
+                    n: 0, returned_to_majority: 0, continued_minority: 0
+                }
+            }
+            : null;
+        return { criterion: 'resultado aislado tras una racha previa >=2; mide el giro inmediatamente posterior', current, overall, comparable, repeatedPattern, recent: recent.slice(-4) };
+    }
 
     return dimensions.map(dimension => {
         const sequence = steps.map(dimension.value);
@@ -2915,7 +3009,8 @@ function buildTrackerRegimeEvidence(steps) {
             key: dimension.key, label: dimension.label,
             currentRun: runs.length ? { state: runs[runs.length - 1].symbol, length: runs[runs.length - 1].length } : null,
             recentRuns: runs.slice(-10).map(run => ({ state: run.symbol, length: run.length })),
-            windows, zigzag, motifs: motifStats, threeRunAfterTurbulence
+            windows, zigzag, motifs: motifStats, threeRunAfterTurbulence,
+            isolatedMinority: isolatedMinorityEvidence(sequence, runs)
         };
     });
 }
@@ -2947,7 +3042,7 @@ function startTrackerAnalystReview(snapshotId, evidence, apiKey, tableId, spinId
                 body: JSON.stringify({
                     model: TRACKER_ANALYST_MODEL,
                     messages: [
-                        { role: 'system', content: 'Eres un analista descriptivo de secuencias de ruleta. No predigas números, no elijas centro, no recomiendes apuestas ni afirmes causalidad. Compara por separado dirección, zona y nivel; resume muestras, dominancias, cambios, motivos de bloques, zigzag y observaciones de rachas de 3 tras turbulencia. Una racha de 3 tras turbulencia es una observación, no confirmes una falsa ruptura. Usa n, resultados posteriores y fluctuación 15/60 min; si la muestra es baja, dilo. Devuelve JSON compacto con: hallazgo (string con conteos concretos), confianza_evidencia (baja|media|alta), limite (string). Si no hay coincidencias suficientes, dilo claramente.' },
+                        { role: 'system', content: 'Eres el analista descriptivo de secuencias para SISTEMA e IA. No predigas centros, no recomiendes apuestas y no afirmes causalidad. Analiza por separado dirección, zona y nivel UNDER/OVER; si dirección está turbulenta, no transfieras esa inestabilidad a zona o nivel: comprueba sus bloques, dominancias y zigzag. Evalúa el patrón de 1 minoría con sus conteos comparables (retorno a mayoría frente a continuación del outlier); trátalo como hipótesis, nunca como regla. Marca como motivo repetido A×2+ → B×1 → A×2+ → B×1 → A×2+ solo si los cinco bloques actuales lo cumplen; informa sus longitudes y evidencia comparable. Resume también los casos 3 tras turbulencia, bloques y cambios de régimen; compara fluctuación 15/60 min para distinguir corrección corta de posible cambio persistente, indicando n. Paridad es contexto auxiliar y 0 queda separado. Devuelve JSON compacto con hallazgo (conteos concretos por eje), confianza_evidencia (baja|media|alta) y limite. Si faltan casos comparables, dilo claramente.' },
                         { role: 'user', content: JSON.stringify(evidence) }
                     ],
                     temperature: 0.1,

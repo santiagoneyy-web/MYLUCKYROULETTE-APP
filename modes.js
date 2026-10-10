@@ -3372,12 +3372,68 @@ function buildTrackerPatternEvidence(spins) {
 
     function runsFor(sequence) {
         const runs = [];
-        for (const symbol of sequence) {
+        for (let index = 0; index < sequence.length; index++) {
+            const symbol = sequence[index];
             const last = runs[runs.length - 1];
             if (last && last.type === symbol) last.len++;
-            else runs.push({ type: symbol, len: 1 });
+            else runs.push({ type: symbol, len: 1, start: index });
         }
         return runs;
+    }
+
+    function isolatedMinorityStats(sequence, runs, labels) {
+        const overall = { n: 0, returned: 0, continued: 0 };
+        const groups = new Map();
+        const recent = [];
+        const runBucket = length => length >= 4 ? '4+' : '2-3';
+        for (let index = 1; index < runs.length; index++) {
+            const majority = runs[index - 1];
+            const minority = runs[index];
+            if (majority.len < 2) continue;
+            const next = sequence[minority.start + 1];
+            if (next === undefined) continue;
+            const returned = next === majority.type;
+            const key = `${majority.type}|${runBucket(majority.len)}`;
+            const group = groups.get(key) || { n: 0, returned: 0, continued: 0 };
+            group.n++;
+            overall.n++;
+            if (returned) { group.returned++; overall.returned++; }
+            else { group.continued++; overall.continued++; }
+            groups.set(key, group);
+            recent.push(`${labels[majority.type] || majority.type}×${majority.len} + ${labels[minority.type] || minority.type}×1 → ${labels[next] || next}`);
+        }
+        const latest = runs[runs.length - 1];
+        const previous = runs[runs.length - 2];
+        const current = latest?.len === 1 && previous?.len >= 2
+            ? { majority: previous.type, priorLen: previous.len, minority: latest.type }
+            : null;
+        const comparable = current
+            ? groups.get(`${current.majority}|${runBucket(current.priorLen)}`) || { n: 0, returned: 0, continued: 0 }
+            : null;
+        const tail = runs.slice(-5);
+        const repeatedPattern = tail.length === 5
+            && tail[0].type === tail[2].type && tail[0].type === tail[4].type
+            && tail[1].type === tail[3].type && tail[1].type !== tail[0].type
+            && tail[0].len >= 2 && tail[1].len === 1 && tail[2].len >= 2
+            && tail[3].len === 1 && tail[4].len >= 2
+            ? {
+                majority: tail[0].type,
+                minority: tail[1].type,
+                blockLengths: [tail[0].len, tail[2].len, tail[4].len],
+                outliers: 2,
+                comparable: groups.get(`${tail[0].type}|${runBucket(tail[4].len)}`) || { n: 0, returned: 0, continued: 0 }
+            }
+            : null;
+        const showCounts = counts => counts
+            ? `n=${counts.n}, regreso_mayoría=${counts.returned}, siguió_outlier=${counts.continued}`
+            : 'sin caso actual';
+        const currentText = current
+            ? `actual=${labels[current.majority] || current.majority}×${current.priorLen} → ${labels[current.minority] || current.minority}×1 pendiente (${showCounts(comparable)})`
+            : 'sin outlier singleton pendiente';
+        const repeatedText = repeatedPattern
+            ? `; motivo repetido actual=${labels[repeatedPattern.majority] || repeatedPattern.majority}×${repeatedPattern.blockLengths[0]} → ${labels[repeatedPattern.minority] || repeatedPattern.minority}×1 → ${labels[repeatedPattern.majority] || repeatedPattern.majority}×${repeatedPattern.blockLengths[1]} → ${labels[repeatedPattern.minority] || repeatedPattern.minority}×1 → ${labels[repeatedPattern.majority] || repeatedPattern.majority}×${repeatedPattern.blockLengths[2]}; outliers=${repeatedPattern.outliers}; comparables (${showCounts(repeatedPattern.comparable)})`
+            : '';
+        return `1-minoría: ${currentText}; histórico ${showCounts(overall)}; recientes ${recent.slice(-3).join(' / ') || 'sin casos'}${repeatedText}`;
     }
 
     function formatMotifStats(runs, motif) {
@@ -3462,13 +3518,28 @@ function buildTrackerPatternEvidence(spins) {
             .filter(stat => !stat.endsWith('n=0, siguiente bloque 1=0, 2=0, 3+=0'));
         const zig = [4, 6].map(width => zigzagStats(sequence, width));
         const motifLine = matchedMotifs.length ? matchedMotifs.join(' ; ') : 'sin coincidencias históricas completas en los patrones consultados';
-        return `${def.key}: racha actual ${def.label[currentRun.type]}×${currentRun.len}; bloques recientes ${latestRuns}; ventanas [${windows}]; ${zig.join(' ; ')}; ${nextSpinStats(sequence, runs)}; patrones con resultado posterior [${motifLine}].`;
+        return `${def.key}: racha actual ${def.label[currentRun.type]}×${currentRun.len}; bloques recientes ${latestRuns}; ventanas [${windows}]; ${zig.join(' ; ')}; ${nextSpinStats(sequence, runs)}; ${isolatedMinorityStats(sequence, runs, def.label)}; patrones con resultado posterior [${motifLine}].`;
     });
+
+    const parity = spins.map(number => Number(number) === 0 ? 'ZERO' : Number(number) % 2 === 0 ? 'EVEN' : 'ODD');
+    const parityWindow = size => {
+        const recent = parity.slice(-size);
+        const even = recent.filter(value => value === 'EVEN').length;
+        const odd = recent.filter(value => value === 'ODD').length;
+        const zero = recent.length - even - odd;
+        let switches = 0;
+        for (let index = 1; index < recent.length; index++) if (recent[index] !== recent[index - 1]) switches++;
+        return `últimos ${recent.length}: par=${even}, impar=${odd}, cero=${zero}, cambios=${switches}`;
+    };
+    const parityRuns = runsFor(parity);
+    const currentParity = parityRuns[parityRuns.length - 1];
+    const parityLine = `PARIDAD auxiliar (0 separado): racha=${currentParity?.type || '--'}×${currentParity?.len || 0}; ${parityWindow(20)}; ${parityWindow(50)}.`;
 
     return [
         `ANÁLISIS DE REGÍMENES Y PATRONES (calculado sobre ${jumps.length} saltos disponibles; cada variable es independiente):`,
         ...summaries,
-        'Interpretación: los conteos n son casos observados y los resultados siguientes cuentan longitudes del bloque posterior; no son garantías. Una racha de 3+ es observación, no ruptura confirmada. Contrasta turbulencia/zigzag reciente, dominancia y secuencias de bloques (incluidos 3-3, 2-1-2-1, 2-2-2-2, 1-3-1-3 y 3-3-2-3-4) antes de valorar un cambio de régimen. Si n es bajo, trátalo como evidencia débil.'
+        parityLine,
+        'Interpretación: los conteos n son observaciones, no garantías. Una racha de 3 tras turbulencia es solo observación. Distingue dirección, zona y nivel; una dirección turbulenta no invalida bloques de zona o dominancias de UNDER/OVER. Una minoría singleton es hipótesis: compara regreso a la mayoría frente a continuación del outlier; n bajo es evidencia débil. La paridad es contexto auxiliar y no determina por sí sola el centro.'
     ].join('\n');
 }
 
@@ -3643,21 +3714,25 @@ APRENDIZAJE PROPIO: trata los resultados etiquetados IA como recompensa de tus p
 Una racha de 3 tras turbulencia es observación, no ruptura confirmada; por sí sola no vence el patrón o dominancia establecidos. No inventes porcentajes. Elige únicamente la etiqueta exacta y el número de una métrica permitida; respeta N4/N9/Both. Devuelve solo, por ejemplo, N4: 17 o N9: 8, sin explicación.`
         : systemPrompt;
     const finalSystemPrompt = aiPrediction
-        ? `Eres el predictor IA independiente de SISTEMA. Usa el historial y las estadísticas incluidas; analiza DIRECCIÓN, ZONA y NIVEL UNDER/OVER como tres variables independientes. No copies la predicción de SISTEMA.
+        ? `Eres el predictor IA independiente de SISTEMA. Usa solo el historial y las evidencias incluidas; analiza DIRECCIÓN, ZONA y NIVEL UNDER/OVER por separado. No copies la predicción de SISTEMA.
 
-DECISIÓN POR CADA EJE:
-1. Identifica su secuencia reciente, bloques, zigzag/turbulencia y dominancia propia. Compara con las ventanas y con los conteos de siguientes giros/bloques similares de EVIDENCIA. Un patrón solo pesa si sus casos observados respaldan qué sigue; n pequeño es evidencia débil.
-2. Si hay un patrón repetido respaldado, fluye con él en ese eje, aunque los otros ejes estén en otro régimen. Si no, sigue una dominancia reciente clara. Si tampoco existe, usa tu mejor estimación con fluctuación reciente e historial propio del mismo modelo y filtro.
-3. Una racha de 3 tras turbulencia es observación, no ruptura confirmada; no abandones un patrón o dominancia por esa racha sola. No fuerces que los tres ejes compartan patrón ni dirección.
-4. Elige por separado DIRECCIÓN, ZONA y NIVEL. Usa la relación matemática solo para comprobar coherencia: OVER=(CW+BIG)||(CCW+SMALL); UNDER=(CW+SMALL)||(CCW+BIG). Para N4, la etiqueta de métrica fija DIRECCIÓN y ZONA; para N9, fija DIRECCIÓN. El centro y la etiqueta deben ser exactamente una pareja permitida.
+DOS LECTURAS:
+- FLUIR: si un patrón recurrente o una dominancia tiene casos comparables y resultados posteriores que respaldan su continuación, sigue ese eje mientras conserve apoyo. No exijas que dirección, zona y nivel compartan régimen.
+- PULSEAR: si dirección está turbulenta o el patrón no es claro, no fuerces una señal direccional. Busca micro-patrones independientes en ZONA y NIVEL (bloques, pares, zigzag y anomalías); compara proporciones recientes con el contexto de 15/60 minutos y con el historial inmediato para distinguir corrección corta de posible cambio persistente. Es una hipótesis observacional de confianza baja/media, no una ruptura confirmada.
 
-Registra una justificación breve y verificable por eje (patrón/dominancia/estimación y n cuando exista). No reveles razonamiento interno paso a paso, no inventes porcentajes y no afirmes que se reentrenaron los pesos. SISTEMA es solo comparación; usa auditorías IA como evidencia secundaria y conserva contraejemplos.`
+REGLAS DE EVIDENCIA:
+- Para “1 minoría”, comprueba los casos comparables: tras una racha previa de al menos 2, el primer resultado opuesto volvió a la mayoría o continuó como outlier. Si observas A×2+ → B×1 → A×2+ → B×1 → A×2+, registra el motivo repetido y sus bloques actuales; favorece el retorno solo si los conteos comparables lo respaldan, nunca por definición.
+- Una racha de 3 tras turbulencia sigue siendo observación. No la conviertas sola en falsa ruptura o cambio de ciclo. Contrasta bloques, zigzag, dominancia, n y resultados siguientes; con pocos casos, reduce confianza.
+- Usa paridad solo como contexto auxiliar cuando esté disponible; 0 es una categoría separada y paridad no determina por sí sola centro N4/N9.
+- Elige los ejes con mejor evidencia y usa la relación matemática solo para comprobar coherencia: OVER=(CW+BIG)||(CCW+SMALL); UNDER=(CW+SMALL)||(CCW+BIG). En N4 la etiqueta fija DIRECCIÓN+ZONA; en N9 fija DIRECCIÓN. Centro y etiqueta deben ser una pareja permitida.
+
+Registra una base breve y verificable por eje con n cuando exista. SISTEMA es comparación; las recompensas IA del mismo modelo/filtro y Qwen son evidencia, no órdenes. Conserva contraejemplos, no inventes porcentajes ni afirmes que se reentrenaron los pesos. No reveles razonamiento interno paso a paso.`
         : legacyFinalSystemPrompt;
     const predictionRequest = aiPrediction
         ? `Analiza DIRECCIÓN, ZONA y NIVEL por separado. Escoge una pareja exacta etiqueta/número de la lista de candidatos y responde exactamente con estas 3 líneas:
 N4: 17 (o N9: 17 si corresponde al filtro; reemplaza el número de ejemplo)
 METRICA: <etiqueta exacta>
-EJES: DIR=<CW|CCW> (<base breve>; n=<muestra o ?>); ZONA=<BIG|SMALL> (<base breve>; n=<muestra o ?>); NIVEL=<OVER|UNDER> (<base breve>; n=<muestra o ?>)
+EJES: DIR=<CW|CCW> (<base breve>; n=<muestra o ?>); ZONA=<BIG|SMALL> (<base breve>; n=<muestra o ?>); NIVEL=<OVER|UNDER> (<base breve>; n=<muestra o ?>); MODO=<FLUIR|PULSEAR>
 Usa una sola etiqueta N4 o N9 en la primera línea, según el filtro activo. El centro y METRICA deben coincidir exactamente con una opción permitida. Reemplaza todos los ejemplos y marcadores; nada de texto adicional.`
         : 'Proyecta UN target específico con su número. Justifica en una oración.';
     if (userMessage) {
