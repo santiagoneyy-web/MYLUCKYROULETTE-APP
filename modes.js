@@ -681,8 +681,8 @@ function trackerBankSoftStake(baseStake, round, session = null) {
     return Number((Number(baseStake) * trackerBankSoftRange(round).multiplier * 4 ** hits).toFixed(2));
 }
 
-function trackerBankPredictionNumbers() {
-    const center = trackerBankPredictionCenter(trackerBankView);
+function trackerBankPredictionNumbers(predictor = trackerBankView) {
+    const center = trackerBankPredictionCenter(predictor);
     if (center === null || typeof wheelNeighbors !== 'function') return [];
     const numbers = wheelNeighbors(center, 4).map(Number);
     return numbers.length === 9 && new Set(numbers).size === 9 ? numbers : [];
@@ -1112,9 +1112,11 @@ function renderTrackerBankroll() {
     const payoutMultiplier = 4;
     const grossReturn = Number((stake * payoutMultiplier).toFixed(2));
     const possibleProfit = Number(((isDirectionZone ? cyclePayout : 0) + stake * payoutMultiplier - cycle - stake).toFixed(2));
-    const pred = trackerBankPredictionNumbers();
     const predictor = active ? trackerBankSessionPredictor(session) : trackerBankView;
-    const waitingForPattern = active && predictor === 'system_pattern' && pred.length !== 9;
+    const predictionCenter = trackerBankPredictionCenter(predictor);
+    const pred = trackerBankPredictionNumbers(predictor);
+    const hasPrediction = Number.isInteger(Number(predictionCenter)) && pred.length === 9;
+    const waitingForPattern = active && predictor === 'system_pattern' && !hasPrediction;
     const strategyMetric = isDirectionZone ? trackerLastDirectionZoneMetric() : null;
     const strategyStreak = active && isDirectionZone
         ? `${Number(session.strategy_streak_hits || 0)} / ${isSoftMode ? 2 : 3}${session.strategy_streak_metric ? ` · ${session.strategy_streak_metric}` : ''}`
@@ -1142,7 +1144,7 @@ function renderTrackerBankroll() {
     }
     set('tracker-bank-round', isDirectionZone && session
         ? `${displayedDirectionRound}/${maxRounds} · base ${trackerBankMoney(chip * directionRange.multiplier)}`
-        : active ? (waitingForPattern ? 'Esperando señal' : String(round)) : '--');
+        : active ? (waitingForPattern ? '--' : String(round)) : '--');
     set('tracker-bank-stake', active && !waitingForPattern ? trackerBankMoney(stake) : '--');
     set('tracker-bank-cycle', active && !waitingForPattern ? trackerBankMoney(roundTotal) : '--');
     set('tracker-bank-gross-return', active && !waitingForPattern ? trackerBankMoney(grossReturn) : '--');
@@ -1151,7 +1153,7 @@ function renderTrackerBankroll() {
         ? pred.length ? trackerBankIsDirectionZone(predictor)
             ? `${strategyMetric?.number} · ${pred.join(', ')}`
             : `N4: ${pred.join(', ')}`
-            : predictor === 'system_pattern' ? 'ANALIZANDO ?' : trackerBankIsDirectionZone(predictor) ? 'Esperando giro anterior' : '--'
+            : '--'
         : '--');
     set('tracker-bank-strategy-streak', strategyStreak);
     const cycleLabel = document.querySelector('#tracker-bank-cycle')?.previousElementSibling;
@@ -1184,8 +1186,8 @@ function renderTrackerBankroll() {
     if (finish) finish.style.display = active ? 'block' : 'none';
     const inline = document.getElementById('tracker-bank-inline');
     if (inline) {
-        const center = trackerBankPredictionCenter(trackerBankView);
-        const hasCenter = center !== null && Number.isInteger(Number(center));
+        const center = trackerBankPredictionCenter(predictor);
+        const hasCenter = Number.isInteger(Number(center)) && pred.length === 9;
         inline.textContent = active && trackerSource === 'live' && hasCenter
             ? trackerBankMoney(stake)
             : '--';
@@ -1704,7 +1706,8 @@ function flushTrackerBankQueue() {
                 if (data.session) trackerBankSessions = trackerBankMergeSessions(trackerBankSessions, [data.session]);
                 if (String(trackerBankSelectedSession()?._id || '') === String(spin.sessionId)) {
                     renderTrackerBankroll();
-                    trackerBankSetMessage(data.stopped
+                    const skippedPredictor = trackerBankSessionPredictor(data.session || trackerBankSelectedSession());
+                    trackerBankSetMessage(skippedPredictor === 'system_pattern' ? '' : data.stopped
                         ? 'Sesión ya cerrada; la ronda sin señal no se apostó.'
                         : `Ronda ${spin.spinId} sin señal del predictor. No se apostó ni avanzó la progresión.`);
                 }
@@ -2525,10 +2528,14 @@ function ordinalSuffix(n) {
 function renderTrackerPredictionDisplay() {
     const predEl = document.getElementById('tracker-prediction');
     if (!predEl) return;
-    const selectedDirectionZone = trackerBankIsDirectionZone(trackerBankView) && trackerBankActiveSession(trackerBankView);
-    const predictor = selectedDirectionZone ? trackerBankView : trackerPredictionSource;
+    const selectedSession = trackerBankActiveSession(trackerBankView);
+    const predictor = selectedSession ? trackerBankSessionPredictor(selectedSession) : trackerPredictionSource;
     const center = trackerBankPredictionCenter(predictor);
-    if (selectedDirectionZone) {
+    if (predictor === 'system_pattern') {
+        predEl.innerText = center !== null ? String(center) : '--';
+        return;
+    }
+    if (trackerBankIsDirectionZone(predictor)) {
         predEl.innerText = center !== null ? String(center) : '?';
         return;
     }
@@ -2550,7 +2557,9 @@ function renderTracker() {
     const placedBadge = document.getElementById('tracker-placed-badge');
     if (statusText) statusText.innerText = trackerHistory.length > 2 ? 'Active' : 'Waiting';
     if (placedBadge) {
-        const hasPlacedPrediction = trackerBankPredictionCenter() !== null;
+        const selectedSession = trackerBankActiveSession(trackerBankView);
+        const displayPredictor = selectedSession ? trackerBankSessionPredictor(selectedSession) : trackerPredictionSource;
+        const hasPlacedPrediction = trackerBankPredictionCenter(displayPredictor) !== null;
         if (trackerAutoBet && hasPlacedPrediction) { placedBadge.innerText = 'Placed'; placedBadge.className = 'tracker-status-badge status-placed'; }
         else { placedBadge.innerText = 'Waiting'; placedBadge.className = 'tracker-status-badge status-wait'; }
     }
