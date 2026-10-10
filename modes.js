@@ -857,6 +857,7 @@ function trackerSystemAxisChoice(travels, kind, fallbackValue, requireClearPatte
             value: symbolValues[currentStreak.type],
             basis: 'dominance',
             pattern: null,
+            run_length: currentStreak.len,
             confidence: Math.min(90, 65 + (currentStreak.len - 4) * 5)
         };
     }
@@ -934,16 +935,25 @@ function trackerSystemPatternPredictionMetric() {
     const { guidance, directionIsClear, zoneIsClear, levelIsClear } = trackerSystemResolvedAxisGuidance();
     const direction = guidance.direction.value;
     const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
+    const axes = [guidance.direction, guidance.zone, guidance.level];
+    const structuralPatternFound = axes.some(axis => axis?.basis === 'pattern');
+    const dominantAxes = axes.filter(axis => axis?.basis === 'dominance');
+    // Una racha aislada de 4 no basta para convertir una fluctuación en apuesta.
+    // Una estructura detectada sí basta; dominancias simples necesitan coincidir
+    // en dos ejes para confirmar que el comportamiento no es solo una racha local.
+    const corroboratedDominance = dominantAxes.length >= 2;
+    if (!structuralPatternFound && !corroboratedDominance) return null;
     let selected;
     if (trackerConfig.prediction === 'n4') {
-        // El modo de patrón puede actuar si al menos uno de los ejes aporta
-        // una señal accionable; los otros valores completan la métrica N4.
-        if (!directionIsClear && !zoneIsClear && !levelIsClear) return null;
+        // Un patrón estructurado en cualquiera de los ejes puede decidir N4;
+        // dominancias sin patrón requieren confirmación de un segundo eje.
         const label = `${direction}_N4${trackerSystemN4MetricZone(guidance)}`;
         selected = metrics.find(metric => metric.label === label);
     } else {
         // N9 is SISTEMA's native center; Both allows it while IA can choose any family.
-        if (!directionIsClear && !(zoneIsClear && levelIsClear)) return null;
+        const directionHasPattern = guidance.direction?.basis === 'pattern';
+        const directionHasCorroboration = directionIsClear && (zoneIsClear || levelIsClear);
+        if (!directionHasPattern && !directionHasCorroboration && !(zoneIsClear && levelIsClear)) return null;
         selected = metrics.find(metric => metric.label === `${direction}_N9`);
     }
     return selected || null;
