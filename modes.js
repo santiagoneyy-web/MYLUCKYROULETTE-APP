@@ -794,10 +794,19 @@ function trackerSystemAxisChoice(travels, kind, fallbackValue, requireClearPatte
     const hasNextState = pattern?.next_state && Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state);
     const hasEnoughPatternHistory = recentTravels.length >= 3;
     const isClearPattern = hasEnoughPatternHistory && actionablePatternActions.has(pattern?.action) && patternConfidence >= 68;
-    if (requireClearPattern && pattern?.action === 'OBSERVE') {
-        const pulseNextState = pattern.next_state && Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state)
-            ? symbolValues[pattern.next_state]
-            : null;
+    if (requireClearPattern && pattern?.type === 'zigzag_pulse' && pattern.next_state &&
+        Object.prototype.hasOwnProperty.call(symbolValues, pattern.next_state)) {
+        return {
+            value: symbolValues[pattern.next_state],
+            basis: 'observation',
+            pattern: pattern.name,
+            pattern_type: pattern.type,
+            pattern_action: 'OBSERVE',
+            pulse_next_state: symbolValues[pattern.next_state],
+            confidence: patternConfidence
+        };
+    }
+    if (requireClearPattern && pattern?.action === 'OBSERVE' && pattern?.type === 'streak_observation' && Number(pattern.run_length) === 3) {
         const observedState = pattern.current_state && Object.prototype.hasOwnProperty.call(symbolValues, pattern.current_state)
             ? symbolValues[pattern.current_state]
             : null;
@@ -805,12 +814,11 @@ function trackerSystemAxisChoice(travels, kind, fallbackValue, requireClearPatte
             value: fallbackValue,
             basis: 'observation',
             pattern: pattern.name,
-            pattern_type: pattern.type || null,
+            pattern_type: pattern.type,
             pattern_action: 'OBSERVE',
             observation_state: observedState,
-            pulse_next_state: pulseNextState,
             run_length: pattern.run_length || null,
-            confidence: patternConfidence || 55
+            confidence: 55
         };
     }
     if (hasNextState && (!requireClearPattern || isClearPattern)) {
@@ -856,24 +864,11 @@ function trackerSystemAxisChoice(travels, kind, fallbackValue, requireClearPatte
     return { value: fallbackValue, basis: 'prediction', pattern: null, confidence: 50 };
 }
 
-function trackerSystemCurrentAxisRun(travels, kind) {
-    const symbolFor = distance => kind === 'dir'
-        ? (distance >= 0 ? 'R' : 'L')
-        : kind === 'zone'
-            ? (Math.abs(distance) >= 10 ? 'B' : 'S')
-            : (((distance >= 0 && Math.abs(distance) >= 10) || (distance < 0 && Math.abs(distance) < 10)) ? 'O' : 'U');
-    const values = { dir: { R: 'CW', L: 'CCW' }, zone: { B: 'BIG', S: 'SMALL' }, nivel: { O: 'OVER', U: 'UNDER' } };
-    const recent = travels.slice(-30).map(symbolFor);
-    const symbol = recent[recent.length - 1];
-    if (!symbol) return null;
-    let runLength = 1;
-    for (let index = recent.length - 2; index >= 0 && recent[index] === symbol; index--) runLength++;
-    return { symbol, value: values[kind][symbol], run_length: runLength };
-}
-
 function trackerSystemAxisGuidance(requireClearPattern = false) {
     const travels = [];
-    for (let i = 1; i < trackerHistory.length; i++) travels.push(calcDist(trackerHistory[i - 1], trackerHistory[i]));
+    for (let i = 1; i < trackerHistory.length; i++) {
+        travels.push(calcDist(trackerHistory[i - 1], trackerHistory[i]));
+    }
     const fallbackDirection = trackerLastSignal?.mainDir ||
         (trackerLastSignal?.confidenceCW >= trackerLastSignal?.confidenceCCW ? 'CW' : 'CCW');
     const recentSpins = trackerHistory.slice(-21);
@@ -882,85 +877,10 @@ function trackerSystemAxisGuidance(requireClearPattern = false) {
     const fallbackZone = bigCount <= recentJumps.length / 2 ? 'SMALL' : 'BIG';
     const fallbackLevel = ((fallbackDirection === 'CW' && fallbackZone === 'BIG') ||
         (fallbackDirection === 'CCW' && fallbackZone === 'SMALL')) ? 'OVER' : 'UNDER';
-    const guidance = {
+    return {
         direction: trackerSystemAxisChoice(travels, 'dir', fallbackDirection, requireClearPattern),
         zone: trackerSystemAxisChoice(travels, 'zone', fallbackZone, requireClearPattern),
         level: trackerSystemAxisChoice(travels, 'nivel', fallbackLevel, requireClearPattern)
-    };
-    const zoneRun = trackerSystemCurrentAxisRun(travels, 'zone');
-    if (zoneRun) {
-        guidance.zone.stable_run_length = zoneRun.run_length;
-        if (zoneRun.run_length >= 2) {
-            guidance.zone = {
-                ...guidance.zone,
-                value: zoneRun.value,
-                basis: requireClearPattern ? 'observation' : 'dominance',
-                pattern: `BLOQUE ZONA ${zoneRun.value} x${zoneRun.run_length}`,
-                pattern_type: 'stable_zone_block',
-                pattern_action: requireClearPattern ? 'OBSERVE' : 'FOLLOW_STREAK',
-                observation_state: requireClearPattern ? zoneRun.value : null,
-                run_length: zoneRun.run_length,
-                stable_run_length: zoneRun.run_length,
-                confidence: Math.min(90, 68 + (zoneRun.run_length - 2) * 5)
-            };
-        }
-    }
-
-    const pairBlock = trackerSystemDirectionZoneBlock();
-    if (pairBlock) {
-        const isObservation = requireClearPattern;
-        const basis = isObservation ? 'observation' : 'pattern';
-        const action = isObservation ? 'OBSERVE' : 'PULSE_BLOCK';
-        const blockAxis = {
-            basis,
-            pattern: pairBlock.pattern,
-            pattern_type: 'direction_zone_block',
-            pattern_action: action,
-            observation_state: isObservation ? pairBlock.direction : null,
-            run_length: pairBlock.run_length,
-            stable_run_length: pairBlock.run_length,
-            confidence: pairBlock.confidence
-        };
-        guidance.direction = { ...blockAxis, value: pairBlock.direction };
-        guidance.zone = { ...blockAxis, value: pairBlock.zone };
-        guidance.level = {
-            ...blockAxis,
-            value: (pairBlock.direction === 'CW') === (pairBlock.zone === 'BIG') ? 'OVER' : 'UNDER',
-            pattern: `${pairBlock.pattern} → nivel coherente`
-        };
-    }
-    return guidance;
-}
-
-function trackerSystemDirectionZoneBlock() {
-    if (trackerHistory.length < 3) return null;
-    const pairs = [];
-    for (let index = 1; index < trackerHistory.length; index++) {
-        const distance = calcDist(trackerHistory[index - 1], trackerHistory[index]);
-        if (!Number.isFinite(distance) || distance === 0) {
-            pairs.push(null);
-            continue;
-        }
-        pairs.push({
-            direction: distance > 0 ? 'CW' : 'CCW',
-            zone: Math.abs(distance) >= 10 ? 'BIG' : 'SMALL'
-        });
-    }
-
-    const latest = pairs[pairs.length - 1];
-    if (!latest) return null;
-    let runLength = 1;
-    for (let index = pairs.length - 2; index >= 0; index--) {
-        const pair = pairs[index];
-        if (!pair || pair.direction !== latest.direction || pair.zone !== latest.zone) break;
-        runLength++;
-    }
-    if (runLength < 2) return null;
-    return {
-        ...latest,
-        run_length: runLength,
-        confidence: Math.min(90, 70 + (runLength - 2) * 5),
-        pattern: `BLOQUE ${latest.direction} + ${latest.zone} x${runLength}`
     };
 }
 
@@ -969,8 +889,9 @@ function trackerSystemN4MetricZone(guidance) {
     const levelMetric = guidance.direction.value === 'CW'
         ? (guidance.level.value === 'UNDER' ? 'S' : 'B')
         : (guidance.level.value === 'OVER' ? 'S' : 'B');
-    const zonePriority = trackerSystemAxisEvidenceRank(guidance.zone);
-    const levelPriority = trackerSystemAxisEvidenceRank(guidance.level);
+    const priority = { prediction: 1, dominance: 2, pattern: 3 };
+    const zonePriority = priority[guidance.zone.basis] || 0;
+    const levelPriority = priority[guidance.level.basis] || 0;
 
     if (zonePriority !== levelPriority) return zonePriority > levelPriority ? zoneMetric : levelMetric;
     if (zoneMetric === levelMetric) return zoneMetric;
@@ -985,72 +906,33 @@ function trackerSystemAxisHasClearSignal(axis) {
     return Boolean(axis && ['pattern', 'dominance'].includes(axis.basis) && axis.value);
 }
 
-function trackerSystemAxisEvidenceRank(axis) {
-    const rank = { prediction: 1, observation: 2, derived: 3, dominance: 3, pattern: 4 };
-    if (axis?.basis === 'observation' && axis.pattern_type &&
-        !['streak_observation', 'streak_candidate'].includes(axis.pattern_type)) return 3;
-    return rank[axis?.basis] || 0;
-}
-
 function trackerSystemDeriveDirectionFromZoneLevel(zone, level) {
     if (!zone || !level) return null;
     return (zone.value === 'BIG') === (level.value === 'OVER') ? 'CW' : 'CCW';
 }
 
-function trackerSystemDeriveAxisValue(axisName, guidance) {
-    const { direction, zone, level } = guidance;
-    if (axisName === 'direction') return trackerSystemDeriveDirectionFromZoneLevel(zone, level);
-    if (axisName === 'zone') {
-        return (direction.value === 'CW') === (level.value === 'OVER') ? 'BIG' : 'SMALL';
+function trackerSystemResolvedAxisGuidance() {
+    const guidance = trackerSystemAxisGuidance(true);
+    const directionIsClear = trackerSystemAxisHasClearSignal(guidance.direction);
+    const zoneIsClear = trackerSystemAxisHasClearSignal(guidance.zone);
+    const levelIsClear = trackerSystemAxisHasClearSignal(guidance.level);
+    const derivedDirection = !directionIsClear && zoneIsClear && levelIsClear
+        ? trackerSystemDeriveDirectionFromZoneLevel(guidance.zone, guidance.level)
+        : null;
+    if (derivedDirection) {
+        guidance.direction = {
+            value: derivedDirection,
+            basis: 'derived',
+            pattern: `${guidance.zone.pattern || 'zona'} + ${guidance.level.pattern || 'nivel'}`,
+            confidence: Math.min(guidance.zone.confidence, guidance.level.confidence)
+        };
     }
-    return (direction.value === 'CW') === (zone.value === 'BIG') ? 'OVER' : 'UNDER';
-}
-
-function trackerSystemResolvedAxisGuidance(patternOnly = true) {
-    const guidance = trackerSystemAxisGuidance(patternOnly);
-    const names = ['direction', 'zone', 'level'];
-    const ordered = names.map(name => ({
-        name,
-        axis: guidance[name],
-        rank: trackerSystemAxisEvidenceRank(guidance[name]),
-        confidence: Number(guidance[name]?.confidence) || 0
-    })).sort((left, right) => right.rank - left.rank || right.confidence - left.confidence);
-    const primary = ordered.slice(0, 2);
-    const secondary = ordered[2];
-    let secondaryAxis = null;
-    if (primary.every(item => item.rank >= 2) && secondary.rank < primary[1].rank) {
-        const derivedValue = trackerSystemDeriveAxisValue(secondary.name, guidance);
-        if (derivedValue) {
-            const confirmedPattern = primary.some(item => item.axis?.basis === 'pattern');
-            const derivedBasis = patternOnly ? (confirmedPattern ? 'pattern' : 'observation') : 'derived';
-            guidance[secondary.name] = {
-                ...guidance[secondary.name],
-                value: derivedValue,
-                basis: derivedBasis,
-                pattern: `${primary[0].axis.pattern || primary[0].name} + ${primary[1].axis.pattern || primary[1].name}`,
-                pattern_type: 'derived_axis_hierarchy',
-                pattern_action: derivedBasis === 'observation' ? 'OBSERVE' : 'DERIVE_FROM_EVIDENCE',
-                observation_state: derivedBasis === 'observation' ? derivedValue : null,
-                confidence: Math.min(primary[0].confidence || 50, primary[1].confidence || 50)
-            };
-            secondaryAxis = secondary.name;
-        }
-    }
-    return {
-        guidance,
-        directionIsClear: trackerSystemAxisHasClearSignal(guidance.direction),
-        zoneIsClear: trackerSystemAxisHasClearSignal(guidance.zone),
-        levelIsClear: trackerSystemAxisHasClearSignal(guidance.level),
-        zoneIsStable: Number(guidance.zone.stable_run_length || 0) >= 2 ||
-            ['stable_zone_block', 'blocks_2_2_pulse', 'blocks_2_2', 'direction_zone_block'].includes(guidance.zone.pattern_type),
-        primaryAxes: primary.filter(item => item.rank >= 2).map(item => item.name),
-        secondaryAxis
-    };
+    return { guidance, directionIsClear, zoneIsClear, levelIsClear };
 }
 
 function trackerSystemPatternPredictionMetric() {
     if (!trackerLastSignal) return null;
-    const { guidance, directionIsClear, zoneIsClear, levelIsClear, zoneIsStable } = trackerSystemResolvedAxisGuidance(true);
+    const { guidance, directionIsClear, zoneIsClear, levelIsClear } = trackerSystemResolvedAxisGuidance();
     const direction = guidance.direction.value;
     const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
     const axes = [guidance.direction, guidance.zone, guidance.level];
@@ -1061,8 +943,6 @@ function trackerSystemPatternPredictionMetric() {
     // en dos ejes para confirmar que el comportamiento no es solo una racha local.
     const corroboratedDominance = dominantAxes.length >= 2;
     if (!structuralPatternFound && !corroboratedDominance) return null;
-    const levelRunPatternTypes = new Set(['run_1_2_pulse', 'blocks_2_2_pulse', 'alt_1_2', 'blocks_2_2']);
-    if (levelRunPatternTypes.has(guidance.level?.pattern_type) && !zoneIsStable) return null;
     let selected;
     if (trackerConfig.prediction === 'n4') {
         // Un patrón estructurado en cualquiera de los ejes puede decidir N4;
@@ -1091,7 +971,7 @@ function trackerSystemPatternPredictionCenter() {
 
 function trackerSystemPredictionMetric() {
     if (!trackerLastSignal) return null;
-    const guidance = trackerSystemResolvedAxisGuidance(false).guidance;
+    const guidance = trackerSystemAxisGuidance();
     const direction = guidance.direction.value;
     const metrics = trackerPredictionMetricCandidates(trackerConfig.prediction);
     const label = trackerConfig.prediction === 'n4'
@@ -1102,8 +982,9 @@ function trackerSystemPredictionMetric() {
 
 function trackerSystemReasoningSnapshot(patternOnly = false) {
     if (!trackerLastSignal) return null;
-    const resolvedGuidance = trackerSystemResolvedAxisGuidance(patternOnly);
-    const axisGuidance = resolvedGuidance.guidance;
+    const axisGuidance = patternOnly
+        ? trackerSystemResolvedAxisGuidance().guidance
+        : trackerSystemAxisGuidance();
     const direction = axisGuidance.direction.value;
     const center = patternOnly ? trackerSystemPatternPredictionCenter() : trackerSystemPredictionCenter();
     const metric = patternOnly ? trackerSystemPatternPredictionMetric() : trackerSystemPredictionMetric();
@@ -1116,16 +997,12 @@ function trackerSystemReasoningSnapshot(patternOnly = false) {
         direction,
         direction_basis: axisGuidance.direction.basis,
         direction_pattern: axisGuidance.direction.pattern || null,
-        direction_run_length: axisGuidance.direction.run_length || null,
         zone_projection: axisGuidance.zone.value,
         zone_basis: axisGuidance.zone.basis,
         zone_pattern: axisGuidance.zone.pattern || null,
-        zone_run_length: axisGuidance.zone.run_length || null,
         level_projection: axisGuidance.level.value,
         level_basis: axisGuidance.level.basis,
         level_pattern: axisGuidance.level.pattern || null,
-        primary_axes: resolvedGuidance.primaryAxes,
-        secondary_axis: resolvedGuidance.secondaryAxis,
         pulse_observations: patternOnly ? Object.fromEntries(
             Object.entries(axisGuidance)
                 .filter(([, axis]) => axis.pulse_next_state || axis.observation_state)
@@ -3139,7 +3016,7 @@ function trackerPatternExpectedSymbol(streaks, motif, currentSymbol, currentStre
     if (!streaks.length || !motif.length) return null;
     const runLengths = streaks.map(streak => streak.len);
     let bestMatch = 0;
-    let expectedCurrentRunLength = motif[0];
+    let nextRunLength = motif[0];
     const maxMatch = Math.min(runLengths.length, motif.length);
     for (let offset = 0; offset < motif.length; offset++) {
         for (let matchLength = maxMatch; matchLength > bestMatch; matchLength--) {
@@ -3147,7 +3024,7 @@ function trackerPatternExpectedSymbol(streaks, motif, currentSymbol, currentStre
             const matches = suffix.every((length, index) => length === motif[(offset + index) % motif.length]);
             if (matches) {
                 bestMatch = matchLength;
-                expectedCurrentRunLength = motif[(offset + matchLength - 1) % motif.length];
+                nextRunLength = motif[(offset + matchLength) % motif.length];
                 break;
             }
         }
@@ -3155,7 +3032,7 @@ function trackerPatternExpectedSymbol(streaks, motif, currentSymbol, currentStre
     const opposite = currentSymbol === 'R' ? 'L' : currentSymbol === 'L' ? 'R'
         : currentSymbol === 'B' ? 'S' : currentSymbol === 'S' ? 'B'
             : currentSymbol === 'O' ? 'U' : 'O';
-    return currentStreak < expectedCurrentRunLength ? currentSymbol : opposite;
+    return currentStreak < nextRunLength ? currentSymbol : opposite;
 }
 
 function detectTrackerTurbulence(travels, kind = 'dir', allowActionablePatternOverStreakObservation = false) {
@@ -3211,8 +3088,6 @@ function detectTrackerTurbulence(travels, kind = 'dir', allowActionablePatternOv
     const runLens = streaks.slice(-6).map(s => s.len);
     const runSeq = runLens.join('');
     const label = kind === 'dir' ? 'dir' : kind === 'nivel' ? 'nivel' : 'zona';
-    const oneTwoAlternation = runSeq.endsWith('1212') || runSeq.endsWith('2121') ||
-        /(12){3,}$/.test(runSeq) || /(21){3,}$/.test(runSeq);
 
     // Una racha de 3 no confirma por sí sola un cambio de régimen. En el
     // selector de SISTEMA se comprueban primero los motivos repetidos claros;
@@ -3221,39 +3096,6 @@ function detectTrackerTurbulence(travels, kind = 'dir', allowActionablePatternOv
         ? { name: `RACHA EN OBSERVACIÓN ${label.toUpperCase()}`, type: 'streak_observation', desc: `${currentStreak} ${streakType} seguidos: posible falsa ruptura; revisar el régimen`, action: 'OBSERVE', next: 'no confirmar ruptura por esta racha sola', current_state: streakType, run_length: currentStreak, confidence: 55 }
         : null;
     if (streakObservation && !allowActionablePatternOverStreakObservation) return streakObservation;
-
-    // En UNDER/OVER, una secuencia parcial de bloques 1-2 es un tanteo temprano:
-    // SISTEMA TODAS la puede pulsear; SISTEMA PATRÓN la conserva como observación.
-    if (!oneTwoAlternation && kind === 'nivel' && (runSeq.endsWith('121') || runSeq.endsWith('212'))) {
-        const nextState = trackerPatternExpectedSymbol(streaks, [1, 2], streakType, currentStreak);
-        return {
-            name: `PULSO BLOQUES 1-2 ${label.toUpperCase()}`,
-            type: 'run_1_2_pulse',
-            desc: `bloques ${runSeq.slice(-5)}: posible continuación 1-2; tanteo hacia ${nextState}`,
-            action: 'OBSERVE',
-            next: 'seguir como tanteo; confirmar si se completa 1-2',
-            next_state: nextState,
-            confidence: 58
-        };
-    }
-    if (['nivel', 'zone'].includes(kind) && (runSeq.endsWith('221') || (runSeq.endsWith('22') && !runSeq.endsWith('222')))) {
-        const nextState = trackerPatternExpectedSymbol(streaks, [2, 2], streakType, currentStreak);
-        return {
-            name: `PULSO BLOQUES 2-2 ${label.toUpperCase()}`,
-            type: 'blocks_2_2_pulse',
-            desc: `bloques de longitud 2 en ${label.toUpperCase()}; posible repetición hacia ${nextState}`,
-            action: 'OBSERVE',
-            next: 'seguir como tanteo; validar estabilidad del eje',
-            next_state: nextState,
-            confidence: 58
-        };
-    }
-
-    // Confirmar el ciclo completo antes del detector genérico de bloques: un
-    // 1-2-1-2-1 ya no es solo un pulso parcial, es la repetición del motivo.
-    if (oneTwoAlternation) {
-        return { name: `ALT 1-2 ${label.toUpperCase()}`, type: 'alt_1_2', desc: 'Bloques alternos de 1 y 2; el eje activo sigue la fase observada', action: 'ALTERNATE', next: 'continuar la alternancia mientras se sostenga', next_state: trackerPatternExpectedSymbol(streaks, [1, 2], streakType, currentStreak), confidence: 70 };
-    }
 
     // --- BLOQUES DE TAMANO VARIABLE (2-5, 3-1, 4-2, etc.) ---
     // Razonamiento: los bloques alternan tipos. Si el bloque actual es MAS CORTO
@@ -3294,6 +3136,9 @@ function detectTrackerTurbulence(travels, kind = 'dir', allowActionablePatternOv
     }
 
     // --- PATRONES DE RODILLO / TURBULENCIA ---
+    if (runSeq.endsWith('1212') || runSeq.endsWith('2121') || /(12){3,}$/.test(runSeq) || /(21){3,}$/.test(runSeq)) {
+        return { name: `ALT 1-2 ${label.toUpperCase()}`, type: 'alt_1_2', desc: 'Rebote alternado 1-2', action: 'ALTERNATE', next: 'alternar al lado opuesto', next_state: trackerPatternExpectedSymbol(streaks, [1, 2], streakType, currentStreak), confidence: 70 };
+    }
     if (runSeq.endsWith('112112') || runSeq.endsWith('221221') || /(112){2,}$/.test(runSeq) || /(221){2,}$/.test(runSeq)) {
         const pairRunPattern = runSeq.endsWith('221221') || /(221){2,}$/.test(runSeq) ? [2, 2, 1] : [1, 1, 2];
         return { name: `PAIRS-1+2 ${label.toUpperCase()}`, type: 'pairs_1_2', desc: 'Pares 1 con singleton 2', action: 'EXPECT_PAIR', next: 'par 1 + singleton 2', next_state: trackerPatternExpectedSymbol(streaks, pairRunPattern, streakType, currentStreak), confidence: 68 };
